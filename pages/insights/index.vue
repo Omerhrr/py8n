@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import {
   BarChart3, RefreshCw, Play, Globe, CalendarClock, ShieldAlert,
-  Hourglass, Ban, CheckCircle2, XCircle, Timer, Workflow, Cpu, Loader2,
+  Hourglass, Ban, CheckCircle2, XCircle, Timer, Workflow, Cpu, Loader2, DatabaseBackup,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 import type { InsightsPayload } from '~/types/node'
@@ -29,6 +29,7 @@ function setDays(d: 7 | 14 | 30) {
 
 onMounted(() => {
   loadAll()
+  loadRetention()
   timer = setInterval(loadAll, 60_000) // silent refresh
 })
 onBeforeUnmount(() => {
@@ -65,6 +66,54 @@ function segments(b: InsightsPayload['timeline'][number]): Segment[] {
 function dayLabel(date: string) {
   const [, m, d] = date.split('-')
   return `${Number(m)}/${Number(d)}`
+}
+
+// ---- v19: execution data retention -----------------------------------------
+const retention = ref<{ retention_days: number; max_executions_per_workflow: number; last_purge_at: string | null; last_purge_deleted: number } | null>(null)
+const savingRetention = ref(false)
+const purging = ref(false)
+const retentionMsg = ref('')
+
+async function loadRetention() {
+  try {
+    retention.value = await api.get('/settings/retention')
+  } catch {
+    /* settings panel is optional */
+  }
+}
+
+async function saveRetention() {
+  if (!retention.value) return
+  savingRetention.value = true
+  retentionMsg.value = ''
+  try {
+    retention.value = await api.put('/settings/retention', {
+      retention_days: retention.value.retention_days,
+      max_executions_per_workflow: retention.value.max_executions_per_workflow,
+    })
+    retentionMsg.value = 'Policy saved'
+    setTimeout(() => (retentionMsg.value = ''), 2500)
+  } catch (e: any) {
+    retentionMsg.value = e?.data?.detail || 'Save failed'
+  } finally {
+    savingRetention.value = false
+  }
+}
+
+async function purgeNow() {
+  purging.value = true
+  retentionMsg.value = ''
+  try {
+    const res = await api.post<{ deleted_by_age: number; deleted_by_volume: number }>('/settings/retention/purge', {})
+    retentionMsg.value = `Purged ${res.deleted_by_age + res.deleted_by_volume} execution record${res.deleted_by_age + res.deleted_by_volume === 1 ? '' : 's'}`
+    await loadRetention()
+    loadAll()
+    setTimeout(() => (retentionMsg.value = ''), 3500)
+  } catch (e: any) {
+    retentionMsg.value = e?.data?.detail || 'Purge failed'
+  } finally {
+    purging.value = false
+  }
 }
 
 const gridLines = computed(() => {
@@ -347,6 +396,68 @@ function prettyType(t: string) {
                 </tr>
               </tbody>
             </table>
+          </div>
+        </section>
+
+        <!-- v19: execution data retention -->
+        <section class="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-5">
+          <div class="mb-1 flex items-center justify-between">
+            <h2 class="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+              <DatabaseBackup class="h-4 w-4 text-orange-400" /> Execution data retention
+            </h2>
+            <span v-if="retentionMsg" class="text-[11px] font-medium text-emerald-400">{{ retentionMsg }}</span>
+          </div>
+          <p class="mb-4 text-xs text-zinc-500">
+            How long finished execution records are kept. Running executions are never purged. A background job enforces this daily; purge also runs at startup.
+          </p>
+          <div v-if="retention" class="grid gap-4 md:grid-cols-3">
+            <div>
+              <label class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Keep for (days)</label>
+              <input
+                v-model.number="retention.retention_days"
+                type="number"
+                min="0"
+                max="3650"
+                class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60"
+              />
+              <p class="mt-1 text-[10px] text-zinc-600">0 = keep forever</p>
+            </div>
+            <div>
+              <label class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Max runs per workflow</label>
+              <input
+                v-model.number="retention.max_executions_per_workflow"
+                type="number"
+                min="0"
+                max="100000"
+                class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60"
+              />
+              <p class="mt-1 text-[10px] text-zinc-600">0 = unlimited — newest records survive</p>
+            </div>
+            <div class="flex flex-col justify-between gap-2">
+              <div class="flex gap-2">
+                <button
+                  class="flex-1 rounded-lg bg-orange-500 py-1.5 text-xs font-semibold text-white transition hover:bg-orange-400 disabled:opacity-50"
+                  :disabled="savingRetention"
+                  @click="saveRetention"
+                >
+                  {{ savingRetention ? 'Saving…' : 'Save policy' }}
+                </button>
+                <button
+                  class="flex-1 rounded-lg border border-zinc-700 py-1.5 text-xs font-semibold text-zinc-300 transition hover:border-zinc-500 disabled:opacity-50"
+                  :disabled="purging"
+                  @click="purgeNow"
+                >
+                  {{ purging ? 'Purging…' : 'Purge now' }}
+                </button>
+              </div>
+              <p class="text-[10px] leading-snug text-zinc-600">
+                <template v-if="retention.last_purge_at">
+                  Last purge {{ new Date(retention.last_purge_at).toLocaleString() }} —
+                  {{ retention.last_purge_deleted }} record{{ retention.last_purge_deleted === 1 ? '' : 's' }} removed
+                </template>
+                <template v-else>No purge has run yet</template>
+              </p>
+            </div>
           </div>
         </section>
       </template>

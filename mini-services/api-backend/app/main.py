@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .db import init_db
 from .seed import seed_if_empty
+from .services import retention
 from .services.scheduler import resync_all_jobs, shutdown_scheduler, start_scheduler
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -28,6 +29,12 @@ async def lifespan(app: FastAPI):
         await session.commit()
     start_scheduler()
     await resync_all_jobs()  # register schedule_trigger jobs from saved workflows
+    # v19: execution data retention — best-effort purge at boot + daily job
+    try:
+        await retention.purge_execution_data()
+        retention.schedule_daily_purge()
+    except Exception:  # noqa: BLE001 — retention must never block startup
+        logger.exception("retention purge failed at startup")
     logger.info("Py8n v%s ready — execution_mode=%s, db=%s", settings.version, settings.execution_mode, settings.database_url.split("@")[-1])
     yield
     # --- shutdown ------------------------------------------------------
@@ -57,6 +64,7 @@ from .api.folders import router as folders_router  # noqa: E402
 from .api.insights import router as insights_router  # noqa: E402
 from .api.node_defs import router as node_defs_router  # noqa: E402
 from .api.schedules import router as schedules_router  # noqa: E402
+from .api.settings import router as settings_router  # noqa: E402
 from .api.templates import router as templates_router  # noqa: E402
 from .api.webhooks import router as webhooks_router  # noqa: E402
 from .api.workflows import router as workflows_router  # noqa: E402
@@ -71,6 +79,7 @@ app.include_router(credentials_router, prefix=API)
 app.include_router(env_vars_router, prefix=API)
 app.include_router(folders_router, prefix=API)
 app.include_router(insights_router, prefix=API)
+app.include_router(settings_router, prefix=API)
 app.include_router(node_defs_router, prefix=API)
 app.include_router(templates_router, prefix=API)
 app.include_router(ws_router)  # /ws/...

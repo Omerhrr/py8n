@@ -99,8 +99,11 @@ class BaseNode:
                 default = prop.pop("default", None) if isinstance(prop, dict) else None
                 if default is not None:
                     defaults[prop_name] = default
-            # drop $defs noise for small models
-            schema.pop("$defs", None)
+            # inline nested-model $defs (e.g. the AI Agent's ToolSpec list) so
+            # the frontend receives fully self-contained property schemas
+            defs = schema.pop("$defs", None)
+            if defs:
+                schema = cls._inline_refs(schema, defs)
         return NodeDefinition(
             type=cls.type,
             name=cls.name,
@@ -138,6 +141,20 @@ class BaseNode:
 
     async def execute(self, context: ExecutionContext) -> NodeResult:  # pragma: no cover
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _inline_refs(node: Any, defs: dict) -> Any:
+        """Recursively replace {"$ref": "#/$defs/X"} with the definition of X."""
+        if isinstance(node, dict):
+            if "$ref" in node and isinstance(node["$ref"], str):
+                name = node["$ref"].split("/")[-1]
+                if name in defs:
+                    return BaseNode._inline_refs(defs[name], defs)
+            return {k: BaseNode._inline_refs(v, defs) for k, v in node.items()}
+        if isinstance(node, list):
+            return [BaseNode._inline_refs(x, defs) for x in node]
+        return node
 
     # ------------------------------------------------------------------
     @staticmethod

@@ -1,0 +1,294 @@
+"""AI Agent node — LLM with an iterative tool-calling loop (v19).
+
+The flagship agentic node: the model receives a tool catalogue and may call
+tools over multiple rounds before producing its final answer. Tool calls use
+a strict JSON wire protocol (works with ANY OpenAI-compatible chat model —
+no native function-calling support required):
+
+    {"tool": "<tool_name>", "arguments": {...}}   -> run tool, feed result back
+    {"answer": "<final text>"}                     -> loop ends
+
+Built-in tool kinds
+-------------------
+* workflow  — run another Py8n workflow (args become the trigger payload);
+              reuses the same nested GraphRunner machinery as the
+              Execute Workflow node (depth-limited).
+* http      — perform an HTTP request; method/url/headers/body come from the
+              model, guarded by an optional domain allow-list.
+* knowledge — return a static knowledge snippet stored on the node.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any, ClassVar, Literal
+
+import httpx
+from pydantic import BaseModel, Field
+
+from ..context import ExecutionContext
+from .base import BaseNode, Handle, NodeExecutionError, NodeResult
+
+MAX_TOOL_RESULT_CHARS = 4000
+
+
+class ToolSpec(BaseModel):
+    kind: Literal["workflow", "http", "knowledge"] = "knowledge"
+    name: str = Field(default="", description="Tool name the model will call (snake_case)")
+    description: str = Field(default="", description="What the tool does — helps the model choose")
+    # workflow tool
+    workflow_id: str | None = Field(default=None, json_schema_extra={"widget": "workflow"})
+    # http tool
+    allowed_domains: list[str] = Field(default_factory=list, description="Empty = any domain")
+    # knowledge tool
+    content: str | None = Field(default=None, json_schema_extra={"widget": "textarea", "rows": 4})
+
+
+class AgentNode(BaseNode):
+    type = "ai_agent"
+    name = "AI Agent"
+    description = "LLM agent that can call tools (sub-workflows, HTTP, knowledge) in a loop until it answers."
+    category = "ai"
+    icon = "bot"
+    color = "#a78bfa"
+    inputs: ClassVar[list[Handle]] = [Handle("main", "In")]
+    outputs: ClassVar[list[Handle]] = [Handle("main", "Out")]
+
+    class ParamsModel(BaseModel):
+        provider: str = Field(
+            default="sandbox_bridge",
+            json_schema_extra={"widget": "select", "options": ["sandbox_bridge", "openai_compatible"]},
+        )
+        model: str = Field(default="", description="Model name (optional; bridge picks a default)")
+        system_prompt: str = Field(
+            default="You are a precise automation agent. Use the available tools when they help, then answer.",
+            json_schema_extra={"widget": "textarea", "rows": 3},
+        )
+        user_message: str = Field(
+            default="Task: {{ input | tojson }}",
+            description="User message — supports {{ expressions }}",
+            json_schema_extra={"widget": "textarea", "rows": 5},
+        )
+        max_iterations: int = Field(default=5, ge=1, le=10)
+        temperature: float = Field(default=0.4, ge=0, le=2)
+        credential_id: str | None = Field(default=None)
+        tools: list[ToolSpec] = Field(
+            default_factory=list,
+            description="Tools the agent may call",
+            json_schema_extra={"widget": "tools"},
+        )
+
+    # ------------------------------------------------------------------
+    # LLM transport (monkeypatchable in tests)
+    # ------------------------------------------------------------------
+    async def _chat(self, messages: list[dict], temperature: float) -> str:
+        """One chat completion -> assistant content string."""
+        p = self.params  # type: AgentNode.ParamsModel
+        if p.provider == "sandbox_bridge":
+            from ...config import settings
+
+            url = f"{settings.llm_bridge_url.rstrip('/')}/v1/chat/completions"
+            headers: dict = {}
+            payload: dict = {"messages": messages, "temperature": temperature, "max_tokens": 2048}
+            if p.model:
+                payload["model"] = p.model
+        else:
+            if not p.credential_id:
+                raise NodeExecutionError("openai_compatible provider requires a credential")
+            from ...services.crypto import decrypt_credential
+
+            cred = await decrypt_credential(self._context_for_creds, p.credential_id)
+            if cred.get("type") != "openai_compatible":
+                raise NodeExecutionError("Selected credential is not of type openai_compatible")
+            base = (cred.get("base_url") or "").rstrip("/")
+            if not base:
+                raise NodeExecutionError("Credential is missing base_url")
+            url = f"{base}/chat/completions"
+            headers = {"Authorization": f"Bearer {cred.get('api_key', '')}"}
+            payload = {"model": p.model or "gpt-4o-mini", "messages": messages, "temperature": temperature, "max_tokens": 2048}
+
+        try:
+            async with httpx.AsyncClient(timeout=180) as client:
+                resp = await client.post(url, json=payload, headers=headers)
+        except httpx.HTTPError as exc:
+            raise NodeExecutionError(f"LLM request failed: {exc}") from exc
+        if resp.status_code >= 400:
+            raise NodeExecutionError(f"LLM API returned HTTP {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        try:
+            return data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError):
+            return data.get("content") or ""
+
+    # ------------------------------------------------------------------
+    # Wire-protocol parsing
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_reply(content: str) -> dict:
+        """Extract the JSON directive from a reply; {} when it is plain prose."""
+        text = (content or "").strip()
+        # strip markdown fences if the model wrapped them
+        fenced = re.fullmatch(r"```(?:json)?\s*(.+?)\s*```", text, re.DOTALL)
+        if fenced:
+            text = fenced.group(1)
+        try:
+            data = json.loads(text)
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # first balanced {...} block in the text
+        match = re.search(r"\{.*\}", text, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                if isinstance(data, dict):
+                    return data
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return {}
+
+    # ------------------------------------------------------------------
+    # Tool execution
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _truncate(value: Any) -> str:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        return text[:MAX_TOOL_RESULT_CHARS]
+
+    async def _run_tool(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> str:
+        if tool.kind == "knowledge":
+            return self._truncate(tool.content or "")
+        if tool.kind == "http":
+            method = str(args.get("method", "GET")).upper()
+            url = str(args.get("url", ""))
+            if not url.startswith(("http://", "https://")):
+                raise NodeExecutionError(f"HTTP tool {tool.name!r}: url must be absolute")
+            if tool.allowed_domains:
+                host = httpx.URL(url).host or ""
+                if not any(host == d or host.endswith("." + d) for d in tool.allowed_domains):
+                    raise NodeExecutionError(f"HTTP tool {tool.name!r}: domain {host!r} not allowed")
+            headers = args.get("headers") or {}
+            body = args.get("body")
+            try:
+                async with httpx.AsyncClient(timeout=30) as client:
+                    resp = await client.request(
+                        method, url, headers=headers,
+                        json=body if isinstance(body, (dict, list)) else None,
+                        content=None if isinstance(body, (dict, list)) else body,
+                    )
+            except httpx.HTTPError as exc:
+                return self._truncate({"error": str(exc)})
+            try:
+                parsed: Any = resp.json()
+            except ValueError:
+                parsed = resp.text
+            return self._truncate({"status": resp.status_code, "body": parsed})
+        if tool.kind == "workflow":
+            if not tool.workflow_id:
+                raise NodeExecutionError(f"Workflow tool {tool.name!r}: no workflow selected")
+            return self._truncate(await self._run_tool_workflow(tool, args, context))
+        raise NodeExecutionError(f"Unknown tool kind {tool.kind!r}")
+
+    async def _run_tool_workflow(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> Any:
+        import uuid
+
+        from sqlalchemy import select
+
+        from ...db import AsyncSessionLocal
+        from ...models import Workflow
+        from ..runner import GraphRunner, validate_graph_document
+        from .subflow import MAX_DEPTH
+
+        async with AsyncSessionLocal() as session:
+            workflow = (
+                await session.execute(select(Workflow).where(Workflow.id == tool.workflow_id))
+            ).scalar_one_or_none()
+        if workflow is None:
+            raise NodeExecutionError(f"Workflow tool {tool.name!r}: workflow not found")
+
+        graph = validate_graph_document(workflow.graph or {"nodes": [], "edges": []})
+        runner = GraphRunner(
+            graph,
+            workflow_id=workflow.id,
+            workflow_name=workflow.name,
+            trigger_type="manual",
+            trigger_payload={"payload": {"arguments": args, "question": str(self.params.user_message)}},
+            execution_id=uuid.uuid4().hex,
+            depth=context.depth + 1,
+            honor_pinned=context.honor_pinned,
+        )
+        result = await runner.run()
+        if result["status"] != "success":
+            return {"tool_status": result["status"], "error": result.get("error")}
+        last_run = next((r for r in reversed(result["node_runs"]) if r["status"] == "success"), None)
+        return {"tool_status": "success", "output": last_run["output"] if last_run else None}
+
+    # ------------------------------------------------------------------
+    # Main agentic loop
+    # ------------------------------------------------------------------
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: AgentNode.ParamsModel
+        self._context_for_creds = context
+        tools = {t.name: t for t in (p.tools or []) if t.name}
+        if not p.user_message:
+            raise NodeExecutionError("Agent needs a user message")
+
+        catalogue = {
+            "type": "object",
+            "properties": {
+                t.name: {"type": "object", "description": t.description or t.name}
+                for t in tools.values()
+            },
+        }
+        protocol = (
+            "You operate in a tool loop. Reply with EXACTLY one JSON object and nothing else.\n"
+            'To call a tool: {"tool": "<name>", "arguments": {...}} — allowed names + argument schemas:\n'
+            f"{json.dumps(catalogue, ensure_ascii=False)}\n"
+            'After each tool call you receive "TOOL RESULT <name>: <json>".\n'
+            'When you can answer without more tools, reply {"answer": "<final answer>"}.'
+        )
+        messages: list[dict] = [
+            {"role": "system", "content": f"{p.system_prompt}\n\n{protocol}"},
+            {"role": "user", "content": str(p.user_message)},
+        ]
+
+        tool_calls: list[dict] = []
+        answer: str | None = None
+        iterations = 0
+        while iterations < p.max_iterations:
+            iterations += 1
+            content = await self._chat(messages, p.temperature)
+            directive = self._parse_reply(content)
+            if "tool" in directive and directive.get("tool") in tools:
+                tool = tools[directive["tool"]]
+                args = directive.get("arguments") or {}
+                if not isinstance(args, dict):
+                    args = {"value": args}
+                try:
+                    result = await self._run_tool(tool, args, context)
+                    status = "ok"
+                except NodeExecutionError as exc:
+                    result = f"tool error: {exc}"
+                    status = "error"
+                tool_calls.append({"tool": tool.name, "arguments": args, "status": status, "result": result})
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": f"TOOL RESULT {tool.name}: {result}"})
+                continue
+            # plain prose or an explicit {"answer": ...}
+            answer = directive.get("answer") if isinstance(directive.get("answer"), str) else (content or "").strip()
+            break
+
+        if answer is None:
+            raise NodeExecutionError(
+                f"Agent hit the iteration cap ({p.max_iterations}) without a final answer"
+            )
+        return self._single(
+            {
+                "answer": answer,
+                "iterations": iterations,
+                "tool_calls": tool_calls,
+                "tools_available": list(tools.keys()),
+            }
+        )

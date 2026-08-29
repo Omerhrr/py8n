@@ -436,3 +436,26 @@ Work Log:
 
 Stage Summary:
 - Py8n v18: the canvas is now a real editor — snapshot undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y + toolbar) across structure, drag, params, settings, pins and renames, plus node clipboard (Ctrl+C/V/D) with internal-edge remapping and copy-name suffix; version restore resets the timeline; 62/62 pytest + smoke + browser verified, backend live at 1.18.0
+
+---
+Task ID: 29 (v19 feature wave — AI Agent + sticky notes + expression autocomplete + marquee + retention)
+Agent: main (Super Z)
+Task: Repo cleanup (strict gitignore) + the five-feature flagship wave
+
+Work Log:
+- Repo cleanup FIRST (user request): strict .gitignore rewrite (secrets/runtime data/build artifacts/sandbox internals), untracked .zscripts/, download/, .gitkeep + 4 one-off debug scripts -> 161 tracked files, pushed (af6b75d..4b1e6ce)
+- AI AGENT NODE (app/engine/nodes/agent.py): iterative tool-calling loop over an OpenAI-compatible chat transport (bridge default, credential option) with a strict JSON wire protocol {"tool": name, "arguments": {}} / {"answer": "..."} — works with ANY model (no native function-calling needed). Fenced-code + first-balanced-brace JSON extraction; plain prose = final answer (1 iteration). Tools: workflow (nested GraphRunner, depth+1, payload={arguments, question} -> sub reads {{ input.payload.arguments.* }}), http (model-driven method/url/headers/body + domain allow-list guard), knowledge (static text). Iteration cap errors cleanly; tool_results truncated to 4000 chars; output {answer, iterations, tool_calls, tools_available}
+- base.py get_definition now INLINES nested-model $defs (ToolSpec) via recursive _inline_refs — previously $defs were dropped and nested schemas arrived unresolvable. ToolSpec.kind uses Literal
+- StickyNoteNode (engine/nodes/sticky.py): hidden=True (excluded from definitions/palette), pass-through execution; persisted in graph like any node
+- RETENTION: AppSetting key-value model; services/retention.py (policy get/set + purge_execution_data: age-based delete of FINISHED logs older than retention_days + per-workflow volume cap keeping newest N, running never touched, explicit commits, bookkeeping row); /settings/retention GET/PUT + /retention/purge POST; lifespan purges at boot + APScheduler daily job; API rejects negatives (422 body-level)
+- Tests test_v19_features.py (5): scripted _chat mock — GOTCHA: monkeypatching a method with a callable OBJECT skips self-binding (plain instances are not descriptors) — must patch with a plain async function taking (agent_self, messages, temperature); knowledge-tool loop + prose fallback; workflow-tool end-to-end (sub template must read input.payload.arguments.* NOT payload.*); iteration cap; retention age purge (backdate ONLY own execution, restore policy after); volume cap keeps newest. Suite 67/67
+- Smoke v19 section: 20 node types (was 19), tools schema inline assert, REAL-bridge agent run — model did a genuine tool call (iterations=2, tool_calls=1) — + retention policy/purge/restore. ALL PASS
+- Frontend: ExprInput.vue ({{ }}-aware autocomplete: context vars, canvas node names -> nodes.X.output, env keys from store.loadEnvVars, 21 Jinja filters; segment parsing after last {{ or |; keyboard nav; fx badge) wired into ConfigPanel text + textarea widgets; pycode stays plain (no popover)
+- ConfigPanel 'tools' widget editor (violet cards: name/kind/description + per-kind fields w/ workflow picker); PStickyNote.vue custom Vue Flow node type 'sticky' (5 colors, inline textarea edit); editor Sticky toolbar button; STICKY_DEF local definition fallback (hidden nodes have no backend definition); PNodeCard icon map + bot
+- MARQUEE: VueFlow selection-key-code (=true) + :pan-on-drag="false" -> n8n-style left-drag marquee, Space+drag pans; deleteSelectedNodesMulti (nodes + attached edges) on Delete; floating "N nodes selected" bar with Delete all
+- E2E DEBUGGING WAR STORIES: (1) d3-drag default filter ignores ctrlKey mousedown -> Ctrl+click multi-select impossible to drive synthetically; (2) Vue Flow pane selection uses POINTER events not mouse events; (3) useKeyPress listens on document (window-dispatched events never reach it; dispatch on body); (4) viewport 1280x577 -> pane only x480-960 y56-297, drag start (460,100) hit the header, (490,65) hit the Sticky button overlay -> final marquee drag (490,130)->(950,290) worked: 2 selected, bar visible, delete-all 3->1, Ctrl+Z ->3
+- E2E: tools editor renders for agent node; ExprInput popover on typing "{{" (input/inputs/workflow.* suggestions); sticky inline edit + server round-trip (sticky_note+amber in saved graph); agent run from UI -> answer visible in drawer; Insights retention card + Purge now ("Purged 0 records" — correct, all recent); zero console errors
+- Screenshots: download/e2e-v19-{agent-tools-editor,agent-run-answer,marquee-select,sticky-note,insights-retention,final-editor}.png
+
+Stage Summary:
+- Py8n v19: the flagship AI Agent node (tool-calling loop with sub-workflow/HTTP/knowledge tools) + canvas sticky notes + expression autocomplete (fx) + n8n-style marquee multi-select ops + execution data retention policies (age/volume, daily purge, Insights UI); 67/67 pytest + smoke (real-bridge agent tool loop!) + browser verified; backend live at 1.19.0; repo cleaned to 161 project-only files

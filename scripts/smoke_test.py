@@ -47,7 +47,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 19, "expected 19 node types after v5 wave"
+    assert len(types) == 20, "expected 20 node types after v19 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1075,6 +1075,87 @@ def main() -> None:
     finally:
         req("DELETE", f"/workflows/{wf17['id']}")
     print("v17 pins + test step OK")
+
+    # ------------------------------------------------------------------ v19
+    print("== v19: AI Agent node (real bridge tool loop) + retention ==")
+    status, defs = req("GET", "/node-definitions")
+    types = [d["type"] for d in defs["definitions"]]
+    assert status == 200 and "ai_agent" in types and "sticky_note" not in types, types
+    agent_def = next(d for d in defs["definitions"] if d["type"] == "ai_agent")
+    tools_schema = agent_def["parameters_schema"]["properties"]["tools"]
+    assert "$ref" not in json.dumps(tools_schema), tools_schema  # v19: nested ToolSpec inlined
+    assert "kind" in json.dumps(tools_schema), tools_schema
+    print("node definitions: ai_agent present, sticky hidden, tools schema inlined OK")
+
+    status, health = req("GET", "/health")
+    ver = tuple(int(x) for x in health.get("version", "0").split(".")[:2])
+    assert status == 200 and ver >= (1, 19), health
+
+    wf19_graph = {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+            {
+                "id": "agent",
+                "type": "ai_agent",
+                "name": "Agent",
+                "position": {"x": 220, "y": 0},
+                "parameters": {
+                    "system_prompt": "You are a terse assistant in a workflow smoke test.",
+                    "user_message": "Use the tier_table tool to look up code A1, then state the tier in one short sentence.",
+                    "max_iterations": 4,
+                    "tools": [
+                        {
+                            "kind": "knowledge",
+                            "name": "tier_table",
+                            "description": "Maps customer codes to loyalty tiers",
+                            "content": "code A1 = GOLD tier; code B2 = SILVER tier",
+                        }
+                    ],
+                },
+            },
+        ],
+        "edges": [{"id": "e1", "source": "t", "target": "agent", "sourceHandle": "main", "targetHandle": "main"}],
+    }
+    status, wf19 = req("POST", "/workflows", {"name": f"tmp v19 agent {uuid.uuid4().hex[:6]}", "graph": wf19_graph})
+    assert status == 201, wf19
+    try:
+        status, body = req("POST", f"/workflows/{wf19['id']}/run", {"payload": {}})
+        assert status in (200, 202), body
+        exec_id = body["execution_id"]
+        detail = None
+        for _ in range(120):
+            status, detail = req("GET", f"/executions/{exec_id}")
+            assert status == 200
+            if detail["status"] != "running":
+                break
+            time.sleep(0.5)
+        assert detail["status"] == "success", detail.get("error")
+        agent_run = next(r for r in detail["node_runs"] if r["node_id"] == "agent")
+        out = agent_run["output"]
+        assert out["answer"], out
+        assert out["tools_available"] == ["tier_table"], out
+        assert isinstance(out["iterations"], int) and out["iterations"] >= 1
+        print(f"agent answered via bridge (iterations={out['iterations']}, tool_calls={len(out['tool_calls'])}) OK")
+    finally:
+        req("DELETE", f"/workflows/{wf19['id']}")
+
+    # retention policy API
+    status, pol = req("GET", "/settings/retention")
+    assert status == 200 and "retention_days" in pol, pol
+    original = pol
+    status, pol = req("PUT", "/settings/retention", {"retention_days": 30, "max_executions_per_workflow": 2})
+    assert status == 200 and pol["retention_days"] == 30 and pol["max_executions_per_workflow"] == 2, pol
+    status, purged = req("POST", "/settings/retention/purge", {})
+    assert status == 200 and "total" in purged, purged
+    status, pol = req("GET", "/settings/retention")
+    assert status == 200 and pol["last_purge_deleted"] >= purged["total"], pol
+    status, pol = req("PUT", "/settings/retention", {
+        "retention_days": original["retention_days"],
+        "max_executions_per_workflow": original["max_executions_per_workflow"],
+    })
+    assert status == 200, pol
+    print(f"retention policy + purge OK (last purge removed {purged['total']} records)")
+    print("v19 agent + retention OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

@@ -7,10 +7,11 @@ import { MiniMap } from '@vue-flow/minimap'
 import {
   Play, Save, Copy, Check, Zap, Globe, Loader2, AlertTriangle,
   Link2, Trash2, Download, Clock, ShieldAlert, Tag as TagIcon, X,
-  History, RotateCcw, Undo2, Redo2,
+  History, RotateCcw, Undo2, Redo2, StickyNote,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
 import PNodeCard from '~/components/editor/PNodeCard.vue'
+import PStickyNote from '~/components/editor/PStickyNote.vue'
 import NodePalette from '~/components/editor/NodePalette.vue'
 import ConfigPanel from '~/components/editor/ConfigPanel.vue'
 import ExecutionsDrawer from '~/components/editor/ExecutionsDrawer.vue'
@@ -34,7 +35,7 @@ const copied = ref(false)
 const toasts = ref<{ id: number; text: string; kind: 'info' | 'error' | 'success' }[]>([])
 let toastSeq = 0
 
-const { addNodes, addEdges, screenToFlowCoordinate, fitView, onConnect, onNodeClick, onEdgeClick, onPaneClick, onNodeDragStop } = useVueFlow()
+const { addNodes, addEdges, screenToFlowCoordinate, fitView, onConnect, onNodeClick, onEdgeClick, onPaneClick, onNodeDragStop, getSelectedNodes } = useVueFlow()
 
 // ------------------------------------------------------------------
 // v18: undo/redo + node copy/paste/duplicate
@@ -160,7 +161,7 @@ function toast(text: string, kind: 'info' | 'error' | 'success' = 'info') {
 function specToVfNode(spec: NodeSpec): Node {
   return {
     id: spec.id,
-    type: 'py8n',
+    type: spec.type === 'sticky_note' ? 'sticky' : 'py8n', // v19: sticky notes render their own card
     position: { x: spec.position?.x ?? 0, y: spec.position?.y ?? 0 },
     data: { spec, definition: store.definitionFor(spec.type) },
   }
@@ -245,6 +246,7 @@ const schedulePill = computed(() => {
 // ------------------------------------------------------------------
 onMounted(async () => {
   await Promise.all([store.loadDefinitions(), store.loadCredentials()])
+  store.loadEnvVars().catch(() => {}) // v19: expression autocomplete needs env keys
   await store.loadWorkflow(workflowId.value)
   graphToCanvas(store.workflow!.graph || { nodes: [], edges: [] })
   await nextTick()
@@ -313,8 +315,39 @@ const selectedNodeSpec = computed<NodeSpec | null>(() => {
   return vf ? vf.data.spec : null
 })
 const selectedDefinition = computed(() =>
-  selectedNodeSpec.value ? store.definitionFor(selectedNodeSpec.value.type) || null : null,
+  selectedNodeSpec.value ? store.definitionFor(selectedNodeSpec.value.type) || STICKY_DEF : null,
 )
+
+// v19: sticky notes are hidden from /node-definitions — the page supplies
+// a local definition so the ConfigPanel can render their fields.
+const STICKY_DEF = {
+  type: 'sticky_note',
+  name: 'Sticky Note',
+  description: 'Canvas annotation — never executes; documents your workflow.',
+  category: 'actions',
+  icon: 'sticky-note',
+  color: '#fbbf24',
+  inputs: [],
+  outputs: [],
+  parameters_schema: {
+    properties: {
+      text: { type: 'string', widget: 'textarea', rows: 5, default: 'Note something down…' },
+      color: { type: 'string', widget: 'select', options: ['amber', 'emerald', 'sky', 'rose', 'violet'], default: 'amber' },
+    },
+  },
+  defaults: { text: 'Note something down…', color: 'amber' },
+} as any
+
+// v19: multi-selection state (marquee / shift-click) for the floating bar
+const selectedCount = computed(() => getSelectedNodes.value.length)
+
+const canvasNodeNames = computed(() =>
+  (vfNodes.value as any[])
+    .filter((n) => n.data?.spec?.type && n.data.spec.type !== 'sticky_note')
+    .map((n) => n.data.spec.name)
+    .filter(Boolean),
+)
+const envKeys = computed(() => store.envVars.map((v: any) => v.key))
 
 function updateParam(key: string, value: any) {
   const vf = vfNodes.value.find((n) => n.id === selectedNodeId.value) as any
@@ -505,11 +538,24 @@ function deleteSelectedEdge() {
   historyCommit()
 }
 
+// v19: delete EVERY selected node (marquee / shift-click multi-select)
+function deleteSelectedNodesMulti() {
+  const ids = new Set((vfNodes.value as any[]).filter((n) => n.selected).map((n) => n.id))
+  if (!ids.size) return
+  vfNodes.value = vfNodes.value.filter((n: any) => !ids.has(n.id))
+  vfEdges.value = vfEdges.value.filter((e: any) => !ids.has(e.source) && !ids.has(e.target))
+  if (selectedNodeId.value && ids.has(selectedNodeId.value)) selectedNodeId.value = null
+  store.markDirty()
+  historyCommit()
+  toast(`Deleted ${ids.size} node${ids.size > 1 ? 's' : ''}`, 'info')
+}
+
 function onKeydown(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selectedEdgeId.value) deleteSelectedEdge()
+    if ((vfNodes.value as any[]).some((n) => n.selected)) deleteSelectedNodesMulti()
+    else if (selectedEdgeId.value) deleteSelectedEdge()
     else if (selectedNodeId.value) deleteSelectedNode()
   }
   const mod = e.metaKey || e.ctrlKey
@@ -576,6 +622,27 @@ function onDrop(event: DragEvent) {
   if (!def) return
   const position = screenToFlowCoordinate({ x: event.clientX, y: event.clientY })
   addNodeFromDef(def, position)
+}
+
+// ------------------------------------------------------------------
+// v19: sticky notes — toolbar-added annotations (hidden from the palette)
+// ------------------------------------------------------------------
+let noteSeq = 0
+function addStickyNote() {
+  noteSeq += 1
+  const id = `note_${Date.now().toString(36).slice(-4)}${noteSeq}`
+  const spec: NodeSpec = {
+    id,
+    type: 'sticky_note',
+    name: 'Sticky note',
+    position: { x: 120 + Math.random() * 260, y: 80 + Math.random() * 160 },
+    parameters: { text: 'Note something down…', color: 'amber' },
+  }
+  addNodes([specToVfNode(spec)])
+  selectedNodeId.value = id
+  store.markDirty()
+  historyCommit()
+  toast('Sticky note added', 'success')
 }
 
 // ------------------------------------------------------------------
@@ -877,6 +944,8 @@ const runningCount = computed(
             :connection-radius="24"
             :default-edge-options="{ type: 'smoothstep' }"
             fit-view-on-init
+            selection-key-code
+            :pan-on-drag="false"
           >
             <Background :gap="18" pattern-color="#1f2937" />
             <Controls position="bottom-left" />
@@ -890,6 +959,9 @@ const runningCount = computed(
             />
             <template #node-py8n="nodeProps">
               <PNodeCard :id="nodeProps.id" :data="nodeProps.data" />
+            </template>
+            <template #node-sticky="nodeProps">
+              <PStickyNote :id="nodeProps.id" :data="nodeProps.data" :selected="nodeProps.selected" />
             </template>
           </VueFlow>
           <template #fallback>
@@ -906,6 +978,25 @@ const runningCount = computed(
           Connection selected — press Delete to remove
           <button class="font-semibold text-rose-400 hover:text-rose-300" @click="deleteSelectedEdge">Remove</button>
         </div>
+
+        <!-- v19: multi-selection floating bar -->
+        <div
+          v-if="selectedCount >= 2"
+          class="absolute bottom-4 left-1/2 z-10 flex -translate-x-1/2 items-center gap-3 rounded-full border border-orange-500/40 bg-zinc-900/95 px-3.5 py-1.5 text-[11px] text-zinc-300 shadow-xl"
+        >
+          <span class="font-semibold text-orange-300">{{ selectedCount }} nodes selected</span>
+          <span class="text-zinc-600">Del removes · Ctrl+C copy · Ctrl+D duplicate · drag to move</span>
+          <button class="font-semibold text-rose-400 hover:text-rose-300" @click="deleteSelectedNodesMulti">Delete all</button>
+        </div>
+
+        <!-- v19: sticky note toolbar button -->
+        <button
+          class="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-300 transition hover:bg-amber-500/20"
+          title="Add a sticky note (annotation — never executes)"
+          @click="addStickyNote"
+        >
+          <StickyNote class="h-3.5 w-3.5" /> Sticky
+        </button>
       </div>
 
       <ConfigPanel
@@ -913,6 +1004,8 @@ const runningCount = computed(
         :definition="selectedDefinition"
         :credentials="store.credentials"
         :workflow-id="workflowId"
+        :canvas-node-names="canvasNodeNames"
+        :env-keys="envKeys"
         :run-test-step="runTestStep"
         :load-last-output="loadLastOutput"
         @update-param="updateParam"

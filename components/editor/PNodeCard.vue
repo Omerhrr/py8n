@@ -3,7 +3,7 @@ import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
 import {
   Play, Webhook, Clock, Globe, GitBranch, Braces, Terminal,
-  Hourglass, Brain, Box, Zap, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, Ban, Pin,
+  Hourglass, Brain, Box, Zap, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, Ban, Pin, Bot,
 } from 'lucide-vue-next'
 import type { NodeDefinition, NodeRunStatus } from '~/types/node'
 
@@ -26,7 +26,7 @@ const icon = computed(() => {
     hourglass: Hourglass, brain: Brain,
     filter: Filter, split: Split, 'git-merge': GitMerge,
     ungroup: Ungroup, sigma: Sigma, workflow: Workflow,
-    repeat: Repeat, mail: Mail, slack: Slack,
+    repeat: Repeat, mail: Mail, slack: Slack, bot: Bot,
   }
   return map[def.value?.icon] || Box
 })

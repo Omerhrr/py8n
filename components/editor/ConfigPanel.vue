@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Trash2, KeyRound, Plus, ChevronDown, AlertTriangle, Settings2, RotateCcw, Ban, Pin, FlaskConical, Download, Loader2 } from 'lucide-vue-next'
+import { Trash2, KeyRound, Plus, ChevronDown, AlertTriangle, Settings2, RotateCcw, Ban, Pin, FlaskConical, Download, Loader2, Bot } from 'lucide-vue-next'
+import ExprInput from '~/components/editor/ExprInput.vue'
 import type { Credential, NodeDefinition, NodeSpec, NodeSettings, NodeTestResult, ParamProperty } from '~/types/node'
 
 const props = defineProps<{
@@ -8,6 +9,8 @@ const props = defineProps<{
   definition: NodeDefinition | null
   credentials: Credential[]
   workflowId?: string
+  canvasNodeNames?: string[]
+  envKeys?: string[]
   runTestStep?: (nodeId: string, items: any) => Promise<NodeTestResult>
   loadLastOutput?: (nodeId: string) => Promise<any | null>
 }>()
@@ -32,12 +35,13 @@ const requiredFields = computed<string[]>(() => props.definition?.parameters_sch
 interface FieldTask {
   key: string
   prop: ParamProperty
-  widget: 'text' | 'textarea' | 'code' | 'number' | 'boolean' | 'select' | 'credential' | 'json' | 'workflow'
+  widget: 'text' | 'textarea' | 'pycode' | 'code' | 'number' | 'boolean' | 'select' | 'credential' | 'json' | 'workflow' | 'tools'
   options?: string[]
 }
 
 function classify(key: string, prop: ParamProperty): FieldTask {
   const type = prop.type || (prop.anyOf ? 'any' : 'string')
+  if (prop.widget === 'tools') return { key, prop, widget: 'tools' }
   if (prop.widget === 'credential' || key === 'credential_id') return { key, prop, widget: 'credential' }
   if (prop.widget === 'workflow' || (key === 'workflow_id' && type === 'string')) return { key, prop, widget: 'workflow' }
   if (prop.widget === 'select' || prop.enum || prop.options) {
@@ -45,7 +49,7 @@ function classify(key: string, prop: ParamProperty): FieldTask {
   }
   if (prop.widget === 'code') {
     const isPy = prop.language === 'python' || key === 'code'
-    return { key, prop, widget: isPy ? 'textarea' : 'json' }
+    return { key, prop, widget: isPy ? 'pycode' : 'json' }
   }
   if (prop.widget === 'textarea') return { key, prop, widget: 'textarea' }
   if (type === 'boolean') return { key, prop, widget: 'boolean' }
@@ -89,6 +93,25 @@ function onJsonInput(key: string, raw: string) {
   } catch (e: any) {
     jsonError.value[key] = 'Invalid JSON'
   }
+}
+
+// ---- v19: AI Agent tools editor -------------------------------------------
+const toolsList = computed<any[]>(() => (props.node?.parameters?.tools as any[]) || [])
+
+function emitTools(next: any[]) {
+  emit('update-param', 'tools', next)
+}
+
+function addTool() {
+  emitTools([...toolsList.value, { kind: 'knowledge', name: '', description: '', content: '' }])
+}
+
+function removeTool(index: number) {
+  emitTools(toolsList.value.filter((_, i) => i !== index))
+}
+
+function setTool(index: number, patch: Record<string, any>) {
+  emitTools(toolsList.value.map((t, i) => (i === index ? { ...t, ...patch } : t)))
 }
 
 // ---- credential creation --------------------------------------------------
@@ -433,6 +456,88 @@ async function runTest() {
             </div>
           </template>
 
+          <!-- v19: AI Agent tools editor -->
+          <template v-else-if="field.widget === 'tools'">
+            <div class="space-y-2">
+              <div
+                v-for="(tool, ti) in toolsList"
+                :key="ti"
+                class="rounded-xl border border-violet-500/20 bg-violet-500/[0.04] p-2.5"
+              >
+                <div class="mb-2 flex items-center justify-between">
+                  <span class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider text-violet-300">
+                    <Bot class="h-3 w-3" /> tool {{ ti + 1 }}
+                  </span>
+                  <button
+                    class="rounded p-1 text-zinc-500 transition hover:text-rose-400"
+                    title="Remove tool"
+                    @click="removeTool(ti)"
+                  >
+                    <Trash2 class="h-3 w-3" />
+                  </button>
+                </div>
+                <div class="space-y-1.5">
+                  <input
+                    :value="tool.name"
+                    placeholder="tool_name (snake_case)"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs outline-none focus:border-violet-500/60"
+                    @input="setTool(ti, { name: ($event.target as HTMLInputElement).value.replace(/[^a-zA-Z0-9_]/g, '_').toLowerCase() })"
+                  />
+                  <select
+                    :value="tool.kind || 'knowledge'"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
+                    @change="setTool(ti, { kind: ($event.target as HTMLSelectElement).value })"
+                  >
+                    <option value="knowledge">knowledge — static text the agent can quote</option>
+                    <option value="workflow">workflow — run a sub-workflow</option>
+                    <option value="http">http — model-driven request</option>
+                  </select>
+                  <input
+                    :value="tool.description"
+                    placeholder="What does this tool do? (helps the model choose)"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
+                    @input="setTool(ti, { description: ($event.target as HTMLInputElement).value })"
+                  />
+                  <select
+                    v-if="tool.kind === 'workflow'"
+                    :value="tool.workflow_id || ''"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
+                    @change="setTool(ti, { workflow_id: ($event.target as HTMLSelectElement).value || null })"
+                  >
+                    <option value="">— pick a workflow —</option>
+                    <option v-for="wf in workflowOptions.filter(w => w.id !== workflowId)" :key="wf.id" :value="wf.id">
+                      {{ wf.name }}
+                    </option>
+                  </select>
+                  <textarea
+                    v-if="tool.kind === 'knowledge'"
+                    :value="tool.content || ''"
+                    :rows="3"
+                    placeholder="Knowledge / reference data the agent can use"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
+                    @input="setTool(ti, { content: ($event.target as HTMLTextAreaElement).value })"
+                  />
+                  <input
+                    v-if="tool.kind === 'http'"
+                    :value="(tool.allowed_domains || []).join(', ')"
+                    placeholder="allowed domains, comma-separated (empty = any)"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs outline-none focus:border-violet-500/60"
+                    @input="setTool(ti, { allowed_domains: ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean) })"
+                  />
+                </div>
+              </div>
+              <button
+                class="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-violet-500/40 py-1.5 text-[11px] font-medium text-violet-300 transition hover:bg-violet-500/10"
+                @click="addTool"
+              >
+                <Plus class="h-3 w-3" /> Add tool
+              </button>
+              <p v-if="!toolsList.length" class="text-[10px] leading-snug text-zinc-600">
+                No tools yet — the agent answers directly. Add tools to let it look things up or take action.
+              </p>
+            </div>
+          </template>
+
           <!-- JSON object/array -->
           <template v-else-if="field.widget === 'json'">
             <textarea
@@ -451,8 +556,23 @@ async function runTest() {
             </p>
           </template>
 
-          <!-- textarea / python code -->
+          <!-- textarea (expression-aware) / python code -->
           <template v-else-if="field.widget === 'textarea'">
+            <ExprInput
+              :model-value="String(node.parameters[field.key] ?? field.prop.default ?? '')"
+              :multiline="true"
+              :rows="field.prop.rows || 4"
+              :node-names="canvasNodeNames || []"
+              :env-keys="envKeys || []"
+              @update:model-value="emit('update-param', field.key, $event)"
+            />
+            <p v-if="field.prop.description" class="mt-1 text-[10px] leading-snug text-zinc-600">
+              {{ field.prop.description }}
+            </p>
+          </template>
+
+          <!-- python code (no expression popover) -->
+          <template v-else-if="field.widget === 'pycode'">
             <textarea
               :value="node.parameters[field.key] ?? field.prop.default ?? ''"
               :rows="field.prop.rows || 4"
@@ -488,13 +608,14 @@ async function runTest() {
             @input="emit('update-param', field.key, Number(($event.target as HTMLInputElement).value))"
           />
 
-          <!-- text -->
+          <!-- text (expression-aware) -->
           <template v-else>
-            <input
-              :value="node.parameters[field.key] ?? ''"
+            <ExprInput
+              :model-value="String(node.parameters[field.key] ?? '')"
               :placeholder="field.prop.placeholder || (field.prop.default != null ? String(field.prop.default) : '')"
-              class="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 font-mono text-xs outline-none transition focus:border-orange-500/60"
-              @input="emit('update-param', field.key, ($event.target as HTMLInputElement).value)"
+              :node-names="canvasNodeNames || []"
+              :env-keys="envKeys || []"
+              @update:model-value="emit('update-param', field.key, $event)"
             />
             <p v-if="field.prop.description" class="mt-1 text-[10px] leading-snug text-zinc-600">
               {{ field.prop.description }}

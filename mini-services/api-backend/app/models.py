@@ -178,3 +178,17 @@ class EnvVariable(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AppSetting(Base):
+    """Global key/value platform setting (v19) — retention policies etc.
+
+    Values are JSON documents; a missing row means "use the built-in default"
+    (declared next to the consumer, e.g. services/retention.py).
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from .nodes.base import BaseNode, NodeDefinition
+from .nodes.agent import AgentNode
 from .nodes.data import AggregateNode, FilterNode, MergeNode, SplitOutNode, SwitchNode
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode
 from .nodes.llm import LlmChatNode
 from .nodes.http import HttpRequestNode
 from .nodes.loop import BatchTriggerNode, LoopOverItemsNode
+from .nodes.sticky import StickyNoteNode
 from .nodes.subflow import ExecuteWorkflowNode
 from .nodes.triggers import ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
 from .nodes.wait import WaitForResumeNode
@@ -38,9 +40,11 @@ for _cls in (
     CodeNode,
     DelayNode,
     LlmChatNode,
+    AgentNode,
     EmailSendNode,
     WaitForResumeNode,
     SlackMessageNode,
+    StickyNoteNode,    # v19: canvas annotation — hidden from definitions
     BatchTriggerNode,  # internal: injected into loop-body sub-runs
 ):
     register(_cls)
