@@ -7,7 +7,7 @@ import { MiniMap } from '@vue-flow/minimap'
 import {
   Play, Save, Copy, Check, Zap, Globe, Loader2, AlertTriangle,
   Link2, Trash2, Download, Clock, ShieldAlert, Tag as TagIcon, X,
-  History, RotateCcw,
+  History, RotateCcw, Undo2, Redo2,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
 import PNodeCard from '~/components/editor/PNodeCard.vue'
@@ -15,6 +15,7 @@ import NodePalette from '~/components/editor/NodePalette.vue'
 import ConfigPanel from '~/components/editor/ConfigPanel.vue'
 import ExecutionsDrawer from '~/components/editor/ExecutionsDrawer.vue'
 import type { NodeDefinition, NodeSpec } from '~/types/node'
+import { createGraphHistory, type GraphSnapshot } from '~/composables/useGraphHistory'
 
 const route = useRoute()
 const store = usePy8nStore()
@@ -34,6 +35,118 @@ const toasts = ref<{ id: number; text: string; kind: 'info' | 'error' | 'success
 let toastSeq = 0
 
 const { addNodes, addEdges, screenToFlowCoordinate, fitView, onConnect, onNodeClick, onEdgeClick, onPaneClick, onNodeDragStop } = useVueFlow()
+
+// ------------------------------------------------------------------
+// v18: undo/redo + node copy/paste/duplicate
+// ------------------------------------------------------------------
+const history = createGraphHistory()
+const { canUndo, canRedo } = history
+let clipboard: GraphSnapshot | null = null
+let pasteSeq = 0
+let commitTimer: ReturnType<typeof setTimeout> | null = null
+
+// Vue Flow's v-model write-back is deferred (addNodes/addEdges land in
+// vfNodes on the next tick), so commits must be deferred + coalesced —
+// a synchronous read right after addNodes() still sees the old graph.
+function historyCommit() {
+  if (commitTimer) clearTimeout(commitTimer)
+  commitTimer = setTimeout(() => {
+    commitTimer = null
+    history.commit(canvasToGraph())
+  }, 40)
+}
+
+function undoGraph() {
+  if (commitTimer) {
+    // A mutation is still uncommitted — undoing means reverting it, so
+    // drop the pending commit and schedule a no-op-safe re-commit.
+    clearTimeout(commitTimer)
+    commitTimer = null
+    nextTick(() => history.commit(canvasToGraph()))
+  }
+  const snap = history.undo()
+  if (snap) applySnapshot(snap)
+}
+
+function redoGraph() {
+  if (commitTimer) {
+    clearTimeout(commitTimer)
+    commitTimer = null
+    nextTick(() => history.commit(canvasToGraph()))
+  }
+  const snap = history.redo()
+  if (snap) applySnapshot(snap)
+}
+
+function applySnapshot(snap: GraphSnapshot) {
+  graphToCanvas(snap)
+  selectedNodeId.value = null
+  selectedEdgeId.value = null
+  store.markDirty()
+}
+
+function captureSelection() {
+  const selNodes = (vfNodes.value as any[]).filter((n) => n.selected)
+  const ids = new Set<string>(
+    selNodes.length ? selNodes.map((n) => n.id) : selectedNodeId.value ? [selectedNodeId.value] : [],
+  )
+  if (!ids.size) return null
+  const specs = (vfNodes.value as any[])
+    .filter((n) => ids.has(n.id))
+    .map((n) => JSON.parse(JSON.stringify(n.data.spec)))
+  const edges = vfEdges.value
+    .filter((e: any) => ids.has(e.source) && ids.has(e.target))
+    .map((e: any) => JSON.parse(JSON.stringify(e)))
+  return { specs, edges }
+}
+
+function copySelection() {
+  const cap = captureSelection()
+  if (!cap) return
+  clipboard = cap
+  toast(`Copied ${cap.specs.length} node${cap.specs.length > 1 ? 's' : ''}`, 'info')
+}
+
+function pasteSelection() {
+  if (!clipboard?.specs.length) return
+  pasteSeq += 1
+  const idMap: Record<string, string> = {}
+  const newSpecs = clipboard.specs.map((s: any, i: number) => {
+    const id = `p_${Date.now().toString(36).slice(-4)}${pasteSeq}_${i}`
+    idMap[s.id] = id
+    return {
+      ...JSON.parse(JSON.stringify(s)),
+      id,
+      name: `${s.name || s.type} copy`, // n8n-style suffix; keeps run logs readable
+      position: { x: (s.position?.x ?? 0) + 48, y: (s.position?.y ?? 0) + 48 },
+    }
+  })
+  const newEdges = clipboard.edges
+    .map((e: any, i: number) => ({
+      id: `e_p${pasteSeq}_${i}`,
+      source: idMap[e.source],
+      target: idMap[e.target],
+      sourceHandle: e.sourceHandle || 'main',
+      targetHandle: e.targetHandle || 'main',
+    }))
+    .filter((e: any) => e.source && e.target)
+  addNodes(newSpecs.map(specToVfNode))
+  if (newEdges.length) addEdges(newEdges)
+  selectedNodeId.value = newSpecs[0].id
+  selectedEdgeId.value = null
+  store.markDirty()
+  historyCommit()
+  toast(`Pasted ${newSpecs.length} node${newSpecs.length > 1 ? 's' : ''}`, 'success')
+}
+
+function duplicateSelection() {
+  const cap = captureSelection()
+  if (!cap) return
+  const saved = clipboard
+  clipboard = cap
+  pasteSelection()
+  clipboard = saved // Ctrl+D must not clobber the user's clipboard
+}
 
 function toast(text: string, kind: 'info' | 'error' | 'success' = 'info') {
   const id = ++toastSeq
@@ -136,6 +249,7 @@ onMounted(async () => {
   graphToCanvas(store.workflow!.graph || { nodes: [], edges: [] })
   await nextTick()
   fitView({ padding: 0.25, maxZoom: 1.2 })
+  history.reset(canvasToGraph()) // v18: fresh undo history per load
   await store.loadExecutions()
   await store.loadWebhookUrl()
   await store.loadScheduleInfo()
@@ -173,6 +287,7 @@ onConnect((params: Connection) => {
     },
   ])
   store.markDirty()
+  historyCommit()
 })
 
 onNodeClick(({ node }) => {
@@ -187,7 +302,10 @@ onPaneClick(() => {
   selectedNodeId.value = null
   selectedEdgeId.value = null
 })
-onNodeDragStop(() => store.markDirty())
+onNodeDragStop(() => {
+  store.markDirty()
+  historyCommit()
+})
 
 const selectedNodeSpec = computed<NodeSpec | null>(() => {
   if (!selectedNodeId.value) return null
@@ -203,6 +321,7 @@ function updateParam(key: string, value: any) {
   if (!vf) return
   vf.data.spec.parameters = { ...vf.data.spec.parameters, [key]: value }
   store.markDirty()
+  historyCommit()
 }
 
 function updateSettings(patch: Record<string, any>) {
@@ -213,6 +332,7 @@ function updateSettings(patch: Record<string, any>) {
   }
   vf.data.spec.settings = { ...current, ...patch }
   store.markDirty()
+  historyCommit()
 }
 
 function toggleDisabled(value: boolean) {
@@ -220,6 +340,7 @@ function toggleDisabled(value: boolean) {
   if (!vf) return
   vf.data.spec.disabled = value
   store.markDirty()
+  historyCommit()
 }
 
 function updatePinned(value: any) {
@@ -227,6 +348,7 @@ function updatePinned(value: any) {
   if (!vf) return
   vf.data.spec.pinned_data = value ?? undefined // null/undefined = unpinned
   store.markDirty()
+  historyCommit()
 }
 
 // ------------------------------------------------------------------
@@ -329,6 +451,7 @@ async function doRestore(version: number) {
     graphToCanvas(store.workflow?.graph || { nodes: [], edges: [] })
     await nextTick()
     fitView({ padding: 0.25, maxZoom: 1.2 })
+    history.reset(canvasToGraph()) // v18: fresh undo history after restore
     store.markDirty()
     toast(`Restored version ${version} — saved as a new version`, 'success')
   } catch (e: any) {
@@ -362,6 +485,7 @@ function renameNode(name: string) {
   if (!vf) return
   vf.data.spec.name = name
   store.markDirty()
+  historyCommit()
 }
 
 function deleteSelectedNode() {
@@ -370,6 +494,7 @@ function deleteSelectedNode() {
   vfEdges.value = vfEdges.value.filter((e) => e.source !== selectedNodeId.value && e.target !== selectedNodeId.value)
   selectedNodeId.value = null
   store.markDirty()
+  historyCommit()
 }
 
 function deleteSelectedEdge() {
@@ -377,6 +502,7 @@ function deleteSelectedEdge() {
   vfEdges.value = vfEdges.value.filter((e) => e.id !== selectedEdgeId.value)
   selectedEdgeId.value = null
   store.markDirty()
+  historyCommit()
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -386,7 +512,32 @@ function onKeydown(e: KeyboardEvent) {
     if (selectedEdgeId.value) deleteSelectedEdge()
     else if (selectedNodeId.value) deleteSelectedNode()
   }
-  if ((e.metaKey || e.ctrlKey) && e.key === 's') {
+  const mod = e.metaKey || e.ctrlKey
+  if (mod && e.key.toLowerCase() === 'z') {
+    e.preventDefault()
+    if (e.shiftKey) redoGraph()
+    else undoGraph()
+    return
+  }
+  if (mod && e.key.toLowerCase() === 'y') {
+    e.preventDefault()
+    redoGraph()
+    return
+  }
+  if (mod && e.key.toLowerCase() === 'c') {
+    copySelection()
+    return
+  }
+  if (mod && e.key.toLowerCase() === 'v') {
+    pasteSelection()
+    return
+  }
+  if (mod && e.key.toLowerCase() === 'd') {
+    e.preventDefault()
+    duplicateSelection()
+    return
+  }
+  if (mod && e.key === 's') {
     e.preventDefault()
     saveGraph()
   }
@@ -414,6 +565,7 @@ function addNodeFromDef(def: NodeDefinition, position?: { x: number; y: number }
   addNodes([specToVfNode(spec)])
   selectedNodeId.value = id
   store.markDirty()
+  historyCommit()
   toast(`${def.name} added`, 'success')
 }
 
@@ -600,6 +752,23 @@ const runningCount = computed(
       </button>
 
       <div class="ml-auto flex items-center gap-2">
+        <!-- v18: undo / redo -->
+        <button
+          class="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30"
+          title="Undo (Ctrl+Z)"
+          :disabled="!canUndo"
+          @click="undoGraph()"
+        >
+          <Undo2 class="h-3.5 w-3.5" />
+        </button>
+        <button
+          class="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200 disabled:pointer-events-none disabled:opacity-30"
+          title="Redo (Ctrl+Shift+Z)"
+          :disabled="!canRedo"
+          @click="redoGraph()"
+        >
+          <Redo2 class="h-3.5 w-3.5" />
+        </button>
         <button
           class="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
           title="Download workflow as JSON"

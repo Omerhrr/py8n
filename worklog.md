@@ -400,3 +400,39 @@ Work Log:
 
 Stage Summary:
 - Py8n v17: the n8n building loop lands — pin mock output data on any node (manual runs + test steps return it without executing; webhook/schedule/error production runs always execute for real) and test any single step in isolation with ad-hoc input, inline result, zero execution-log noise; pins flow through saves/versions/loops/sub-workflows with honest pinned flags on every node run; 62/62 pytest + smoke + browser verified, backend live at 1.17.0
+
+---
+Task ID: 27 (GitHub publication)
+Agent: main (Super Z)
+Task: Push Py8n to https://github.com/Omerhrr/py8n (user-provided repo + PAT)
+
+Work Log:
+- Git repo pre-existed (20 UUID-named auto-commits, no remote); found tracked sensitive files: .env, mini-services/api-backend/data/.fernet.key + py8n.db (vault key + runtime DB!), .nuxt/ build artifacts, tool-results/, 7.4MB e2e screenshot dump
+- .gitignore extended (.nuxt/, .output/, mini-services/api-backend/data/, *.db, .fernet.key, tool-results/, download/e2e-*.png); git rm --cached all of the above (302 -> 185 tracked files)
+- Secret scan of tracked content: no ghp_/sk- patterns in code (llm-bridge token is local-only bootstrap token, safe)
+- First push exposed the real problem: old commits still carried .fernet.key/py8n.db/.env blobs in history -> since repo was born-empty, squashed everything: git commit-tree HEAD^{tree} -> single orphan root commit 5c8c60e "Py8n v1.17.0 - ..." (full feature body), git reset --hard, reflog expire + gc --prune=now (old UUID history + secret blobs unreferenced locally), force-push -> efd2655...5c8c60e forced update
+- Verified: ls-remote main == 5c8c60e; ls-tree grep for .env/fernet/.db/.nuxt/tool-results == 0 hits; 185 files published
+- Gotchas: (1) git checkout --orphan + add across Bash tool calls did NOT persist (branch vanished, commit said "nothing to commit") -> switched to commit-tree one-shot approach; (2) grep no-match exit code 1 in && chains can mislead; (3) session summary was stale AGAIN (claimed v14 done/v15 pending; actual = v15+v16+v17 delivered, backend 1.17.0) - worklog remains the only source of truth
+
+Stage Summary:
+- Py8n is public at https://github.com/Omerhrr/py8n: single clean commit, 185 files, zero secrets in tree AND in history; remote URL stored without token (token used one-time in push URL, not persisted in .git/config); PAT shared in chat should be rotated by the user
+
+---
+Task ID: 28 (v18 feature wave — Editor ergonomics: Undo/Redo + node copy/paste/duplicate)
+Agent: main (Super Z)
+Task: GitHub publication (Task 27 follow-through) + canvas undo/redo + Ctrl+C/V/D node clipboard
+
+Work Log:
+- (Task 27) Pushed Py8n to github.com/Omerhrr/py8n — see entry above
+- Context: user said "push to GitHub first, then proceed to the next wave"; recon (worklog + API routes) showed v15/v16/v17 all delivered; import/export endpoints + UI ALREADY existed; genuine remaining gap = editor history/clipboard (n8n core ergonomics)
+- Composables/useGraphHistory.ts: snapshot-based history (JSON {nodes,edges} stack, cap 80, redo-branch truncation, dedup-vs-top, suspended guard during apply); page keeps ONE instance per editor
+- KEY BUG + FIX: Vue Flow's v-model write-back is DEFERRED — synchronous historyCommit() right after addNodes() read the OLD graph (identical snapshot → commit no-op → Undo stayed disabled). Fix: coalesced deferred commit (40ms timer) + flush/cancel logic in undo/redo (pending commit cancelled, nextTick re-commit dedups against the reverted state). Lesson: in Vue Flow, mutations via useVueFlow helpers (addNodes/addEdges) need nextTick before reading v-model refs — same family as the existing graphToCanvas+await nextTick pattern
+- Tooling gotcha: MultiEdit was NOT atomic this time — edit 1 of 2 applied, edit 2 failed, leaving applySnapshot deleted while still referenced. Always re-read the file after a MultiEdit failure before re-attempting
+- Commit points wired: addNode, connect, delete node/edge, drag-stop, updateParam, updateSettings, toggleDisabled, updatePinned, renameNode; history.reset on load AND on version restore (fresh timeline); paste = new ids (p_ prefix) + "+48/+48" offset cascade + internal edges remapped + n8n-style "name copy" suffix; Ctrl+D duplicates WITHOUT clobbering the clipboard
+- Keyboard (window handler, input/textarea/select guarded): Ctrl+Z undo · Ctrl+Shift+Z / Ctrl+Y redo · Ctrl+C copy · Ctrl+V paste · Ctrl+D duplicate (joins existing Delete + Ctrl+S); toolbar gains Undo2/Redo2 icon buttons with disabled states bound to canUndo/canRedo computeds
+- pytest 62/62 PASS (backend untouched; version 1.17.0 → 1.18.0, restart-first pattern held) · smoke ALL PASS · backend live at 1.18.0
+- Browser E2E: undo/redo buttons render disabled on load → add HTTP node via palette (3→4, Undo enables) → Ctrl+Z 4→3 → Ctrl+Shift+Z 3→4 → Ctrl+Z 4→3 → Ctrl+Y 3→4 → select Doubler → Ctrl+C/V (4 nodes, "Doubler copy") → Ctrl+D (5) → Ctrl+S: server graph = 4 nodes w/ pasted id p_* type code + code param PRESERVED → Ctrl+Z → Ctrl+S: server back to 3 (undo+save round-trip integrity) → screenshots ×2 → zero console errors
+- Screenshots: download/e2e-v18-{editor-paste,editor-final}.png
+
+Stage Summary:
+- Py8n v18: the canvas is now a real editor — snapshot undo/redo (Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y + toolbar) across structure, drag, params, settings, pins and renames, plus node clipboard (Ctrl+C/V/D) with internal-edge remapping and copy-name suffix; version restore resets the timeline; 62/62 pytest + smoke + browser verified, backend live at 1.18.0
