@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "py8n-llm-bridge",
+      "dependencies": {
+        "z-ai-web-dev-sdk": "^0.0.10",
+      },
+    },
+  },
+  "packages": {
+    "z-ai-web-dev-sdk": ["z-ai-web-dev-sdk@0.0.10", "", { "bin": { "z-ai-generate": "dist/cli.js" } }, "sha512-yMcR3tyReJph9aQkU++KLG9g8z904vjnNjmA4V3SMZagvmejuOd/UtlqAjLGJut6k55DxWByhcPfLEzNnzCTlw=="],
+  }
+}

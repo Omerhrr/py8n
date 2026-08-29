@@ -1,0 +1,13 @@
+node_modules
+.nuxt
+.output
+.git
+dist
+*.log
+.zscripts
+mini-services/api-backend/data
+mini-services/api-backend/__pycache__
+**/__pycache__
+download
+upload
+skills

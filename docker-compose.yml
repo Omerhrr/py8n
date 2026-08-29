@@ -1,0 +1,97 @@
+# Py8n — production cluster
+#
+#   Nuxt 3 frontend  ──►  Caddy (single entrypoint, XTransformPort routing)
+#   FastAPI api      ──►  PostgreSQL   ──►  shared volume
+#   Celery workers   ──►  Redis (broker + events pub/sub)
+#
+# Usage:
+#   docker compose up --build
+#   → open http://localhost:8025  (Py8n UI)
+#
+# The same Caddyfile contract as the sandbox is reused: requests carrying
+# ?XTransformPort=<port> are proxied to that service port, everything else
+# goes to the Nuxt frontend.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: py8n
+      POSTGRES_PASSWORD: py8n_secret
+      POSTGRES_DB: py8n
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U py8n"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: ./mini-services/api-backend
+    environment:
+      PY8N_DEBUG: "false"
+      PY8N_EXECUTION_MODE: celery
+      PY8N_DATABASE_URL: postgresql+asyncpg://py8n:py8n_secret@postgres:5432/py8n
+      PY8N_REDIS_URL: redis://redis:6379/0
+      PY8N_LLM_BRIDGE_URL: http://llm-bridge:3010
+      PY8N_PUBLIC_BASE_URL: http://localhost:8025
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./mini-services/api-backend
+    command: /app/.venv/bin/celery -A app.worker worker --loglevel=info --concurrency=4
+    # If no venv is baked into the image, plain celery works:
+    # command: celery -A app.worker worker --loglevel=info --concurrency=4
+    environment:
+      PY8N_DEBUG: "false"
+      PY8N_EXECUTION_MODE: celery
+      PY8N_DATABASE_URL: postgresql+asyncpg://py8n:py8n_secret@postgres:5432/py8n
+      PY8N_REDIS_URL: redis://redis:6379/0
+      PY8N_LLM_BRIDGE_URL: http://llm-bridge:3010
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  llm-bridge:
+    build: ./mini-services/llm-bridge
+    environment:
+      LLM_BRIDGE_PORT: "3010"
+    # In self-hosted deployments without platform AI credentials the bridge
+    # stays unused — the LLM node then runs against your own
+    # OpenAI-compatible credentials from the encrypted vault.
+
+  frontend:
+    build: .
+    environment:
+      NUXT_PUBLIC_GATEWAY_MODE: gateway
+      NUXT_PUBLIC_API_PORT: "8000"
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "8025:80"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - frontend
+      - api
+
+volumes:
+  pgdata:

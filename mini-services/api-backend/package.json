@@ -1,0 +1,9 @@
+{
+  "name": "py8n-api-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Py8n FastAPI backend — workflow engine, REST API, scheduler, WebSocket stream",
+  "scripts": {
+    "dev": "bash ./start.sh"
+  }
+}

@@ -1,0 +1,152 @@
+"""Execution history endpoints + live run retrieval + rerun."""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ..db import get_db
+from ..models import ExecutionLog, Workflow
+from ..schemas import ResumeRequest
+from ..services.executor import (  # noqa: F401 (rerun + cancel)
+    cancel_execution,
+    dispatch_inline,
+    resume_workflow,
+)
+
+router = APIRouter(prefix="/executions", tags=["executions"])
+
+
+@router.get("")
+async def list_executions(
+    workflow_id: str | None = Query(default=None),
+    status: str | None = Query(default=None, description="success | error | running | waiting | cancelled"),
+    limit: int = Query(default=25, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    stmt = select(ExecutionLog).order_by(ExecutionLog.started_at.desc()).limit(limit)
+    if workflow_id:
+        stmt = stmt.where(ExecutionLog.workflow_id == workflow_id)
+    if status:
+        stmt = stmt.where(ExecutionLog.status == status)
+    rows = (await db.execute(stmt)).scalars().all()
+
+    # Batch-resolve workflow names (single extra query, avoids N+1).
+    names: dict[str, str] = {}
+    wf_ids = {r.workflow_id for r in rows}
+    if wf_ids:
+        name_rows = (
+            await db.execute(select(Workflow.id, Workflow.name).where(Workflow.id.in_(wf_ids)))
+        ).all()
+        names = dict(name_rows)
+
+    return [
+        {
+            "id": r.id,
+            "workflow_id": r.workflow_id,
+            "workflow_name": names.get(r.workflow_id),
+            "status": r.status,
+            "trigger_type": r.trigger_type,
+            "started_at": r.started_at.isoformat() if r.started_at else None,
+            "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+            "duration_ms": r.duration_ms,
+            "error": (r.error[:300] if r.error else None),
+        }
+        for r in rows
+    ]
+
+
+@router.get("/{execution_id}")
+async def get_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+    r = await db.get(ExecutionLog, execution_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    body = {
+        "id": r.id,
+        "workflow_id": r.workflow_id,
+        "status": r.status,
+        "trigger_type": r.trigger_type,
+        "trigger_payload": r.trigger_payload,
+        "started_at": r.started_at.isoformat() if r.started_at else None,
+        "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        "duration_ms": r.duration_ms,
+        "node_runs": r.node_runs or [],
+        "error": r.error,
+    }
+    if r.status == "waiting":
+        meta = (r.context_snapshot or {}).get("py8n_resume") or {}
+        if meta.get("token"):
+            body["resume"] = {
+                "method": "POST",
+                "url": f"/executions/{r.id}/resume",
+                "token": meta["token"],
+                "node_id": meta.get("node_id"),
+            }
+    return body
+
+
+@router.post("/{execution_id}/resume", status_code=202)
+async def resume_execution(execution_id: str, body: ResumeRequest, db: AsyncSession = Depends(get_db)):
+    """Continue a suspended Wait-for-Resume execution with the given token.
+
+    The resume payload becomes the wait node's output; the SAME execution id
+    continues (status flips back to running, then success/error).
+    """
+    try:
+        result = await resume_workflow(execution_id, body.token, body.payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return result
+
+
+@router.post("/{execution_id}/cancel", status_code=202)
+async def cancel_execution_endpoint(execution_id: str):
+    """Cooperatively cancel a running execution (runner stops between nodes).
+
+    The execution row flips to ``cancelled`` synchronously; the in-flight
+    background task winds down at the next node boundary.
+    """
+    try:
+        return await cancel_execution(execution_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post("/{execution_id}/rerun", status_code=202)
+async def rerun_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+    """Re-execute the workflow with the recorded trigger payload (n8n-style retry).
+
+    Runs against the *current* workflow graph; returns the new execution id.
+    """
+    src = await db.get(ExecutionLog, execution_id)
+    if src is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    workflow = await db.get(Workflow, src.workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Source workflow no longer exists")
+    new_id = await dispatch_inline(
+        src.workflow_id,
+        trigger_type=src.trigger_type or "manual",
+        trigger_payload=src.trigger_payload or {},
+    )
+    return {"execution_id": new_id, "rerun_of": execution_id, "workflow_id": src.workflow_id}
+
+
+@router.delete("/{execution_id}")
+async def delete_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+    r = await db.get(ExecutionLog, execution_id)
+    if r is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    await db.delete(r)
+    # Commit inside the endpoint: the get_db dependency's teardown commit runs
+    # AFTER the response is sent, which would let an immediate follow-up GET
+    # observe the not-yet-committed deletion.
+    await db.commit()
+    return {"ok": True, "id": execution_id}

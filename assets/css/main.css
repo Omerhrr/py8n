@@ -1,0 +1,90 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ---- Py8n dark editor base ---- */
+:root {
+  --py8n-bg: #0c0d10;
+  --py8n-panel: #14161b;
+  --py8n-border: #23262e;
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  @apply bg-zinc-950 text-zinc-100 antialiased;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
+}
+
+/* slim scrollbars for panels */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2e323c;
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* vue-flow dark canvas */
+.vue-flow__pane {
+  cursor: grab;
+}
+.vue-flow__edge-path {
+  stroke: #3f3f46;
+  stroke-width: 2;
+}
+.vue-flow__edge.selected .vue-flow__edge-path {
+  stroke: #f97316;
+}
+.vue-flow__edge.animated .vue-flow__edge-path {
+  stroke: #f59e0b;
+}
+.vue-flow__handle {
+  width: 10px;
+  height: 10px;
+  background: #52525b;
+  border: 2px solid #18181b;
+}
+.vue-flow__handle:hover {
+  background: #f97316;
+}
+
+/* dark minimap */
+.vue-flow__minimap,
+.vue-flow__minimap-svg {
+  background: #101116 !important;
+  border: 1px solid #23262e;
+  border-radius: 10px;
+}
+.vue-flow__minimap-svg rect {
+  fill: #2a2d36;
+}
+.vue-flow__minimap-mask {
+  fill: rgba(9, 9, 11, 0.72);
+}
+
+/* dark controls */
+.vue-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid #23262e;
+  box-shadow: none;
+}
+.vue-flow__controls-button {
+  background: #14161b;
+  border-bottom: 1px solid #23262e;
+}
+.vue-flow__controls-button svg {
+  fill: #a1a1aa;
+}
+.vue-flow__controls-button:hover {
+  background: #1c1e24;
+}
