@@ -8,9 +8,10 @@ and dispatches asynchronously (or awaits the last node when configured).
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -18,10 +19,34 @@ from ..db import get_db
 from ..models import Workflow
 from ..services.dispatcher import dispatch_execution
 from ..services.events import get_event_bus
-from ..services.executor import execute_workflow
+from ..services.executor import _background_tasks, execute_workflow
 from ..services.webhook_info import public_webhook_url
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+
+@dataclass
+class WebhookResponder:
+    """Response channel handed to the run's respond_to_webhook node (v21).
+
+    The node calls it with (status_code, body, content_type); the first call
+    wins and releases the waiting HTTP request via the asyncio event.
+    """
+
+    event: asyncio.Event = field(default_factory=asyncio.Event)
+    status: int = 200
+    body: object = None
+    content_type: str = "application/json"
+    responded: bool = False
+
+    async def __call__(self, status_code: int, body: object, content_type: str) -> None:
+        if self.responded:
+            return  # first respond wins; later calls are no-ops
+        self.status = status_code
+        self.body = body
+        self.content_type = content_type
+        self.responded = True
+        self.event.set()
 
 
 async def _load_webhook_workflow(workflow_id: str, db: AsyncSession) -> Workflow:
@@ -58,6 +83,54 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
     params = node.get("parameters") or {}
     response_mode = params.get("response_mode", "immediately")
     envelope = _request_envelope(request, body)
+
+    if response_mode == "respond_node":
+        # v21: run the flow in the background and wait until EITHER a
+        # respond_to_webhook node answers, the flow finishes without answering,
+        # or the wait limit expires. After responding, the flow keeps running.
+        responder = WebhookResponder()
+        flow_task = asyncio.create_task(
+            execute_workflow(
+                workflow_id,
+                trigger_type="webhook",
+                trigger_payload=envelope,
+                trigger_node_id=node["id"],
+                respond_channel=responder,
+            )
+        )
+        _background_tasks.add(flow_task)
+        flow_task.add_done_callback(_background_tasks.discard)
+        waiter = asyncio.create_task(responder.event.wait())
+        done, _pending = await asyncio.wait(
+            {flow_task, waiter},
+            timeout=settings.webhook_wait_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if waiter in done:
+            # Custom answer — the flow (if still running) continues in background.
+            if responder.content_type == "application/json":
+                return JSONResponse(content=responder.body, status_code=responder.status)
+            return PlainTextResponse(
+                str(responder.body), status_code=responder.status, media_type="text/plain"
+            )
+
+        waiter.cancel()
+        if flow_task in done:
+            # Flow ended without answering.
+            if flow_task.exception() is not None:
+                raise HTTPException(status_code=500, detail=f"Workflow failed before responding: {flow_task.exception()}")
+            result = flow_task.result()
+            if result.get("status") == "error":
+                raise HTTPException(status_code=500, detail=f"Workflow errored before responding: {result.get('error')}")
+            raise HTTPException(
+                status_code=404,
+                detail="Workflow finished without calling a Respond to Webhook node",
+            )
+        raise HTTPException(
+            status_code=504,
+            detail=f"Timed out after {settings.webhook_wait_seconds}s waiting for a Respond to Webhook node — the workflow keeps running in the background",
+        )
 
     if response_mode == "last_node":
         # Run synchronously (bounded) and return the last node's output.

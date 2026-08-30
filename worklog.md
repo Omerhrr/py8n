@@ -479,3 +479,23 @@ Work Log:
 
 Stage Summary:
 - Py8n v20: right-click context menus for nodes and connections, workflow settings modal (description + per-workflow retention override honored by the purge engine), and a shortcuts cheat sheet; 68/68 pytest + smoke + browser verified, backend live at 1.20.0
+
+---
+Task ID: 31 (v21 feature wave — Respond to Webhook node + branch edge labels)
+Agent: main (Super Z)
+Task: n8n respond-early pattern (custom mid-flow HTTP responses) + canvas branch labels
+
+Work Log:
+- Context: session resumed; worklog showed v20 (Task 30) fully delivered, backend 1.20.0, 68/68 pytest, git clean. Recon found two genuine gaps: (1) no Respond to Webhook node (only immediately/last_node webhook modes), (2) IF/Switch branch connections rendered as unlabeled lines
+- Engine: ExecutionContext.respond_channel (async callable, None outside respond_node webhook runs); RespondToWebhookNode (engine/nodes/webhook_respond.py) — params status_code 100-599/body Jinja template/content_type select; errors loudly when no caller ("no caller to answer"); JSON bodies parsed after template resolution (invalid -> node error); plain-text mode passes through; output = pass-through input so the flow CONTINUES downstream after answering (n8n semantics); registered -> 21 visible node types
+- Plumbing: GraphRunner respond_channel kwarg set on the context — ONLY the root run (sub-workflows/loop batches never hijack the caller); executor passes through
+- Webhook API (api/webhooks.py): response_mode="respond_node" — WebhookResponder dataclass (first respond wins, asyncio.Event release); flow runs as a tracked background task; asyncio.wait FIRST_COMPLETED race {responder.event, flow_task} bounded by webhook_wait_seconds: respond -> custom JSONResponse/PlainTextResponse with the node's status (flow keeps running); flow done without responding -> 404 ("finished without calling") or 500 with the run error when the flow errored before responding (node errors surface via result.status not exceptions — subtle); timeout -> 504 while the flow continues
+- Trigger schema: response_mode options now [immediately, last_node, respond_node]
+- Tests test_v21_features.py (2): happy path (active webhook flow h->enrich->respond 202->downstream set; real POST via ASGI client returns 202 custom resolved JSON; downstream node EXECUTED after respond; 21 defs) + negative paths (respond_node mode without respond node -> 404; text/plain single-expression body -> PlainTextResponse "hello world"; two respond nodes -> FIRST wins HTTP-side, second still executes; manual run respond -> error "no caller"; invalid JSON body -> 500 "errored before responding" + "not valid JSON"). Suite 70/70 — first full run had a one-off flake in v19 volume-cap (timing under load), then 70/70 x3 consecutive
+- Smoke: v21 section — 21 types + respond def (actions/reply), real live-server webhook -> 202 custom body + downstream ran, no-respond flow -> 404. ALL PASS (patched the v19-era "expected 20 node types" assert)
+- Frontend: branchEdgeExtras() derives edge labels from sourceHandle on every canvas build (graphToCanvas/onConnect/pasteSelection) — true #34d399 / false #fb7185 / fallback #fbbf24 / rule N (Switch) rose; labels DERIVED never persisted (canvasToGraph untouched); PNodeCard reply icon; footer v1.21 · 21 node types
+- E2E war story: my demo template used nodes.if1.output.input.* — WRONG: branch nodes expose outputs['true'] via nodes.X.output.true.* (the .input error fired the LIVE 500 errored-before-responding path — accidental bonus verification); fixed templates -> urgent POST = 202 {"ticket":"T-42","routed":"urgent","accepted":true}, normal POST = 404. Browser: canvas labels visible (true emerald/false rose), respond node config panel (status number input + body textarea + hint), Hook response_mode select shows respond_node, activated via "Triggers on" toggle, drawer shows urgent run (respond SUCCESS + Queue normal skipped) and normal run (respond "no active input" skip + Queue normal success); zero console errors
+- Screenshots: download/e2e-v21-{canvas-labels,respond-panel,respond-panel2,exec-drawer}.png
+
+Stage Summary:
+- Py8n v21: the webhook story is complete — Respond to Webhook node answers the caller mid-flow with custom status/body (JSON or plain text) while the flow continues downstream, with honest 404/500/504 semantics when no answer comes, plus true/false/rule-N edge labels making branches readable at a glance; 70/70 pytest + smoke + browser verified, backend live at 1.21.0

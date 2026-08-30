@@ -47,7 +47,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 20, "expected 20 node types after v19 wave"
+    assert len(types) == 21, "expected 21 node types after v21 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1186,6 +1186,80 @@ def main() -> None:
     status, pol = req("GET", "/settings/retention")
     assert status == 200 and pol["retention_days"] == 30, pol
     print("v20 overrides OK")
+
+    # ------------------------------------------------------------------ v21
+    print("== v21: respond_to_webhook node (custom mid-flow HTTP response) ==")
+    status, defs = req("GET", "/node-definitions")
+    assert status == 200
+    types21 = [d["type"] for d in defs["definitions"]]
+    assert len(types21) == 21 and "respond_to_webhook" in types21, types21
+    rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
+    assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
+    print("21 node types, respond_to_webhook exported OK")
+
+    status, wf21 = req("POST", "/workflows", {"name": f"tmp v21 respond {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "h", "type": "webhook_trigger", "name": "Hook", "position": {"x": 0, "y": 0},
+             "parameters": {"response_mode": "respond_node", "allowed_methods": "POST"}},
+            {"id": "e", "type": "code", "name": "Enricher", "position": {"x": 220, "y": 0},
+             "parameters": {"code": "src = input_data.get('body') or {}\nresult = {'ticket': src.get('ticket'), 'level': (src.get('level') or 'normal')}\n"}},
+            {"id": "r", "type": "respond_to_webhook", "name": "Answer caller", "position": {"x": 440, "y": 0},
+             "parameters": {"status_code": 202,
+                            "body": '{"ticket": "{{ nodes.e.output.result.ticket }}", "level": "{{ nodes.e.output.result.level }}", "accepted": true}',
+                            "content_type": "application/json"}},
+            {"id": "d", "type": "set_variable", "name": "After respond", "position": {"x": 660, "y": 0},
+             "parameters": {"assignments": {"done": "{{ nodes.e.output.result.ticket }}"}, "keep_input": False}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "h", "target": "e", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e2", "source": "e", "target": "r", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e3", "source": "r", "target": "d", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }, "is_active": False})
+    assert status == 201, wf21
+    hook21 = wf21
+    try:
+        status, act = req("POST", f"/workflows/{wf21['id']}/activate")
+        assert status == 200 and act["is_active"] is True, act
+        # REAL webhook call: custom 202 + resolved JSON body
+        status, body = req("POST", f"/webhooks/{wf21['id']}", {"ticket": "T-777", "level": "urgent"})
+        assert status == 202, (status, body)
+        assert body == {"ticket": "T-777", "level": "urgent", "accepted": True}, body
+        # flow kept running after the respond — downstream node executed
+        status, execs = req("GET", f"/executions?workflow_id={wf21['id']}&limit=5")
+        wh_execs = [e for e in execs if e["trigger_type"] == "webhook"]
+        assert len(wh_execs) == 1, execs
+        detail = None
+        for _ in range(40):
+            status, detail = req("GET", f"/executions/{wh_execs[0]['id']}")
+            if detail["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert detail["status"] == "success", detail.get("error")
+        runs21 = {r["node_id"]: r for r in detail["node_runs"]}
+        assert runs21["r"]["status"] == "success" and runs21["d"]["status"] == "success", runs21
+        assert runs21["d"]["output"]["done"] == "T-777"
+        print("real webhook: 202 custom body + downstream ran after respond OK")
+        # respond_node mode without a respond node -> 404
+        status, wf21b = req("POST", "/workflows", {"name": f"tmp v21 noresp {uuid.uuid4().hex[:6]}", "graph": {
+            "nodes": [
+                {"id": "h", "type": "webhook_trigger", "name": "Hook", "position": {"x": 0, "y": 0},
+                 "parameters": {"response_mode": "respond_node"}},
+                {"id": "s", "type": "set_variable", "name": "Map", "position": {"x": 220, "y": 0},
+                 "parameters": {"assignments": {"x": "1"}, "keep_input": False}},
+            ],
+            "edges": [{"id": "e1", "source": "h", "target": "s", "sourceHandle": "main", "targetHandle": "main"}],
+        }, "is_active": False})
+        assert status == 201, wf21b
+        status, act = req("POST", f"/workflows/{wf21b['id']}/activate")
+        assert status == 200, act
+        status, body = req("POST", f"/webhooks/{wf21b['id']}", {"ping": 1})
+        assert status == 404 and "without calling" in body["detail"], (status, body)
+        print("respond_node mode without respond node -> 404 OK")
+    finally:
+        req("DELETE", f"/workflows/{wf21['id']}")
+        req("DELETE", f"/workflows/{wf21b['id']}")
+    print("v21 respond-to-webhook OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

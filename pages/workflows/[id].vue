@@ -131,6 +131,7 @@ function pasteSelection() {
       target: idMap[e.target],
       sourceHandle: e.sourceHandle || 'main',
       targetHandle: e.targetHandle || 'main',
+      ...branchEdgeExtras(e.sourceHandle),
     }))
     .filter((e: any) => e.source && e.target)
   addNodes(newSpecs.map(specToVfNode))
@@ -169,6 +170,32 @@ function specToVfNode(spec: NodeSpec): Node {
   }
 }
 
+// v21: branch connection labels — IF true/false, Switch rule N / fallback.
+// Labels are DERIVED from sourceHandle on every canvas build, never persisted
+// (canvasToGraph only saves sourceHandle), so imports/pastes stay clean.
+function branchEdgeExtras(handle?: string | null) {
+  const h = handle || 'main'
+  if (h === 'main') return {}
+  const conf =
+    h === 'true'
+      ? { text: 'true', fill: '#34d399' }
+      : h === 'false'
+        ? { text: 'false', fill: '#fb7185' }
+        : h === 'fallback'
+          ? { text: 'fallback', fill: '#fbbf24' }
+          : /^[0-9]+$/.test(h)
+            ? { text: `rule ${Number(h) + 1}`, fill: '#fb7185' }
+            : { text: h, fill: '#a1a1aa' }
+  return {
+    label: conf.text,
+    labelShowBg: true,
+    labelStyle: { fill: conf.fill, fontSize: 10, fontWeight: 700 },
+    labelBgStyle: { fill: '#18181b', fillOpacity: 0.92 },
+    labelBgPadding: [6, 2] as [number, number],
+    labelBgBorderRadius: 4,
+  }
+}
+
 function graphToCanvas(graph: { nodes: NodeSpec[]; edges: any[] }) {
   vfNodes.value = (graph.nodes || []).map(specToVfNode)
   vfEdges.value = (graph.edges || []).map((e) => ({
@@ -178,6 +205,7 @@ function graphToCanvas(graph: { nodes: NodeSpec[]; edges: any[] }) {
     sourceHandle: e.sourceHandle || 'main',
     targetHandle: e.targetHandle || 'main',
     animated: store.nodeStates[e.source] === 'running',
+    ...branchEdgeExtras(e.sourceHandle),
   }))
 }
 
@@ -288,6 +316,7 @@ onConnect((params: Connection) => {
       target: params.target!,
       sourceHandle: params.sourceHandle || 'main',
       targetHandle: params.targetHandle || 'main',
+      ...branchEdgeExtras(params.sourceHandle),
     },
   ])
   store.markDirty()

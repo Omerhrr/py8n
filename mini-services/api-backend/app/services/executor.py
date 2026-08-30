@@ -32,6 +32,7 @@ async def execute_workflow(
     trigger_node_id: str | None = None,
     execution_id: str | None = None,
     log_created: bool = False,
+    respond_channel: Any | None = None,
 ) -> dict:
     """Load the workflow, run the graph, persist and broadcast events."""
     execution_id = execution_id or uuid.uuid4().hex
@@ -78,6 +79,7 @@ async def execute_workflow(
         # v17: only manual runs honor pinned node data — webhook / schedule /
         # error dispatches always execute for real.
         honor_pinned=(trigger_type == "manual"),
+        respond_channel=respond_channel,
     )
     try:
         result = await runner.run()

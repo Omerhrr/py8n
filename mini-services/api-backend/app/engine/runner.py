@@ -56,6 +56,7 @@ class GraphRunner:
         cancel_event: asyncio.Event | None = None,
         env_vars: dict[str, str] | None = None,
         honor_pinned: bool | None = None,
+        respond_channel: Any | None = None,
     ):
         self.graph = graph
         self.workflow_id = workflow_id
@@ -84,6 +85,10 @@ class GraphRunner:
         # auto-derive from the trigger type. Loop batches and sub-workflows
         # inherit this runner's decision explicitly.
         self.honor_pinned = (trigger_type == "manual") if honor_pinned is None else honor_pinned
+        # v21 Respond to Webhook: the webhook endpoint installs an async
+        # callable that the respond_to_webhook node awaits. ONLY the root run
+        # receives it — sub-workflows / loop bodies never hijack the caller.
+        self.respond_channel = respond_channel
         # Outputs of nodes that already ran in a PARENT run — seeded into the
         # context so loop bodies / sub-runs can reference upstream nodes.
         self.inherit_node_states: dict[str, dict] = inherit_node_states or {}
@@ -147,6 +152,7 @@ class GraphRunner:
             env_vars=self.env_vars or {},
             honor_pinned=self.honor_pinned,
         )
+        context.respond_channel = self.respond_channel
         if self.inherit_node_states:
             context.node_states.update(self.inherit_node_states)
 

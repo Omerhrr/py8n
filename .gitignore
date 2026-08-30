@@ -57,3 +57,7 @@ skills/
 local-*
 test
 prompt
+
+# Python bytecode (regenerated at runtime — never project files)
+__pycache__/
+*.pyc

@@ -51,6 +51,13 @@ class ExecutionContext:
     # production triggers (webhook/schedule/error) never do.
     honor_pinned: bool = False
 
+    # v21 Respond to Webhook: async callable ``send(status_code, body,
+    # content_type)`` installed ONLY by webhook runs with response_mode=
+    # "respond_node". The respond_to_webhook node calls it to release the
+    # waiting HTTP request; every other run leaves it None and the node
+    # fails with a clear explanation instead of silently no-op'ing.
+    respond_channel: Any = None
+
     # ------------------------------------------------------------------
     def as_jinja_context(self) -> dict[str, Any]:
         return {

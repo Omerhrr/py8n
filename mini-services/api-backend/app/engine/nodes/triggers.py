@@ -59,8 +59,12 @@ class WebhookTriggerNode(BaseNode):
     class ParamsModel(BaseModel):
         response_mode: str = Field(
             default="immediately",
-            description="Reply to the caller right away, or wait for the last node result",
-            json_schema_extra={"widget": "select", "options": ["immediately", "last_node"]},
+            description=(
+                "immediately = reply 202 at once; last_node = wait and return the final "
+                "node output; respond_node = wait for a Respond to Webhook node to send a "
+                "custom response mid-flow"
+            ),
+            json_schema_extra={"widget": "select", "options": ["immediately", "last_node", "respond_node"]},
         )
         allowed_methods: str = Field(
             default="POST",
