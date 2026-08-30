@@ -337,7 +337,7 @@ def compute_chart(components: list[dict], df: pd.DataFrame) -> dict | None:
             grouped = (
                 pd.to_numeric(df[col], errors="coerce")
                 .groupby(series)
-                .agg(comp.get("agg", "avg"))
+                .agg("mean" if comp.get("agg", "avg") == "avg" else comp.get("agg", "avg"))
                 .dropna()
             )
             labels = [str(v) for v in grouped.index[:12]]

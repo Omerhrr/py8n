@@ -280,3 +280,34 @@ class App(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class Dashboard(Base):
+    """First-class dashboard (v31) — the analytical face of the Data OS.
+
+    Where an App binds ONE dataset and owns the write path, a Dashboard is
+    read-only analytics over MANY datasets: every component carries its own
+    ``dataset_id``, so one board can mix KPIs from a CRM dataset with
+    breakdown charts from a billing dataset. Published boards are served at
+    ``/d/{slug}``.
+
+    config = {"components": [
+        {"id", "type": "stat",  "dataset_id", "label", "agg", "column"?},
+        {"id", "type": "chart", "dataset_id", "title", "chart_type": bar|line|pie,
+         "group_by", "agg", "column"?},
+        {"id", "type": "table", "dataset_id", "title", "columns", "limit"?},
+        {"id", "type": "text",  "title", "body"},
+    ]}
+    """
+
+    __tablename__ = "dashboards"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    # {"components": [{id, type: stat|chart|table|text, ...type params}]}
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

@@ -360,3 +360,33 @@ class RulesPut(BaseModel):
 class RulesTestIn(BaseModel):
     record: dict = Field(min_length=1, max_length=200)
     event: str = Field(default="create", description="create | update")
+
+
+# ------------------------------------------------------------------ v31 dashboards
+class DashboardCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    dataset_ids: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Generate the layout from these datasets (order matters); empty + generate=false → blank",
+    )
+    generate: bool = Field(default=True, description="Auto-lay-out components from the given datasets")
+    config: dict | None = Field(default=None, description="Explicit config wins over generate")
+
+
+class DashboardUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    config: dict | None = None
+
+
+class DashboardOut(BaseModel):
+    id: str
+    name: str
+    slug: str
+    description: str = ""
+    config: dict = Field(default_factory=dict)
+    status: str = "draft"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None

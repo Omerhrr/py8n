@@ -1,0 +1,159 @@
+<script setup lang="ts">
+// Shared dashboard board renderer (v31) — used by the builder's live preview
+// and the public /d/{slug} page. Input: the RENDERED component payload from
+// POST /dashboards/{ref}/preview or GET /dashboards/{slug}/runtime.
+import { computed } from 'vue'
+
+const props = defineProps<{
+  components: any[]
+  accent?: string // tailwind gradient classes for bars
+}>()
+
+const ACCENT = computed(() => props.accent || 'from-cyan-500/80 to-cyan-400/50')
+
+// ---------- helpers ----------
+function statDisplay(v: any) {
+  if (v === null || v === undefined) return '—'
+  const n = Number(v)
+  if (Number.isFinite(n)) {
+    if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}M`
+    if (Math.abs(n) >= 10000) return `${(n / 1000).toFixed(1)}k`
+    if (!Number.isInteger(n)) return n.toLocaleString(undefined, { maximumFractionDigits: 2 })
+  }
+  return String(v)
+}
+
+const chartMaxes = computed(() => {
+  const m: Record<string, number> = {}
+  for (const c of props.components) {
+    if (c.type === 'chart') m[c.id] = Math.max(1, ...(c.values || [1]))
+  }
+  return m
+})
+
+// pie slices → conic-gradient stops
+function pieStyle(c: any) {
+  const total = (c.values || []).reduce((a: number, b: number) => a + b, 0) || 1
+  const palette = ['#06b6d4', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444', '#3b82f6', '#ec4899', '#84cc16']
+  let acc = 0
+  const stops: string[] = []
+  c.values.forEach((v: number, i: number) => {
+    const from = (acc / total) * 100
+    acc += v
+    const to = (acc / total) * 100
+    stops.push(`${palette[i % palette.length]} ${from}% ${to}%`)
+  })
+  return { background: `conic-gradient(${stops.join(', ')})`, total }
+}
+
+// line chart → svg polyline points
+function linePoints(c: any, w = 320, h = 120, pad = 6) {
+  const vals = c.values || []
+  const n = vals.length
+  const max = chartMaxes.value[c.id] || 1
+  if (!n) return { pts: '', area: '' }
+  const x = (i: number) => pad + (i * (w - pad * 2)) / Math.max(1, n - 1)
+  const y = (v: number) => h - pad - (v / max) * (h - pad * 2)
+  const pts = vals.map((v: number, i: number) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
+  const area = `${pad},${h - pad} ${pts} ${x(n - 1).toFixed(1)},${h - pad}`
+  return { pts, area }
+}
+</script>
+
+<template>
+  <div>
+    <template v-for="comp in components" :key="comp.id">
+      <!-- stat card -->
+      <div v-if="comp.type === 'stat'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+        <p class="truncate text-[11px] font-medium uppercase tracking-wide text-zinc-500">{{ comp.label }}</p>
+        <p class="mt-1.5 text-2xl font-bold tabular-nums text-zinc-50">{{ statDisplay(comp.value) }}</p>
+      </div>
+
+      <!-- text / narrative -->
+      <div v-else-if="comp.type === 'text'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+        <p v-if="comp.title" class="text-sm font-semibold text-zinc-200">{{ comp.title }}</p>
+        <p v-if="comp.body" class="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{{ comp.body }}</p>
+      </div>
+
+      <!-- chart -->
+      <div v-else-if="comp.type === 'chart'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+        <div class="flex items-center justify-between gap-2">
+          <p class="truncate text-sm font-semibold text-zinc-200">{{ comp.title || 'Chart' }}</p>
+          <span class="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-medium uppercase text-zinc-400">{{ comp.chart_type }}</span>
+        </div>
+
+        <!-- bar -->
+        <div v-if="comp.chart_type !== 'pie' && comp.labels.length" class="mt-3">
+          <div class="space-y-2">
+            <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-2">
+              <span class="w-24 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
+              <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-800/60">
+                <div class="h-full rounded-md bg-gradient-to-r" :class="ACCENT" :style="{ width: `${Math.max(4, (comp.values[i] / (chartMaxes[comp.id] || 1)) * 100)}%` }" />
+              </div>
+              <span class="w-12 text-right text-[11px] tabular-nums text-zinc-400">{{ comp.values[i] }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- line -->
+        <div v-else-if="comp.chart_type === 'line' && comp.labels.length" class="mt-3">
+          <svg viewBox="0 0 320 120" class="h-32 w-full" preserveAspectRatio="none">
+            <polygon :points="linePoints(comp).area" fill="url(#lg)" opacity="0.25" />
+            <polyline :points="linePoints(comp).pts" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+            <defs>
+              <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#06b6d4" />
+                <stop offset="100%" stop-color="#06b6d4" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+          </svg>
+          <div class="mt-1 flex justify-between text-[10px] text-zinc-500">
+            <span>{{ comp.labels[0] }}</span>
+            <span>{{ comp.labels[comp.labels.length - 1] }}</span>
+          </div>
+        </div>
+
+        <!-- pie -->
+        <div v-else-if="comp.chart_type === 'pie' && comp.labels.length" class="mt-3 flex items-center gap-4">
+          <div class="relative h-24 w-24 shrink-0 rounded-full" :style="pieStyle(comp)">
+            <div class="absolute inset-[10px] rounded-full bg-zinc-900" />
+          </div>
+          <div class="min-w-0 flex-1 space-y-1">
+            <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-1.5 text-[11px]">
+              <span class="h-2 w-2 shrink-0 rounded-full" :style="{ background: ['#06b6d4', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444', '#3b82f6', '#ec4899', '#84cc16'][i % 8] }" />
+              <span class="min-w-0 flex-1 truncate text-zinc-400">{{ label }}</span>
+              <span class="tabular-nums text-zinc-500">{{ comp.values[i] }} ({{ Math.round((comp.values[i] / (pieStyle(comp).total || 1)) * 100) }}%)</span>
+            </div>
+          </div>
+        </div>
+
+        <p v-else class="mt-2 text-[11px] text-zinc-600">No data to chart yet.</p>
+      </div>
+
+      <!-- table -->
+      <div v-else-if="comp.type === 'table'" class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+        <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
+          <p class="truncate text-sm font-semibold text-zinc-200">{{ comp.title || 'Table' }}</p>
+          <span class="shrink-0 text-[10px] text-zinc-500">{{ comp.row_count }} rows</span>
+        </div>
+        <div v-if="comp.rows.length" class="overflow-x-auto">
+          <table class="w-full text-left text-xs">
+            <thead>
+              <tr class="border-b border-zinc-800/60 text-[10px] uppercase tracking-wide text-zinc-500">
+                <th v-for="col in comp.columns" :key="col" class="px-4 py-2 font-medium">{{ col }}</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(row, ri) in comp.rows" :key="ri" class="border-b border-zinc-800/40 last:border-0">
+                <td v-for="col in comp.columns" :key="col" class="max-w-[220px] truncate px-4 py-2 text-zinc-300">
+                  {{ row[col] === null || row[col] === undefined || row[col] === '' ? '—' : row[col] }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-else class="px-4 py-4 text-[11px] text-zinc-600">No rows yet.</p>
+      </div>
+    </template>
+  </div>
+</template>

@@ -1946,7 +1946,8 @@ def main() -> None:
     # ---------------------------------------------------------------
     print("\n== v30: forms & business rules ==")
     status, health30 = req("GET", "/health")
-    assert status == 200 and health30["version"] == "1.30.0", health30
+    # strict pin lives in the latest wave only (v31 convention)
+    assert status == 200 and health30["version"] >= "1.30.0", health30
 
     tag30 = uuid.uuid4().hex[:6]
     rows30 = [
@@ -2033,6 +2034,89 @@ def main() -> None:
         req("DELETE", f"/apps/{app30['id']}")
         req("DELETE", f"/datasets/{ds30['id']}")
     print("v30 forms & business rules OK")
+
+    # ---------------------------------------------------------------
+    # v31: dashboards — multi-dataset boards, preview + runtime, tolerant compute
+    # ---------------------------------------------------------------
+    print("\n== v31: dashboards ==")
+    status, health31 = req("GET", "/health")
+    assert status == 200 and health31["version"] == "1.31.0", health31
+
+    tag31 = uuid.uuid4().hex[:6]
+    rows31a = [
+        {"client": "Acme", "plan": "starter", "ltv": 1200},
+        {"client": "Borealis", "plan": "pro", "ltv": 3400},
+        {"client": "Cinder", "plan": "starter", "ltv": 900},
+        {"client": "Dune", "plan": "enterprise", "ltv": 9800},
+    ]
+    rows31b = [
+        {"invoice": "INV-1", "status": "paid", "amount": 250},
+        {"invoice": "INV-2", "status": "open", "amount": 480},
+        {"invoice": "INV-3", "status": "paid", "amount": 310},
+        {"invoice": "INV-4", "status": "void", "amount": 90},
+    ]
+    status, ds31a = req("POST", "/datasets", {"name": f"smoke31 crm {tag31}", "rows": rows31a})
+    assert status == 201, ds31a
+    status, ds31b = req("POST", "/datasets", {"name": f"smoke31 billing {tag31}", "rows": rows31b})
+    assert status == 201, ds31b
+    try:
+        # generated board from TWO datasets — per-component dataset binding
+        status, dash31 = req("POST", "/dashboards", {"name": f"smoke31 wall {tag31}", "dataset_ids": [ds31a["id"], ds31b["id"]]})
+        assert status == 201, dash31
+        comps31 = dash31["config"]["components"]
+        types31 = [c["type"] for c in comps31]
+        assert types31.count("stat") == 4 and types31.count("chart") == 2 and types31.count("table") == 1, types31
+        assert all(c["dataset_id"] in (ds31a["id"], ds31b["id"]) for c in comps31)
+        print("generated board: 4 stats + 2 charts + 1 table over 2 datasets OK")
+
+        # hand-tune: exact-numbers components + a line chart + a text note
+        cfg31 = {"components": [
+            {"id": "k_crm", "type": "stat", "dataset_id": ds31a["id"], "label": "Clients", "agg": "count"},
+            {"id": "k_bill", "type": "stat", "dataset_id": ds31b["id"], "label": "Billing sum", "agg": "sum", "column": "amount"},
+            {"id": "c_bar", "type": "chart", "dataset_id": ds31a["id"], "title": "By plan", "chart_type": "bar", "group_by": "plan", "agg": "count"},
+            {"id": "c_line", "type": "chart", "dataset_id": ds31b["id"], "title": "Avg by status", "chart_type": "line", "group_by": "status", "agg": "avg", "column": "amount"},
+            {"id": "t_crm", "type": "table", "dataset_id": ds31a["id"], "title": "Latest", "columns": ["client", "ltv"], "limit": 2},
+            {"id": "n_note", "type": "text", "title": "Read me", "body": "Ops wall"},
+        ]}
+        status, _ = req("PATCH", f"/dashboards/{dash31['id']}", {"config": cfg31})
+        assert status == 200
+        status, prev31 = req("POST", f"/dashboards/{dash31['id']}/preview")
+        assert status == 200, prev31
+        p31 = {c["id"]: c for c in prev31["components"]}
+        assert p31["k_crm"]["value"] == 4 and p31["k_bill"]["value"] == 1130, p31
+        assert p31["c_bar"]["labels"] == ["starter", "pro", "enterprise"]
+        assert p31["c_bar"]["values"] == [2, 1, 1]
+        assert p31["c_line"]["labels"] == ["open", "paid", "void"]  # sorted ascending
+        assert p31["c_line"]["values"] == [480, 280, 90]
+        assert [r["client"] for r in p31["t_crm"]["rows"]] == ["Acme", "Borealis"]
+        print("preview on draft: stats/bar/line(sorted)/table/text exact OK")
+
+        # publish → runtime serves the same numbers for /d/{slug}
+        status, pub31 = req("POST", f"/dashboards/{dash31['id']}/publish")
+        assert status == 200 and pub31["status"] == "published", pub31
+        status, rt31 = req("GET", f"/dashboards/{dash31['slug']}/runtime")
+        assert status == 200, rt31
+        r31 = {c["id"]: c for c in rt31["components"]}
+        assert r31["k_crm"]["value"] == 4 and r31["k_bill"]["value"] == 1130
+        assert {d["name"] for d in rt31["datasets"]} == {ds31a["name"], ds31b["name"]}
+        # config PATCH is locked while published
+        status, _ = req("PATCH", f"/dashboards/{dash31['id']}", {"config": cfg31})
+        assert status == 409
+        print("runtime published + config locked OK")
+
+        # tolerant compute: delete a dataset under the live board → still 200
+        status, _ = req("DELETE", f"/datasets/{ds31b['id']}")
+        assert status in (200, 204)
+        status, rt31b = req("GET", f"/dashboards/{dash31['slug']}/runtime")
+        assert status == 200, rt31b
+        r31b = {c["id"]: c for c in rt31b["components"]}
+        assert r31b["k_bill"]["value"] is None and r31b["c_line"]["labels"] == []
+        print("board survives dataset deletion (no data ≠ zero) OK")
+    finally:
+        req("DELETE", f"/dashboards/{dash31['id']}")
+        req("DELETE", f"/datasets/{ds31a['id']}")
+        req("DELETE", f"/datasets/{ds31b['id']}")
+    print("v31 dashboards OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
