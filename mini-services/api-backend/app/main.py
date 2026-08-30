@@ -59,6 +59,7 @@ app.add_middleware(
 # ---------------------------------------------------------------- routers
 from .api.credentials import router as credentials_router  # noqa: E402
 from .api.chat import router as chat_router  # noqa: E402
+from .api.datasets import router as datasets_router  # noqa: E402
 from .api.env_vars import router as env_vars_router  # noqa: E402
 from .api.executions import router as executions_router  # noqa: E402
 from .api.folders import router as folders_router  # noqa: E402
@@ -77,6 +78,7 @@ app.include_router(executions_router, prefix=API)
 app.include_router(schedules_router, prefix=API)
 app.include_router(webhooks_router, prefix=API)
 app.include_router(chat_router, prefix=API)
+app.include_router(datasets_router, prefix=API)
 app.include_router(credentials_router, prefix=API)
 app.include_router(env_vars_router, prefix=API)
 app.include_router(folders_router, prefix=API)

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.26.0"
+    version: str = "1.27.0"
     debug: bool = True
 
     # ------------------------------------------------------------------
@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     webhook_wait_seconds: int = 25          # max wait for response_mode=last_node
     max_output_capture: int = 20_000        # chars of node output persisted per node
     execution_history_limit: int = 200      # executions retained per workflow
+
+    # v27: parquet files for first-class datasets live here
+    datasets_dir: Path = BASE_DIR / "data" / "datasets"
 
     # CORS (self-hosted, permissive by default)
     cors_origins: list[str] = ["*"]

@@ -213,3 +213,25 @@ class AgentMemory(Base):
     session_key: Mapped[str] = mapped_column(String(255), primary_key=True)
     messages: Mapped[list] = mapped_column(JSONVariant, default=list)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class Dataset(Base):
+    """First-class tabular dataset (v27) — the data platform foundation.
+
+    Rows live in a Parquet file (``{id}.parquet`` under data/datasets/,
+    written/read via DuckDB); this row holds metadata only. Workflows and
+    apps read/write datasets through the dataset_* nodes and REST API.
+    """
+
+    __tablename__ = "datasets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    file_path: Mapped[str] = mapped_column(String(200), default="")  # relative filename
+    # [{"name": "...", "dtype": "text|integer|number|boolean|datetime"}]
+    schema_json: Mapped[list] = mapped_column(JSONVariant, default=list)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(20), default="api")  # api|upload|workflow
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

@@ -1,0 +1,323 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, watch } from 'vue'
+import {
+  Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
+  Play, BarChart3, Table2, X,
+} from 'lucide-vue-next'
+import { useApi } from '~/composables/useApi'
+
+const { api } = useApi()
+const route = useRoute()
+const ref_ = computed(() => String(route.params.id))
+
+interface DatasetMeta {
+  id: string
+  name: string
+  description: string
+  schema_json: { name: string; dtype: string }[]
+  row_count: number
+  source: string
+  created_at: string | null
+  updated_at: string | null
+}
+
+const loading = ref(true)
+const meta = ref<DatasetMeta | null>(null)
+const error = ref<string | null>(null)
+const deleting = ref(false)
+
+// data preview
+const rows = ref<any[]>([])
+const columns = ref<string[]>([])
+const offset = ref(0)
+const pageSize = 25
+const loadingRows = ref(false)
+
+// profile
+const profile = ref<any>(null)
+const loadingProfile = ref(false)
+
+// sql console
+const sql = ref('')
+const running = ref(false)
+const sqlResult = ref<{ columns: string[]; rows: any[]; row_count: number; duration_ms: number; views: Record<string, string> } | null>(null)
+const sqlError = ref<string | null>(null)
+
+async function loadMeta() {
+  loading.value = true
+  error.value = null
+  try {
+    meta.value = await api.get<DatasetMeta>(`/datasets/${ref_.value}`)
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Dataset not found'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function loadRows() {
+  if (!meta.value) return
+  loadingRows.value = true
+  try {
+    const data = await api.get<any>(`/datasets/${meta.value.id}/rows?offset=${offset.value}&limit=${pageSize}`)
+    rows.value = data.rows
+    columns.value = data.columns
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Failed to load rows'
+  } finally {
+    loadingRows.value = false
+  }
+}
+
+async function loadProfile() {
+  if (!meta.value) return
+  loadingProfile.value = true
+  try {
+    profile.value = await api.get<any>(`/datasets/${meta.value.id}/profile`)
+  } catch {
+    profile.value = null
+  } finally {
+    loadingProfile.value = false
+  }
+}
+
+onMounted(async () => {
+  await loadMeta()
+  if (meta.value) {
+    await Promise.all([loadRows(), loadProfile()])
+  }
+})
+
+watch(offset, loadRows)
+
+async function runSql() {
+  if (!sql.value.trim()) return
+  running.value = true
+  sqlError.value = null
+  try {
+    sqlResult.value = await api.post<any>('/datasets/query', { sql: sql.value })
+  } catch (e: any) {
+    sqlError.value = e?.data?.detail || e?.message || 'SQL failed'
+    sqlResult.value = null
+  } finally {
+    running.value = false
+  }
+}
+
+async function removeDataset() {
+  if (!meta.value) return
+  if (!confirm(`Delete dataset "${meta.value.name}" and its ${meta.value.row_count} rows?`)) return
+  deleting.value = true
+  try {
+    await api.del(`/datasets/${meta.value.id}`)
+    navigateTo('/datasets')
+  } catch (e: any) {
+    alert(e?.data?.detail || e?.message || 'Delete failed')
+    deleting.value = false
+  }
+}
+
+function fmtCell(v: any): string {
+  if (v === null || v === undefined) return '—'
+  if (typeof v === 'object') return JSON.stringify(v)
+  return String(v)
+}
+
+function fmtDate(iso: string | null) {
+  if (!iso) return '—'
+  return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+}
+
+const dtypeColor: Record<string, string> = {
+  integer: 'text-sky-300 border-sky-500/30 bg-sky-500/10',
+  number: 'text-cyan-300 border-cyan-500/30 bg-cyan-500/10',
+  boolean: 'text-amber-300 border-amber-500/30 bg-amber-500/10',
+  datetime: 'text-violet-300 border-violet-500/30 bg-violet-500/10',
+  text: 'text-zinc-300 border-zinc-700 bg-zinc-800/60',
+}
+</script>
+
+<template>
+  <div class="pb-10 text-zinc-100">
+    <header class="sticky top-0 z-20 border-b border-zinc-800/80 bg-zinc-950/90 backdrop-blur">
+      <div class="mx-auto flex max-w-6xl items-center gap-3 px-4 py-3.5 lg:px-6">
+        <NuxtLink to="/datasets" class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200" title="All datasets">
+          <ArrowLeft class="h-4 w-4" />
+        </NuxtLink>
+        <span class="flex h-9 w-9 items-center justify-center rounded-xl bg-sky-500/15">
+          <Database class="h-4 w-4 text-sky-400" />
+        </span>
+        <div v-if="meta" class="min-w-0 flex-1">
+          <h1 class="truncate text-base font-bold leading-tight">{{ meta.name }}</h1>
+          <p class="text-xs text-zinc-500">
+            {{ meta.description || 'No description' }} ·
+            <span class="uppercase">{{ meta.source }}</span> · updated {{ fmtDate(meta.updated_at) }}
+          </p>
+        </div>
+        <div v-if="meta" class="flex items-center gap-2 text-xs text-zinc-400">
+          <span class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+            <Rows3 class="h-3.5 w-3.5 text-emerald-400" /> <b class="text-zinc-100">{{ meta.row_count.toLocaleString() }}</b> rows
+          </span>
+          <span class="hidden items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 sm:flex">
+            <Table2 class="h-3.5 w-3.5 text-sky-400" /> <b class="text-zinc-100">{{ meta.schema_json.length }}</b> cols
+          </span>
+          <button
+            class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-1.5 text-zinc-500 transition hover:border-amber-500/40 hover:text-amber-400"
+            title="Delete dataset"
+            @click="removeDataset"
+          >
+            <Loader2 v-if="deleting" class="h-3.5 w-3.5 animate-spin" />
+            <Trash2 v-else class="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div v-if="loading" class="mt-10 flex justify-center text-zinc-500"><Loader2 class="h-6 w-6 animate-spin" /></div>
+    <div v-else-if="!meta" class="mx-auto mt-16 max-w-6xl px-4 text-center text-sm text-zinc-400">
+      <p>{{ error || 'Dataset not found' }}</p>
+      <NuxtLink to="/datasets" class="mt-3 inline-block text-xs text-sky-400 hover:underline">← All datasets</NuxtLink>
+    </div>
+
+    <div v-else class="mx-auto max-w-6xl space-y-5 px-4 lg:px-6">
+      <p v-if="error" class="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">{{ error }}</p>
+
+      <!-- schema chips -->
+      <div class="mt-5 flex flex-wrap gap-1.5">
+        <span
+          v-for="c in meta.schema_json"
+          :key="c.name"
+          class="rounded-lg border px-2 py-1 text-[11px] font-medium"
+          :class="dtypeColor[c.dtype] || dtypeColor.text"
+        >
+          {{ c.name }} <span class="opacity-60">· {{ c.dtype }}</span>
+        </span>
+      </div>
+
+      <div class="grid gap-5 lg:grid-cols-3">
+        <!-- data preview -->
+        <section class="lg:col-span-2">
+          <div class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+            <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">Data preview</h2>
+              <div class="flex items-center gap-2 text-xs text-zinc-500">
+                <span>rows {{ offset + 1 }}–{{ Math.min(offset + pageSize, meta.row_count) }} of {{ meta.row_count.toLocaleString() }}</span>
+                <button
+                  class="rounded-lg border border-zinc-800 p-1 transition hover:text-zinc-200 disabled:opacity-30"
+                  :disabled="offset === 0 || loadingRows"
+                  @click="offset = Math.max(0, offset - pageSize)"
+                ><ChevronLeft class="h-3.5 w-3.5" /></button>
+                <button
+                  class="rounded-lg border border-zinc-800 p-1 transition hover:text-zinc-200 disabled:opacity-30"
+                  :disabled="offset + pageSize >= meta.row_count || loadingRows"
+                  @click="offset += pageSize"
+                ><ChevronRight class="h-3.5 w-3.5" /></button>
+              </div>
+            </div>
+            <div class="overflow-x-auto">
+              <table v-if="rows.length" class="w-full text-left text-xs">
+                <thead>
+                  <tr class="border-b border-zinc-800/80 text-zinc-500">
+                    <th class="px-3 py-2 font-medium">#</th>
+                    <th v-for="c in columns" :key="c" class="whitespace-nowrap px-3 py-2 font-medium">{{ c }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(r, i) in rows" :key="i" class="border-b border-zinc-800/40 last:border-0 hover:bg-zinc-900/60">
+                    <td class="px-3 py-1.5 text-zinc-600">{{ offset + i + 1 }}</td>
+                    <td v-for="c in columns" :key="c" class="max-w-[220px] truncate px-3 py-1.5 text-zinc-300" :title="fmtCell(r[c])">
+                      {{ fmtCell(r[c]) }}
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <p v-else class="px-4 py-8 text-center text-xs text-zinc-500">No rows yet — write some from a workflow or append via the API.</p>
+            </div>
+          </div>
+
+          <!-- sql console -->
+          <div class="mt-5 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+            <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
+              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">SQL console — DuckDB across all datasets</h2>
+              <button
+                class="flex items-center gap-1.5 rounded-lg bg-orange-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
+                :disabled="running || !sql.trim()"
+                @click="runSql"
+              >
+                <Loader2 v-if="running" class="h-3 w-3 animate-spin" />
+                <Play v-else class="h-3 w-3" /> Run
+              </button>
+            </div>
+            <div class="p-3">
+              <textarea
+                v-model="sql"
+                rows="3"
+                spellcheck="false"
+                :placeholder="`SELECT * FROM ${meta.name.toLowerCase().replace(/[^a-z0-9_]/g, '_')} WHERE …`"
+                class="w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 font-mono text-xs text-zinc-200 outline-none focus:border-orange-500/50"
+              />
+              <p v-if="sqlError" class="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">{{ sqlError }}</p>
+              <div v-if="sqlResult" class="mt-2">
+                <p class="mb-1.5 text-[11px] text-zinc-500">
+                  {{ sqlResult.row_count.toLocaleString() }} rows · {{ sqlResult.duration_ms }} ms ·
+                  views: <span v-for="(v, k) in sqlResult.views" :key="k" class="mr-1 rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-sky-300">{{ k }}</span>
+                </p>
+                <div class="max-h-72 overflow-auto rounded-xl border border-zinc-800">
+                  <table class="w-full text-left text-xs">
+                    <thead class="sticky top-0 bg-zinc-900">
+                      <tr class="text-zinc-500">
+                        <th v-for="c in sqlResult.columns" :key="c" class="whitespace-nowrap px-3 py-2 font-medium">{{ c }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(r, i) in sqlResult.rows.slice(0, 200)" :key="i" class="border-t border-zinc-800/40 hover:bg-zinc-900/60">
+                        <td v-for="c in sqlResult.columns" :key="c" class="max-w-[240px] truncate px-3 py-1.5 text-zinc-300" :title="fmtCell(r[c])">{{ fmtCell(r[c]) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                  <p v-if="sqlResult.rows.length === 0" class="px-3 py-4 text-center text-xs text-zinc-500">Query returned no rows</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- profile -->
+        <section>
+          <div class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+            <div class="flex items-center gap-2 border-b border-zinc-800/80 px-4 py-2.5">
+              <BarChart3 class="h-3.5 w-3.5 text-emerald-400" />
+              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">Column profile</h2>
+              <Loader2 v-if="loadingProfile" class="ml-auto h-3.5 w-3.5 animate-spin text-zinc-500" />
+            </div>
+            <div v-if="profile" class="divide-y divide-zinc-800/40">
+              <div v-for="c in profile.columns" :key="c.name" class="px-4 py-3">
+                <div class="flex items-center justify-between gap-2">
+                  <p class="truncate font-mono text-xs font-semibold text-zinc-200">{{ c.name }}</p>
+                  <span
+                    class="rounded border px-1.5 py-0.5 text-[10px] font-medium"
+                    :class="dtypeColor[c.dtype] || dtypeColor.text"
+                  >{{ c.dtype }}</span>
+                </div>
+                <p class="mt-1 text-[11px] text-zinc-500">
+                  {{ c.non_null }} non-null · {{ c.nulls }} empty · {{ c.unique }} unique
+                </p>
+                <p v-if="c.min !== undefined" class="mt-1 text-[11px] text-zinc-400">
+                  min <b class="text-zinc-200">{{ fmtCell(c.min) }}</b> · max <b class="text-zinc-200">{{ fmtCell(c.max) }}</b> · mean <b class="text-zinc-200">{{ Number(c.mean ?? 0).toFixed(2) }}</b>
+                </p>
+                <div v-if="c.top_values?.length" class="mt-1.5 flex flex-wrap gap-1">
+                  <span
+                    v-for="t in c.top_values"
+                    :key="t.value"
+                    class="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-300"
+                  >{{ t.value }} <span class="text-zinc-500">×{{ t.count }}</span></span>
+                </div>
+              </div>
+            </div>
+            <p v-else class="px-4 py-6 text-center text-xs text-zinc-500">No profile available</p>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</template>

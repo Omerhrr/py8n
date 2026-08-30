@@ -17,6 +17,7 @@ from .nodes.data import (
     SummarizeNode,
     SwitchNode,
 )
+from .nodes.datasets import DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
 from .nodes.llm import LlmChatNode
@@ -56,6 +57,9 @@ for _cls in (
     CompareDatasetsNode,  # v24: two-input reconciliation (matched / a_only / b_only)
     SummarizeNode,        # v24: group-by aggregation
     CSVNode,              # v24: CSV parse/serialize
+    DatasetReadNode,      # v27: pull rows from a stored dataset
+    DatasetWriteNode,     # v27: push items into a dataset (append/replace)
+    SqlQueryNode,         # v27: DuckDB SQL across all datasets
     LoopOverItemsNode,
     SetVariableNode,
     CodeNode,

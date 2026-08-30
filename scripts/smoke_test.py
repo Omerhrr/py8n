@@ -50,7 +50,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 30, "expected 30 node types after v25 wave"
+    assert len(types) == 33, "expected 33 node types after v27 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1195,7 +1195,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 30 and "respond_to_webhook" in types21, types21  # 30 after v25
+    assert len(types21) == 33 and "respond_to_webhook" in types21, types21  # 33 after v27
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1460,7 +1460,7 @@ def main() -> None:
     status, defs24 = req("GET", "/node-definitions")
     assert status == 200
     types24 = [d["type"] for d in defs24["definitions"]]
-    assert len(types24) == 30, f"expected 30 node types after v25, got {len(types24)}"
+    assert len(types24) == 33, f"expected 33 node types after v27, got {len(types24)}"
     cmp_def = next(d for d in defs24["definitions"] if d["type"] == "compare_datasets")
     assert [h["key"] for h in cmp_def["inputs"]] == ["main", "secondary"], cmp_def["inputs"]
     assert [h["key"] for h in cmp_def["outputs"]] == ["matched", "a_only", "b_only"]
@@ -1671,6 +1671,119 @@ def main() -> None:
     finally:
         req("DELETE", f"/workflows/{wf26['id']}")
     print("v26 chat progress stream OK")
+
+    # ---------------------------------------------------------------
+    # v27: dataset engine — upload, SQL join, workflow read/write/sql
+    # ---------------------------------------------------------------
+    print("\n== v27: dataset engine ==")
+    status, defs27 = req("GET", "/node-definitions")
+    assert status == 200
+    types27 = [d["type"] for d in defs27["definitions"]]
+    for t in ("dataset_read", "dataset_write", "sql_query"):
+        assert t in types27, types27
+    assert len(types27) == 33, len(types27)
+
+    tag27 = uuid.uuid4().hex[:6]
+    ds_names = []
+
+    def upload_file(name, filename, content, ctype="text/csv"):
+        boundary = "----py8nsmoke27"
+        body = (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="name"\r\n\r\n{name}\r\n'
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="description"\r\n\r\nsmoke v27\r\n'
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {ctype}\r\n\r\n"
+        ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+        r = urllib.request.Request(
+            f"{BASE}/datasets/upload", data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST",
+        )
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            return resp.status, json.loads(resp.read().decode())
+
+    try:
+        # create from JSON + csv upload with type inference
+        status, ds_a = req("POST", "/datasets", {"name": f"smoke27 tx {tag27}", "rows": [
+            {"id": 1, "amt": 120.5}, {"id": 2, "amt": 80}, {"id": 3, "amt": 300.25},
+        ]})
+        assert status == 201 and ds_a["row_count"] == 3, ds_a
+        ds_names.append(ds_a["id"])
+        status, ds_b = upload_file(f"smoke27 region {tag27}", "regions.csv", b"id,region\n1,EU\n2,AF\n3,AF\n")
+        assert status == 201 and ds_b["row_count"] == 3, ds_b
+        ds_names.append(ds_b["id"])
+
+        # rows pagination + profile
+        status, rows_b = req("GET", f"/datasets/{ds_b['id']}/rows?offset=1&limit=1")
+        assert status == 200 and rows_b["rows"] == [{"id": 2, "region": "AF"}], rows_b
+        status, prof = req("GET", f"/datasets/{ds_a['id']}/profile")
+        cols = {c["name"]: c for c in prof["columns"]}
+        assert cols["amt"]["min"] == 80 and cols["amt"]["max"] == 300.25, cols
+        print("datasets: json create + csv upload (typed) + rows + profile OK")
+
+        # SQL join across the two datasets
+        va = ds_a["name"].lower().replace(" ", "_")
+        vb = ds_b["name"].lower().replace(" ", "_")
+        status, qr = req("POST", "/datasets/query", {
+            "sql": f"SELECT r.region, sum(a.amt) AS total FROM {va} a JOIN {vb} r ON a.id = r.id GROUP BY r.region ORDER BY total DESC",
+        })
+        assert status == 200, qr
+        assert qr["rows"] == [{"region": "AF", "total": 380.25}, {"region": "EU", "total": 120.5}], qr["rows"]
+        print("SQL query: cross-dataset JOIN with aggregation OK")
+
+        # live workflow: write items -> read them back -> sql over the dataset
+        status, wf27 = req("POST", "/workflows", {"name": f"tmp v27 ds {tag27}", "graph": {
+            "nodes": [
+                {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}},
+                {"id": "w", "type": "dataset_write", "name": "Save", "position": {"x": 150, "y": 0},
+                 "parameters": {"dataset": f"smoke27 live {tag27}", "mode": "append"}},
+                {"id": "r", "type": "dataset_read", "name": "Load", "position": {"x": 300, "y": 0},
+                 "parameters": {"dataset": f"smoke27 live {tag27}", "limit": 0}},
+                {"id": "s", "type": "sql_query", "name": "Query", "position": {"x": 450, "y": 0},
+                 "parameters": {"sql": f"SELECT count(*) AS n FROM smoke27_live_{tag27}"}},
+                {"id": "o", "type": "set_variable", "name": "Out", "position": {"x": 600, "y": 0},
+                 "parameters": {"keep_input": False, "assignments": {"n": "{{ input.items[0].n }}"}}},
+            ],
+            "edges": [
+                {"id": "e1", "source": "t", "target": "w", "sourceHandle": "main", "targetHandle": "main"},
+                {"id": "e2", "source": "w", "target": "r", "sourceHandle": "main", "targetHandle": "main"},
+                {"id": "e3", "source": "r", "target": "s", "sourceHandle": "main", "targetHandle": "main"},
+                {"id": "e4", "source": "s", "target": "o", "sourceHandle": "main", "targetHandle": "main"},
+            ],
+        }})
+        assert status == 201, wf27
+        try:
+            status, run = req("POST", f"/workflows/{wf27['id']}/run", {"payload": {"items": [
+                {"sku": "a", "n": 1}, {"sku": "b", "n": 2}, {"sku": "c", "n": 3},
+            ]}})
+            assert status in (200, 202), run
+            exec_id = run["execution_id"]
+            final = None
+            for _ in range(100):
+                status, ex = req("GET", f"/executions/{exec_id}")
+                assert status == 200
+                if ex["status"] != "running":
+                    final = ex
+                    break
+                time.sleep(0.05)
+            assert final and final["status"] == "success", (final or {}).get("error")
+            node_out = {n["node_name"]: n for n in final["node_runs"]}
+            assert node_out["Save"]["output"]["written"] == 3
+            assert node_out["Load"]["output"]["row_count"] == 3
+            assert node_out["Out"]["output"] == {"n": 3}, node_out["Out"]["output"]
+            print("workflow: dataset_write -> dataset_read -> sql_query live chain OK")
+        finally:
+            req("DELETE", f"/workflows/{wf27['id']}")
+
+        # duplicate-name guard
+        status, dup27 = req("POST", "/datasets", {"name": f"smoke27 tx {tag27}", "rows": []})
+        assert status == 409, dup27
+    finally:
+        for name in ds_names:
+            req("DELETE", f"/datasets/{name}")
+    print("v27 dataset engine OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

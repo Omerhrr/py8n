@@ -282,3 +282,36 @@ class EnvVariableUpdate(BaseModel):
     value: str | None = Field(default=None, max_length=20_000, description='"__keep__" preserves the stored value')
     is_secret: bool | None = None
     description: str | None = Field(default=None, max_length=500)
+
+
+# ------------------------------------------------------------------ v27 datasets
+class DatasetOut(BaseModel):
+    """Metadata view (never carries rows — fetch /rows for data)."""
+
+    id: str
+    name: str
+    description: str = ""
+    schema_json: list = Field(default_factory=list)
+    row_count: int = 0
+    source: str = "api"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class DatasetCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    rows: list[dict] = Field(default_factory=list, description="Flat JSON objects; nested values are JSON-encoded")
+
+
+class DatasetRowsIn(BaseModel):
+    rows: list[dict] = Field(min_length=1, max_length=10_000)
+
+
+class DatasetUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+
+
+class DatasetQueryIn(BaseModel):
+    sql: str = Field(min_length=1, max_length=20_000, description="DuckDB SQL; datasets appear as views (lowercased name)")

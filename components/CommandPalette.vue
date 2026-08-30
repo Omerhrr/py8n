@@ -2,7 +2,7 @@
 import {
   Search, CornerDownLeft, LayoutDashboard, Activity, BarChart3, CalendarClock,
   Sparkles, KeyRound, Plus, PanelLeftClose, PanelLeftOpen, Command as CommandIcon,
-  Workflow as WorkflowIcon, Zap, X, Variable,
+  Workflow as WorkflowIcon, Zap, X, Variable, Database,
 } from 'lucide-vue-next'
 import { usePalette } from '~/composables/usePalette'
 import { useSidebar } from '~/composables/useSidebar'
@@ -55,6 +55,7 @@ const navItems = computed<PaletteItem[]>(() => [
   { id: 'nav-insights', group: 'Navigate', label: 'Insights', icon: BarChart3, hint: 'Analytics & trends', keywords: 'stats analytics charts', run: () => go('/insights') },
   { id: 'nav-schedules', group: 'Navigate', label: 'Schedules', icon: CalendarClock, hint: 'Cron & intervals', keywords: 'cron timer triggers', run: () => go('/schedules') },
   { id: 'nav-templates', group: 'Navigate', label: 'Templates', icon: Sparkles, hint: 'Ready-made workflows', keywords: 'gallery presets examples', run: () => go('/templates') },
+  { id: 'nav-datasets', group: 'Navigate', label: 'Datasets', icon: Database, hint: 'Stored tables & SQL', keywords: 'data excel csv parquet tables sql upload', run: () => go('/datasets') },
   { id: 'nav-credentials', group: 'Navigate', label: 'Credentials', icon: KeyRound, hint: 'Vault & auth', keywords: 'secrets keys api tokens', run: () => go('/credentials') },
   { id: 'nav-env-vars', group: 'Navigate', label: 'Variables', icon: Variable, hint: 'Global env values', keywords: 'env environment globals config values', run: () => go('/env-vars') },
 ])
