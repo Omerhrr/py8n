@@ -459,3 +459,23 @@ Work Log:
 
 Stage Summary:
 - Py8n v19: the flagship AI Agent node (tool-calling loop with sub-workflow/HTTP/knowledge tools) + canvas sticky notes + expression autocomplete (fx) + n8n-style marquee multi-select ops + execution data retention policies (age/volume, daily purge, Insights UI); 67/67 pytest + smoke (real-bridge agent tool loop!) + browser verified; backend live at 1.19.0; repo cleaned to 161 project-only files
+
+---
+Task ID: 30 (v20 feature wave — Editor UX completion: context menus, workflow settings, shortcuts, retention overrides)
+Agent: main (Super Z)
+Task: Right-click menus + workflow settings modal + per-workflow retention override + shortcuts overlay
+
+Work Log:
+- INCIDENT (start of wave): the sandbox container was REBUILT between sessions (uptime 10min, date rolled Aug 29→30) — tracked files restored from git (c5e2691), but UNTRACKED runtime data wiped: mini-services/api-backend/data/ (SQLite DB, fernet key) and download/ screenshots. Root .env's DATABASE_URL points at a nonexistent db/custom.db (platform scaffold legacy — Py8n never used it; config default is data/py8n.db). Impact: ~56 demo/test workflows + execution history + QA screenshots lost — ALL reproducible artifacts, zero real data. Backend restarted 1.20.0 on a fresh seeded DB; Nuxt + llm-bridge auto-booted by dev.sh. Lesson: sandbox runtime data is ephemeral across container rebuilds — everything valuable must live in git or be reproducible
+- Backend: Workflow.retention_days (NULL=inherit global, 0=keep forever, N=days) via the v16 _add_missing_columns ALTER TABLE pattern; WorkflowUpdate tri-state via model_dump(exclude_unset=True) (omitted=untouched / null=inherit / int=override, ge=0 le=3650 -> 422 on negatives); WorkflowOut + WorkflowListItem expose the field
+- services/retention.py purge now honors overrides: workflows with overrides are EXCLUDED from the global age purge (not_in subquery), then each override (N>0) purges its own logs with its own cutoff; 0 = keep forever skips; global volume cap unchanged
+- tests/test_v20_features.py: A(keep forever)/B(1d)/C(inherit) with backdated execs -> purge keeps A, drops B and C; tri-state (omitted leaves 0 intact; null clears; -3 -> 422); list items carry the field. Suite 68/68
+- NodeContextMenu.vue: teleported, viewport-clamped, closes on click/contextmenu-elsewhere/Esc/wheel; page drives items via useVueFlow's onNodeContextMenu/onEdgeContextMenu (selects the target first so actions reuse existing functions); canvas wrapper @contextmenu.prevent kills the browser menu; sticky nodes get no Disable item (spec.type check)
+- Workflow settings modal (editor header gear): description textarea + retention override select (Inherit global w/ live hint of the global policy / Keep forever / Custom N days) -> PUT /workflows/{id} (null sent for inherit — tri-state!); store.workflow updated in place
+- ShortcutsOverlay.vue: "?" key or header Keyboard button — Canvas / Editing / Platform groups; Esc closes
+- Smoke v20 section: override tri-state 0/null/omitted/negative + list exposure — ALL PASS; pytest 68/68; backend live 1.20.0
+- E2E: node menu renders 5 items (Open settings/Duplicate/Copy/Disable node/Delete) -> disable + Ctrl+S -> server disabled=True -> enable -> False; duplicate via menu (3 nodes) -> undo -> 2; edge menu "Delete connection" -> 0 edges -> undo -> 1; settings modal: description + Keep forever -> server retention 0 + description saved -> reopen shows "keep" -> Inherit -> server null; "?" opens cheat sheet, Esc closes; download/ dir had to be recreated post-rebuild; zero console errors
+- Screenshots: download/e2e-v20-{context-menu,settings-modal,shortcuts}.png
+
+Stage Summary:
+- Py8n v20: right-click context menus for nodes and connections, workflow settings modal (description + per-workflow retention override honored by the purge engine), and a shortcuts cheat sheet; 68/68 pytest + smoke + browser verified, backend live at 1.20.0

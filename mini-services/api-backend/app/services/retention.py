@@ -89,7 +89,14 @@ async def set_policy(patch: dict) -> dict:
 
 
 async def purge_execution_data() -> dict:
-    """Apply the retention policy. Returns {deleted_by_age, deleted_by_volume, total}."""
+    """Apply the retention policy. Returns {deleted_by_age, deleted_by_volume, total}.
+
+    v20: workflows may override the global age policy via
+    ``Workflow.retention_days`` (NULL = inherit, 0 = keep forever, N = days).
+    The global volume cap stays uniform across all workflows.
+    """
+    from ..models import Workflow
+
     policy = await get_policy()
     days = policy["retention_days"]
     cap = policy["max_executions_per_workflow"]
@@ -97,16 +104,39 @@ async def purge_execution_data() -> dict:
     deleted_by_volume = 0
 
     async with AsyncSessionLocal() as session:
+        override_rows = (
+            await session.execute(
+                select(Workflow.id, Workflow.retention_days).where(Workflow.retention_days.is_not(None))
+            )
+        ).all()
+        overridden_ids = [row[0] for row in override_rows]
+
         if days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            conditions = [
+                ExecutionLog.status != "running",
+                ExecutionLog.finished_at.is_not(None),
+                ExecutionLog.finished_at < cutoff,
+            ]
+            if overridden_ids:
+                conditions.append(ExecutionLog.workflow_id.not_in(overridden_ids))
+            result = await session.execute(delete(ExecutionLog).where(*conditions))
+            deleted_by_age += result.rowcount or 0
+
+        # per-workflow overrides (0 = keep forever -> skipped here)
+        for workflow_id, override_days in override_rows:
+            if override_days <= 0:
+                continue
+            cutoff_w = datetime.now(timezone.utc) - timedelta(days=override_days)
             result = await session.execute(
                 delete(ExecutionLog).where(
+                    ExecutionLog.workflow_id == workflow_id,
                     ExecutionLog.status != "running",
                     ExecutionLog.finished_at.is_not(None),
-                    ExecutionLog.finished_at < cutoff,
+                    ExecutionLog.finished_at < cutoff_w,
                 )
             )
-            deleted_by_age = result.rowcount or 0
+            deleted_by_age += result.rowcount or 0
 
         if cap > 0:
             workflow_ids = (

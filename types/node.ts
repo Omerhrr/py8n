@@ -75,6 +75,7 @@ export interface Workflow {
   error_workflow_id?: string | null
   tags?: string[]
   folder_id?: string | null
+  retention_days?: number | null
   created_at: string
   updated_at: string
 }

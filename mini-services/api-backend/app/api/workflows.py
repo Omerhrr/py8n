@@ -125,6 +125,7 @@ async def list_workflows(
             tags=w.tags or [],
             folder_id=w.folder_id,
             folder_name=folder_names.get(w.folder_id) if w.folder_id else None,
+            retention_days=w.retention_days,
             created_at=w.created_at,
             updated_at=w.updated_at,
         )
@@ -240,6 +241,9 @@ async def update_workflow(workflow_id: str, body: WorkflowUpdate, db: AsyncSessi
         target = body.folder_id or None  # "" moves the workflow to the root
         await _validate_folder(db, target)
         wf.folder_id = target
+    if "retention_days" in body.model_dump(exclude_unset=True):
+        # v20: null = inherit global policy; 0 = keep forever; N = N days.
+        wf.retention_days = body.retention_days
     await db.flush()
     await db.refresh(wf)
     # Content change (graph/name/description) → snapshot the new state.

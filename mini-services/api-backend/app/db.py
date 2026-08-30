@@ -49,5 +49,7 @@ async def init_db() -> None:
                 sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN tags JSON DEFAULT ('[]')"))
             if "folder_id" not in cols:  # v16
                 sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN folder_id VARCHAR(36)"))
+            if "retention_days" not in cols:  # v20
+                sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN retention_days INTEGER"))
 
         await conn.run_sync(_add_missing_columns)

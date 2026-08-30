@@ -7,15 +7,17 @@ import { MiniMap } from '@vue-flow/minimap'
 import {
   Play, Save, Copy, Check, Zap, Globe, Loader2, AlertTriangle,
   Link2, Trash2, Download, Clock, ShieldAlert, Tag as TagIcon, X,
-  History, RotateCcw, Undo2, Redo2, StickyNote,
+  History, RotateCcw, Undo2, Redo2, StickyNote, Settings2, Keyboard,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
 import PNodeCard from '~/components/editor/PNodeCard.vue'
 import PStickyNote from '~/components/editor/PStickyNote.vue'
 import NodePalette from '~/components/editor/NodePalette.vue'
+import NodeContextMenu, { type ContextMenuItem } from '~/components/editor/NodeContextMenu.vue'
+import ShortcutsOverlay from '~/components/editor/ShortcutsOverlay.vue'
 import ConfigPanel from '~/components/editor/ConfigPanel.vue'
 import ExecutionsDrawer from '~/components/editor/ExecutionsDrawer.vue'
-import type { NodeDefinition, NodeSpec } from '~/types/node'
+import type { NodeDefinition, NodeSpec, Workflow } from '~/types/node'
 import { createGraphHistory, type GraphSnapshot } from '~/composables/useGraphHistory'
 
 const route = useRoute()
@@ -35,7 +37,7 @@ const copied = ref(false)
 const toasts = ref<{ id: number; text: string; kind: 'info' | 'error' | 'success' }[]>([])
 let toastSeq = 0
 
-const { addNodes, addEdges, screenToFlowCoordinate, fitView, onConnect, onNodeClick, onEdgeClick, onPaneClick, onNodeDragStop, getSelectedNodes } = useVueFlow()
+const { addNodes, addEdges, screenToFlowCoordinate, fitView, onConnect, onNodeClick, onEdgeClick, onPaneClick, onNodeDragStop, getSelectedNodes, onNodeContextMenu, onEdgeContextMenu } = useVueFlow()
 
 // ------------------------------------------------------------------
 // v18: undo/redo + node copy/paste/duplicate
@@ -341,6 +343,107 @@ const STICKY_DEF = {
 // v19: multi-selection state (marquee / shift-click) for the floating bar
 const selectedCount = computed(() => getSelectedNodes.value.length)
 
+// ------------------------------------------------------------------
+// v20: right-click context menus (nodes + connections)
+// ------------------------------------------------------------------
+const contextMenu = ref<{ kind: 'node' | 'edge'; x: number; y: number; nodeId?: string; edgeId?: string } | null>(null)
+
+onNodeContextMenu(({ event, node }) => {
+  event.preventDefault()
+  selectedNodeId.value = node.id
+  selectedEdgeId.value = null
+  contextMenu.value = { kind: 'node', x: (event as MouseEvent).clientX, y: (event as MouseEvent).clientY, nodeId: node.id }
+})
+onEdgeContextMenu(({ event, edge }) => {
+  event.preventDefault()
+  selectedEdgeId.value = edge.id
+  selectedNodeId.value = null
+  contextMenu.value = { kind: 'edge', x: (event as MouseEvent).clientX, y: (event as MouseEvent).clientY, edgeId: edge.id }
+})
+
+const contextMenuItems = computed<ContextMenuItem[]>(() => {
+  const menu = contextMenu.value
+  if (!menu) return []
+  if (menu.kind === 'edge') {
+    return [{ label: 'Delete connection', hint: 'Del', danger: true, action: () => deleteSelectedEdge() }]
+  }
+  const spec = (vfNodes.value as any[]).find((n) => n.id === menu.nodeId)?.data?.spec
+  const isSticky = spec?.type === 'sticky_note'
+  const items: ContextMenuItem[] = [
+    { label: 'Open settings', hint: 'click', action: () => { selectedNodeId.value = menu.nodeId! } },
+    { label: 'Duplicate', hint: 'Ctrl+D', action: () => duplicateSelection() },
+    { label: 'Copy', hint: 'Ctrl+C', action: () => copySelection() },
+  ]
+  if (spec && !isSticky) {
+    items.push({
+      label: spec.disabled ? 'Enable node' : 'Disable node',
+      action: () => {
+        const vf = (vfNodes.value as any[]).find((n) => n.id === menu.nodeId)
+        if (vf) {
+          vf.data.spec.disabled = !vf.data.spec.disabled
+          store.markDirty()
+          historyCommit()
+        }
+      },
+    })
+  }
+  items.push({ label: 'Delete', hint: 'Del', danger: true, action: () => deleteSelectedNode() })
+  return items
+})
+
+// ------------------------------------------------------------------
+// v20: workflow settings modal (description + retention override)
+// ------------------------------------------------------------------
+const showSettings = ref(false)
+const savingSettings = ref(false)
+const globalRetentionDays = ref<number | null>(null)
+const settingsDraft = ref<{ description: string; retentionMode: 'inherit' | 'keep' | 'days'; retentionDays: number } | null>(null)
+
+async function openSettings() {
+  const wf = store.workflow
+  settingsDraft.value = {
+    description: wf?.description || '',
+    retentionMode: wf?.retention_days == null ? 'inherit' : wf.retention_days === 0 ? 'keep' : 'days',
+    retentionDays: wf?.retention_days && wf.retention_days > 0 ? wf.retention_days : 30,
+  }
+  showSettings.value = true
+  if (globalRetentionDays.value == null) {
+    try {
+      globalRetentionDays.value = (await api.get('/settings/retention')).retention_days
+    } catch {
+      globalRetentionDays.value = null
+    }
+  }
+}
+
+async function saveSettings() {
+  const d = settingsDraft.value
+  if (!d) return
+  savingSettings.value = true
+  try {
+    const body: Record<string, any> = { description: d.description }
+    if (d.retentionMode === 'inherit') body.retention_days = null
+    else if (d.retentionMode === 'keep') body.retention_days = 0
+    else body.retention_days = Math.max(1, Math.round(d.retentionDays || 30))
+    const updated = await api.put<Workflow>(`/workflows/${workflowId.value}`, body)
+    if (store.workflow) {
+      store.workflow.description = updated.description
+      store.workflow.retention_days = updated.retention_days
+    }
+    toast('Workflow settings saved', 'success')
+    showSettings.value = false
+  } catch (e: any) {
+    toast(e?.data?.detail || 'Settings save failed', 'error')
+  } finally {
+    savingSettings.value = false
+  }
+}
+
+// ------------------------------------------------------------------
+// v20: shortcuts cheat sheet
+// ------------------------------------------------------------------
+const showShortcuts = ref(false)
+
 const canvasNodeNames = computed(() =>
   (vfNodes.value as any[])
     .filter((n) => n.data?.spec?.type && n.data.spec.type !== 'sticky_note')
@@ -559,6 +662,11 @@ function onKeydown(e: KeyboardEvent) {
     else if (selectedNodeId.value) deleteSelectedNode()
   }
   const mod = e.metaKey || e.ctrlKey
+  if (e.key === '?') {
+    e.preventDefault()
+    showShortcuts.value = !showShortcuts.value
+    return
+  }
   if (mod && e.key.toLowerCase() === 'z') {
     e.preventDefault()
     if (e.shiftKey) redoGraph()
@@ -860,6 +968,23 @@ const runningCount = computed(
           <History class="h-3.5 w-3.5" /> <span class="hidden md:inline">History</span>
         </button>
 
+        <!-- v20: workflow settings -->
+        <button
+          class="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+          title="Workflow settings — description & data retention"
+          @click="openSettings"
+        >
+          <Settings2 class="h-3.5 w-3.5" />
+        </button>
+        <!-- v20: shortcut cheat sheet -->
+        <button
+          class="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+          title="Keyboard & mouse shortcuts (?)"
+          @click="showShortcuts = true"
+        >
+          <Keyboard class="h-3.5 w-3.5" />
+        </button>
+
         <button
           class="flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition"
           :class="store.workflow?.is_active
@@ -932,7 +1057,7 @@ const runningCount = computed(
     <div class="flex min-h-0 flex-1">
       <NodePalette :definitions="store.definitions" @add="(d) => addNodeFromDef(d)" />
 
-      <div class="relative min-w-0 flex-1" @drop="onDrop" @dragover.prevent @dragenter.prevent>
+      <div class="relative min-w-0 flex-1" @drop="onDrop" @dragover.prevent @dragenter.prevent @contextmenu.prevent>
         <ClientOnly>
           <VueFlow
             v-model:nodes="vfNodes"
@@ -1017,6 +1142,85 @@ const runningCount = computed(
         @create-credential="createCredential"
       />
     </div>
+
+    <!-- v20: right-click context menu -->
+    <NodeContextMenu
+      v-if="contextMenu"
+      :x="contextMenu.x"
+      :y="contextMenu.y"
+      :items="contextMenuItems"
+      @close="contextMenu = null"
+    />
+
+    <!-- v20: workflow settings modal -->
+    <Teleport to="body">
+      <div
+        v-if="showSettings"
+        class="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+        @click.self="showSettings = false"
+      >
+        <div class="w-[440px] max-w-[92vw] rounded-2xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
+          <div class="mb-4 flex items-center justify-between">
+            <h2 class="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+              <Settings2 class="h-4 w-4 text-orange-400" /> Workflow settings
+            </h2>
+            <button class="rounded-lg p-1 text-zinc-500 transition hover:text-zinc-200" title="Close" @click="showSettings = false">
+              <X class="h-4 w-4" />
+            </button>
+          </div>
+
+          <label class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Description</label>
+          <textarea
+            v-model="settingsDraft!.description"
+            :rows="3"
+            placeholder="What does this workflow do? Shows on the dashboard and in search."
+            class="mb-4 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs outline-none transition focus:border-orange-500/60"
+          />
+
+          <label class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Execution data retention</label>
+          <select
+            v-model="settingsDraft!.retentionMode"
+            class="mb-2 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none transition focus:border-orange-500/60"
+          >
+            <option value="inherit">Inherit global policy{{ globalRetentionDays != null ? ` (keep ${globalRetentionDays === 0 ? 'forever' : globalRetentionDays + ' days'})` : '' }}</option>
+            <option value="keep">Keep forever (never purge)</option>
+            <option value="days">Custom — purge after N days</option>
+          </select>
+          <div v-if="settingsDraft!.retentionMode === 'days'" class="mb-2 flex items-center gap-2">
+            <input
+              v-model.number="settingsDraft!.retentionDays"
+              type="number"
+              min="1"
+              max="3650"
+              class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60"
+            />
+            <span class="text-[11px] text-zinc-500">days (finished runs only)</span>
+          </div>
+          <p class="mb-4 text-[10px] leading-relaxed text-zinc-600">
+            Overrides the global policy (Insights → Execution data retention). Running executions are never purged.
+          </p>
+
+          <div class="flex justify-end gap-2">
+            <button
+              class="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-500"
+              @click="showSettings = false"
+            >
+              Cancel
+            </button>
+            <button
+              class="rounded-lg bg-orange-500 px-3.5 py-1.5 text-xs font-semibold text-white transition hover:bg-orange-400 disabled:opacity-50"
+              :disabled="savingSettings"
+              @click="saveSettings"
+            >
+              {{ savingSettings ? 'Saving…' : 'Save settings' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- v20: shortcut cheat sheet -->
+    <ShortcutsOverlay v-if="showShortcuts" @close="showShortcuts = false" />
 
     <!-- executions drawer -->
     <ExecutionsDrawer

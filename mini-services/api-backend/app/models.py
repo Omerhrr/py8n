@@ -46,6 +46,9 @@ class Workflow(Base):
     folder_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # Organizational labels (v12): normalized lowercase strings, max 10.
     tags: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # Per-workflow retention override (v20): NULL = inherit the global policy,
+    # 0 = keep forever, N = purge this workflow's finished logs after N days.
+    retention_days: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

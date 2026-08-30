@@ -53,6 +53,9 @@ class WorkflowUpdate(BaseModel):
     tags: Tags | None = None
     # v16 tri-state: omitted (None) = untouched; "" = move to root; str = assign.
     folder_id: str | None = Field(default=None, max_length=36)
+    # v20 tri-state: omitted = untouched; null = inherit global policy;
+    # 0 = keep forever; N = purge this workflow's logs after N days.
+    retention_days: int | None = Field(default=None, ge=0, le=3650)
 
 
 class WorkflowOut(BaseModel):
@@ -64,6 +67,7 @@ class WorkflowOut(BaseModel):
     error_workflow_id: str | None = None
     tags: Tags = Field(default_factory=list)
     folder_id: str | None = None
+    retention_days: int | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +89,7 @@ class WorkflowListItem(BaseModel):
     tags: Tags = Field(default_factory=list)
     folder_id: str | None = None
     folder_name: str | None = None
+    retention_days: int | None = None
     created_at: datetime
     updated_at: datetime
 

@@ -1157,6 +1157,36 @@ def main() -> None:
     print(f"retention policy + purge OK (last purge removed {purged['total']} records)")
     print("v19 agent + retention OK")
 
+    # ------------------------------------------------------------------ v20
+    print("== v20: per-workflow retention override + settings surface ==")
+    status, wf20 = req("POST", "/workflows", {"name": f"tmp v20 override {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [{"id": "t", "type": "manual_trigger", "name": "T", "position": {"x": 0, "y": 0}, "parameters": {}}],
+        "edges": [],
+    }})
+    assert status == 201, wf20
+    try:
+        status, body = req("PUT", f"/workflows/{wf20['id']}", {"retention_days": 0, "description": "v20 settings modal"})
+        assert status == 200 and body["retention_days"] == 0, body
+        # omitted = untouched
+        status, body = req("PUT", f"/workflows/{wf20['id']}", {"name": body["name"]})
+        assert status == 200 and body["retention_days"] == 0, body
+        # null = back to inherit
+        status, body = req("PUT", f"/workflows/{wf20['id']}", {"retention_days": None})
+        assert status == 200 and body["retention_days"] is None, body
+        # negative rejected
+        status, _ = req("PUT", f"/workflows/{wf20['id']}", {"retention_days": -2})
+        assert status in (400, 422)
+        # list items expose the field
+        status, wl = req("GET", "/workflows")
+        item = next(w for w in wl if w["id"] == wf20["id"])
+        assert "retention_days" in item and item["retention_days"] is None, item
+        print("retention override tri-state (0 / null / omitted / negative) OK")
+    finally:
+        req("DELETE", f"/workflows/{wf20['id']}")
+    status, pol = req("GET", "/settings/retention")
+    assert status == 200 and pol["retention_days"] == 30, pol
+    print("v20 overrides OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")
