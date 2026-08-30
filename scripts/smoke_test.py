@@ -50,7 +50,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 36, "expected 36 node types after v28 wave"
+    assert len(types) == 37, "expected 37 node types after v32 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1195,7 +1195,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 36 and "respond_to_webhook" in types21, types21  # 36 after v28
+    assert len(types21) == 37 and "respond_to_webhook" in types21, types21  # 37 after v32
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1460,7 +1460,7 @@ def main() -> None:
     status, defs24 = req("GET", "/node-definitions")
     assert status == 200
     types24 = [d["type"] for d in defs24["definitions"]]
-    assert len(types24) == 36, f"expected 36 node types after v28, got {len(types24)}"
+    assert len(types24) == 37, f"expected 37 node types after v32, got {len(types24)}"
     cmp_def = next(d for d in defs24["definitions"] if d["type"] == "compare_datasets")
     assert [h["key"] for h in cmp_def["inputs"]] == ["main", "secondary"], cmp_def["inputs"]
     assert [h["key"] for h in cmp_def["outputs"]] == ["matched", "a_only", "b_only"]
@@ -1681,7 +1681,7 @@ def main() -> None:
     types27 = [d["type"] for d in defs27["definitions"]]
     for t in ("dataset_read", "dataset_write", "sql_query"):
         assert t in types27, types27
-    assert len(types27) == 36, len(types27)
+    assert len(types27) == 37, len(types27)
 
     tag27 = uuid.uuid4().hex[:6]
     ds_names = []
@@ -1794,7 +1794,7 @@ def main() -> None:
     types28 = [d["type"] for d in defs28["definitions"]]
     for t in ("python_transform", "chart", "model_train"):
         assert t in types28, types28
-    assert len(types28) == 36, len(types28)
+    assert len(types28) == 37, len(types28)
 
     tag28 = uuid.uuid4().hex[:6]
     artifact_ids28 = []
@@ -2040,7 +2040,8 @@ def main() -> None:
     # ---------------------------------------------------------------
     print("\n== v31: dashboards ==")
     status, health31 = req("GET", "/health")
-    assert status == 200 and health31["version"] == "1.31.0", health31
+    ver31 = tuple(int(x) for x in health31.get("version", "0").split(".")[:2])
+    assert status == 200 and ver31 >= (1, 31), health31  # strict pin lives in the latest wave's smoke section (v32)
 
     tag31 = uuid.uuid4().hex[:6]
     rows31a = [
@@ -2117,6 +2118,96 @@ def main() -> None:
         req("DELETE", f"/datasets/{ds31a['id']}")
         req("DELETE", f"/datasets/{ds31b['id']}")
     print("v31 dashboards OK")
+
+    # ------------------------------------------------------------------
+    # v32: document AI — engines probe, PDF extract (text + ruled table),
+    # to-dataset with numeric coercion + live SQL, real tesseract OCR pass
+    print("\n== v32: document AI ==")
+    tag32 = uuid.uuid4().hex[:8]
+    ds32 = None
+    try:
+        status, health32 = req("GET", "/health")
+        assert status == 200 and health32["version"] == "1.32.0", health32  # strict pin: latest wave only
+        status, eng = req("GET", "/documents/engines")
+        assert status == 200 and eng["ocr"]["available"] is True, eng
+
+        def invoice_pdf32():
+            import io as _io
+            from reportlab.lib import colors as _c
+            from reportlab.lib.pagesizes import letter as _letter
+            from reportlab.lib.styles import getSampleStyleSheet as _gss
+            from reportlab.platypus import SimpleDocTemplate as _SDT, Table as _T, TableStyle as _TS, Paragraph as _P
+
+            b = _io.BytesIO()
+            rows = [["Item", "Qty", "Amount"], ["Pipeline", "1", "4200.00"], ["Retainer", "3", "1050.00"]]
+            t = _T(rows)
+            t.setStyle(_TS([("GRID", (0, 0), (-1, -1), 0.5, _c.black), ("BACKGROUND", (0, 0), (-1, 0), _c.lightgrey)]))
+            _SDT(b, pagesize=_letter).build([
+                _P("Smoke Invoice SM32-" + tag32, _gss()["Title"]),
+                t,
+                _P("Total: 5250.00 USD", _gss()["Normal"]),
+            ])
+            return b.getvalue()
+
+        def doc_multipart(path, filename, content, fields):
+            boundary = "----py8nsmoke32"
+            parts = b""
+            for k, v in fields.items():
+                parts += f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+            parts += (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+                f"Content-Type: application/octet-stream\r\n\r\n"
+            ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+            r = urllib.request.Request(
+                f"{BASE}{path}", data=parts,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST",
+            )
+            try:
+                with urllib.request.urlopen(r, timeout=60) as resp:
+                    return resp.status, json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read().decode() or "{}")
+
+        pdf32 = invoice_pdf32()
+        status, ex = doc_multipart("/documents/extract", "invoice.pdf", pdf32, {})
+        assert status == 200 and ex["engine"] == "pdf" and ex["pages"] == 1, ex
+        assert f"SM32-{tag32}" in ex["text"], ex["text"][:150]
+        assert ex["tables"] and ex["tables"][0]["rows"][0] == ["Item", "Qty", "Amount"], ex["tables"]
+        print("extract pdf: text + ruled table OK")
+
+        status, td = doc_multipart(
+            "/documents/to-dataset", "invoice.pdf", pdf32,
+            {"name": f"smoke32 invoice {tag32}", "description": "from document AI"},
+        )
+        assert status == 201 and td["dataset"]["row_count"] == 2, td
+        assert td["extraction"]["rows_imported"] == 2 and td["extraction"]["engine"] == "pdf", td
+        ds32 = td["dataset"]["id"]
+        schema32 = {c["name"]: c["dtype"] for c in td["dataset"]["schema_json"]}
+        assert schema32["Qty"] == "integer" and schema32["Amount"] == "number", schema32
+        status, q = req("POST", "/datasets/query", {"sql": f'SELECT SUM("Amount") AS t FROM "smoke32_invoice_{tag32}"'})
+        assert status == 200 and q["rows"][0]["t"] == 5250.0, q
+        print("to-dataset (coerced) + live SQL over extracted rows OK")
+
+        import io as _io32
+        from PIL import Image, ImageDraw, ImageFont
+
+        img32 = Image.new("RGB", (600, 120), "white")
+        d32 = ImageDraw.Draw(img32)
+        try:
+            fnt32 = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        except Exception:
+            fnt32 = ImageFont.load_default()
+        d32.text((15, 35), f"SMOKE32 {tag32}", fill="black", font=fnt32)
+        ib32 = _io32.BytesIO()
+        img32.save(ib32, format="PNG")
+        status, ocr = doc_multipart("/documents/extract", "scan.png", ib32.getvalue(), {})
+        assert status == 200 and ocr["engine"] == "ocr", ocr
+        assert f"SMOKE32 {tag32}" in " ".join(ocr["text"].split()), ocr["text"]
+        print("live tesseract OCR OK")
+    finally:
+        if ds32:
+            req("DELETE", f"/datasets/{ds32}")
+    print("v32 document AI OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

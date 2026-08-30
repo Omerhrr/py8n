@@ -121,7 +121,7 @@ def test_v30_rules_crud_and_validation():
 
             # node registry untouched by v30 (app-platform wave, no new nodes)
             r = await c.get("/node-definitions")
-            assert len(r.json()["definitions"]) == 36
+            assert len(r.json()["definitions"]) == 37
 
             ds = await _make_dataset(c, "v30 Rules DS")
             app_row = await _make_app(c, "v30 Rules", ds["id"])

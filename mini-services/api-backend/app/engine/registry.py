@@ -19,6 +19,7 @@ from .nodes.data import (
 )
 from .nodes.datasets import DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27
 from .nodes.datascience import ChartNode, ModelTrainNode, PythonTransformNode  # v28
+from .nodes.documents import DocumentExtractNode  # v32
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
 from .nodes.llm import LlmChatNode
@@ -64,6 +65,7 @@ for _cls in (
     PythonTransformNode,  # v28: pandas/numpy code over the input items
     ChartNode,            # v28: matplotlib chart -> PNG artifact
     ModelTrainNode,       # v28: sklearn training -> metrics + model artifact
+    DocumentExtractNode,  # v32: PDF/OCR/Word/Excel/CSV/JSON -> text + items
     LoopOverItemsNode,
     SetVariableNode,
     CodeNode,

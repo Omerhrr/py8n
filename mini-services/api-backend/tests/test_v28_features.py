@@ -126,7 +126,7 @@ def test_v28_definitions():
             assert res.status_code == 200
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 36, f"expected 36 visible types, got {len(types)}"
+            assert len(types) == 37, f"expected 37 visible types, got {len(types)}"
             by = {d["type"]: d for d in defs}
             for t in ("python_transform", "chart", "model_train"):
                 assert t in types, t

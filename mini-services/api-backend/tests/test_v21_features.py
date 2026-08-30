@@ -139,7 +139,7 @@ def test_respond_node_happy_path_json_and_flow_continues():
             # definitions registry: 21 visible node types now include the respond node
             res = await client.get("/node-definitions")
             types = [d["type"] for d in res.json()["definitions"]]
-            assert "respond_to_webhook" in types and len(types) == 36, types  # 33 after v27 + python_transform/chart/model_train v28
+            assert "respond_to_webhook" in types and len(types) == 37, types  # 36 after v28 + document_extract v32
 
     try:
         asyncio.run(_go())

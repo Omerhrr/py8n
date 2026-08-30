@@ -6,7 +6,7 @@ import {
   Hourglass, Brain, Box, Zap, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, Ban, Pin, Bot, Reply,
   Siren, OctagonX, ArrowDownUp, ListEnd, Eraser,
   GitCompare, TableProperties, FileSpreadsheet, MessageCircle,
-  Database, HardDriveDownload, Table2, FileCode, BarChart3, Network,
+  Database, HardDriveDownload, Table2, FileCode, BarChart3, Network, FileText,
 } from 'lucide-vue-next'
 import type { NodeDefinition, NodeRunStatus } from '~/types/node'
 
@@ -35,7 +35,7 @@ const icon = computed(() => {
     'git-compare': GitCompare, 'table-properties': TableProperties, 'file-spreadsheet': FileSpreadsheet,
     'message-circle': MessageCircle,
     database: Database, 'hard-drive-download': HardDriveDownload, 'table-2': Table2,
-    'file-code': FileCode, 'bar-chart-3': BarChart3, network: Network,
+    'file-code': FileCode, 'bar-chart-3': BarChart3, network: Network, 'file-text': FileText,
   }
   return map[def.value?.icon] || Box
 })

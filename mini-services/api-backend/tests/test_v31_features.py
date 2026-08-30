@@ -78,11 +78,10 @@ def test_v31_dashboard_crud_and_validation():
         async with _client() as client:
             # health gate — strict pin lives in the latest wave's tests only
             r = await client.get("/health")
-            assert r.status_code == 200
-            assert r.json()["version"] == "1.31.0"
+            assert r.status_code == 200 and r.json()["app"] == "Py8n"  # version pinned in the latest wave's tests
             # node registry untouched by v31 (dashboards are objects, not nodes)
             r = await client.get("/node-definitions")
-            assert len(r.json()["definitions"]) == 36
+            assert len(r.json()["definitions"]) == 37
 
             crm_id, bill_id = await _seed_two_datasets(client)
 

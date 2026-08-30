@@ -92,7 +92,7 @@ def test_v25_definitions_expose_chat_trigger():
             assert res.status_code == 200
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 36, f"expected 36 visible types, got {len(types)}"
+            assert len(types) == 37, f"expected 37 visible types, got {len(types)}"
             chat = next(d for d in defs if d["type"] == "chat_trigger")
             assert chat["category"] == "triggers"
             assert chat["inputs"] == []  # triggers have no input ports

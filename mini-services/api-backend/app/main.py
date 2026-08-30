@@ -63,6 +63,7 @@ from .api.artifacts import router as artifacts_router  # noqa: E402
 from .api.chat import router as chat_router  # noqa: E402
 from .api.dashboards import router as dashboards_router  # noqa: E402
 from .api.datasets import router as datasets_router  # noqa: E402
+from .api.documents import router as documents_router  # noqa: E402
 from .api.env_vars import router as env_vars_router  # noqa: E402
 from .api.executions import router as executions_router  # noqa: E402
 from .api.folders import router as folders_router  # noqa: E402
@@ -85,6 +86,7 @@ app.include_router(artifacts_router, prefix=API)
 app.include_router(datasets_router, prefix=API)
 app.include_router(apps_router, prefix=API)
 app.include_router(dashboards_router, prefix=API)
+app.include_router(documents_router, prefix=API)
 app.include_router(credentials_router, prefix=API)
 app.include_router(env_vars_router, prefix=API)
 app.include_router(folders_router, prefix=API)
