@@ -349,3 +349,14 @@ class AppOut(BaseModel):
 
 class AppRecordIn(BaseModel):
     record: dict = Field(min_length=1, max_length=200)
+
+
+# ------------------------------------------------------------------ v30 rules/forms
+class RulesPut(BaseModel):
+    # Bound generously here; the service owns the real cap (50) with a 400+message.
+    rules: list[dict] = Field(default_factory=list, max_length=200, description="Full replacement ruleset")
+
+
+class RulesTestIn(BaseModel):
+    record: dict = Field(min_length=1, max_length=200)
+    event: str = Field(default="create", description="create | update")

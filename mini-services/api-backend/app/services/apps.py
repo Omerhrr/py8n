@@ -20,6 +20,17 @@ Record addressing: rows are index-addressable (parquet order). Mutations
 rewrite the parquet atomically; deleting the LAST row preserves the schema
 (the empty-with-columns frame is still writable, unlike the fileless
 0-column case the v27 tests caught).
+
+v30 — forms get field options and records get business rules:
+
+* form fields may be plain strings (shorthand) or objects —
+  ``{"name": "plan", "label": "Plan", "required": true, "default": "starter",
+  "options": ["starter", "pro"], "placeholder": "choose"}`` — both validate;
+  ``required`` / ``options`` are enforced server-side on create (and on
+  update for touched fields), ``default`` fills empty/absent fields on create.
+* ``config["rules"]`` runs through :mod:`.rules` on every record create/update:
+  block rejects with 400, warn surfaces messages in the response, set
+  computes/overrides a field (constant or safe arithmetic formula).
 """
 
 from __future__ import annotations
@@ -32,6 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import App, Dataset
 from . import datasets as ds_svc
+from . import rules as rule_svc
 
 COMPONENT_TYPES = {"stat", "table", "form", "chart"}
 AGGS = {"count", "sum", "avg", "min", "max"}
@@ -210,9 +222,7 @@ def validate_config(config: dict, schema: list[dict]) -> None:
             fields = comp.get("fields", [])
             if not fields or not isinstance(fields, list):
                 raise ValueError(f"{ctx} ({cid}): form needs at least one field")
-            unknown = [f for f in fields if f not in names]
-            if unknown:
-                raise ValueError(f"{ctx} ({cid}): fields not in dataset schema: {unknown}")
+            validate_fields(fields, names, ctx, cid)
         elif ctype == "chart":
             ctype_chart = comp.get("chart_type", "bar")
             if ctype_chart not in CHART_TYPES:
@@ -229,6 +239,58 @@ def validate_config(config: dict, schema: list[dict]) -> None:
                 col = comp.get("column")
                 if not col or col not in names:
                     raise ValueError(f"{ctx} ({cid}): agg={agg} requires a valid column")
+
+    # v30 — rules ride in the same config, validated against the schema
+    rule_svc.validate_rules(config.get("rules"), schema)
+
+
+def validate_fields(fields: list, names: set[str], ctx: str, cid: str) -> None:
+    """Form fields: strings (shorthand) or option objects — v30."""
+    seen: set[str] = set()
+    for j, f in enumerate(fields):
+        fctx = f"{ctx} ({cid}) field[{j}]"
+        if isinstance(f, str):
+            if f not in names:
+                raise ValueError(f"{fctx}: field {f!r} not in dataset schema")
+            seen.add(f)
+            continue
+        if not isinstance(f, dict):
+            raise ValueError(f"{fctx} must be a column name or an object with a name")
+        name = f.get("name")
+        if not name or name not in names:
+            raise ValueError(f"{fctx}: name {name!r} not in dataset schema")
+        if name in seen:
+            raise ValueError(f"{ctx} ({cid}): duplicate field {name!r}")
+        seen.add(name)
+        for key in ("label", "placeholder", "default"):
+            if key in f and f[key] is not None and not isinstance(f[key], (str, int, float, bool)):
+                raise ValueError(f"{fctx}: {key} must be a scalar")
+        if "required" in f and not isinstance(f["required"], bool):
+            raise ValueError(f"{fctx}: required must be a boolean")
+        if "options" in f and f["options"] is not None:
+            opts = f["options"]
+            if not isinstance(opts, list) or not opts or not all(isinstance(o, (str, int, float, bool)) for o in opts):
+                raise ValueError(f"{fctx}: options must be a non-empty list of scalars")
+
+
+def normalize_field(f: object) -> dict:
+    """String | object field → canonical options dict (UI-facing)."""
+    if isinstance(f, str):
+        return {"name": f, "label": humanize(f), "required": False, "options": None, "default": None, "placeholder": None}
+    f = dict(f)
+    name = f.get("name", "")
+    f.setdefault("label", humanize(name))
+    f.setdefault("required", False)
+    f.setdefault("options", None)
+    f.setdefault("default", None)
+    f.setdefault("placeholder", None)
+    return f
+
+
+def form_fields(form_comp: dict | None) -> list[dict]:
+    if not form_comp:
+        return []
+    return [normalize_field(f) for f in form_comp.get("fields", [])]
 
 
 # ----------------------------------------------------------------- aggregates
@@ -323,29 +385,104 @@ def _coerce_values(record: dict, schema: list[dict]) -> dict:
     return out
 
 
-async def append_record(ds: Dataset, record: dict, schema: list[dict]) -> dict:
-    """Create one record through an app — schema keys enforced, values coerced."""
+def apply_form_options(record: dict, fields: list[dict], event: str, touched: set[str] | None = None) -> dict:
+    """Defaults (create) + required/options enforcement (v30).
+
+    * create: empty/absent fields with a ``default`` get it, then EVERY form
+      field marked required must be non-empty (absent counts as empty), and
+      submitted values must honour ``options`` when configured.
+    * update: only TOUCHED fields (patch keys) are validated — legacy rows
+      with gaps must not block unrelated edits; a touched required field may
+      not land empty and its new value must honour ``options``.
+    """
+    out = dict(record)
+
+    def check(f: dict) -> None:
+        name = f["name"]
+        val = out.get(name)
+        if f.get("required") and _is_empty_val(val):
+            raise ValueError(f"field '{name}' is required")
+        opts = f.get("options")
+        if opts and not _is_empty_val(val) and not any(_loose(val, o) for o in opts):
+            raise ValueError(f"field '{name}' must be one of: {', '.join(str(o) for o in opts)}")
+
+    if event == "create":
+        for f in fields:
+            if f.get("default") is not None and _is_empty_val(out.get(f["name"])):
+                out[f["name"]] = f["default"]
+        for f in fields:
+            check(f)
+        return out
+    for f in fields:
+        if f["name"] in (touched or set()):
+            check(f)
+    return out
+
+
+def _is_empty_val(v: object) -> bool:
+    return v is None or (isinstance(v, str) and v.strip() == "")
+
+
+def _loose(a: object, b: object) -> bool:
+    na, nb = rule_svc._num(a), rule_svc._num(b)
+    if na is not None and nb is not None:
+        return na == nb
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+async def append_record(
+    ds: Dataset,
+    record: dict,
+    schema: list[dict],
+    form: dict | None = None,
+    rules: list[dict] | None = None,
+) -> dict:
+    """Create one record through an app — schema keys, form options, rules.
+
+    Order: unknown-field guard → coercion → form defaults/required/options →
+    business rules (block raises, set mutates, warn collects) → parquet.
+    Returns ``{"record": ..., "warnings": [...]}`"""
     names = {c["name"] for c in schema}
     unknown = [k for k in record if k not in names and names]
     if unknown:
         raise ValueError(f"unknown fields: {unknown}")
-    await ds_svc.append_rows(ds, [_coerce_values(record, schema)])
-    return record
+    rec = _coerce_values(record, schema)
+    rec = apply_form_options(rec, form_fields(form), "create")
+    rec, warnings = rule_svc.apply_rules(rules, rec, "create", schema)
+    await ds_svc.append_rows(ds, [_coerce_values(rec, schema)])
+    return {"record": rec, "warnings": warnings}
 
 
-async def update_record(ds: Dataset, index: int, patch: dict) -> dict:
-    """Partially update row ``index``; rewrites the parquet atomically."""
+async def update_record(
+    ds: Dataset,
+    index: int,
+    patch: dict,
+    form: dict | None = None,
+    rules: list[dict] | None = None,
+) -> dict:
+    """Partially update row ``index``; rewrites the parquet atomically.
+
+    Rules evaluate against the MERGED row (existing + patch) so ``set``
+    formulas see the final state. Returns ``{"record": ..., "warnings": [...]}``.
+    """
     df = _load_df(ds)
     if index < 0 or index >= len(df):
         raise IndexError(f"record {index} out of range (0..{len(df) - 1})")
     unknown = [k for k in patch if k not in df.columns]
     if unknown:
         raise ValueError(f"unknown fields: {unknown}")
-    patch = _coerce_values(patch, ds_svc.schema_of(df))
-    for k, v in patch.items():
-        df.at[index, k] = v
+    schema_now = ds_svc.schema_of(df)
+    patch = _coerce_values(patch, schema_now)
+    existing = ds_svc.jsonable_rows(df.iloc[[index]])[0]
+    merged = {**existing, **patch}
+    merged = apply_form_options(merged, form_fields(form), "update", touched=set(patch.keys()))
+    merged, warnings = rule_svc.apply_rules(rules, merged, "update", schema_now)
+    changed = [k for k in merged if not rule_svc._loose_eq(merged[k], existing.get(k))]
+    for k in changed:
+        if k in df.columns:
+            df.at[index, k] = merged[k]
     _save_df(ds, df)
-    return ds_svc.jsonable_rows(df.iloc[[index]])[0]
+    return {"record": ds_svc.jsonable_rows(df.iloc[[index]])[0], "warnings": warnings}
 
 
 async def delete_record(ds: Dataset, index: int) -> int:

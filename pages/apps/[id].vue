@@ -3,11 +3,35 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Save, Rocket, ExternalLink, Database, Plus, Trash2, X, RefreshCw,
   Gauge, Table2, ClipboardList, BarChart3, ArrowLeft, Unlink, CircleAlert,
+  ShieldCheck, Link2, TriangleAlert, PlusCircle, XCircle,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 const { api } = useApi()
 const route = useRoute()
+
+interface FormField {
+  name: string
+  label?: string | null
+  required?: boolean
+  options?: (string | number | boolean)[] | null
+  default?: string | number | boolean | null
+  placeholder?: string | null
+}
+
+interface RuleClause { field: string; op: string; value?: any }
+
+interface AppRule {
+  id?: string
+  name?: string
+  event?: string
+  when?: { all: RuleClause[] }
+  action: string
+  message?: string
+  field?: string
+  value?: any
+  formula?: string
+}
 
 interface AppComponent {
   id: string
@@ -18,7 +42,7 @@ interface AppComponent {
   column?: string
   columns?: string[]
   page_size?: number
-  fields?: string[]
+  fields?: (string | FormField)[]
   submit_label?: string
   chart_type?: string
   group_by?: string
@@ -31,7 +55,7 @@ interface AppDetail {
   description: string
   dataset_id: string | null
   dataset_name: string | null
-  config: { components?: AppComponent[] }
+  config: { components?: AppComponent[]; rules?: AppRule[] }
   status: string
 }
 
@@ -76,6 +100,8 @@ async function load() {
     editingName.value = a.name
     editingDesc.value = a.description || ''
     bindId.value = a.dataset_id || ''
+    rules.value = (a.config?.rules || []).map((r) => JSON.parse(JSON.stringify(r)))
+    rulesDirty.value = false
     if (a.dataset_id) await loadBound(a.dataset_id)
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Failed to load app'
@@ -201,11 +227,123 @@ function removeComponent(i: number) {
 }
 
 function toggleInList(comp: AppComponent, key: 'columns' | 'fields', col: string) {
+  if (key === 'fields') {
+    // v30: fields may be option objects — toggle by name, keep the rest intact
+    const objs = normFields(comp).map((f) => ({ ...f }))
+    const i = objs.findIndex((f) => f.name === col)
+    if (i >= 0) objs.splice(i, 1)
+    else objs.push({ name: col })
+    comp.fields = objs
+    touch()
+    return
+  }
   const list = comp[key] || (comp[key] = [])
   const i = list.indexOf(col)
   if (i >= 0) list.splice(i, 1)
   else list.push(col)
   touch()
+}
+
+// ------------------------------------------------------------- form fields (v30)
+function fieldName(f: string | FormField): string {
+  return typeof f === 'string' ? f : f.name
+}
+
+function normFields(comp: AppComponent): FormField[] {
+  return (comp.fields || []).map((f: any) => (typeof f === 'string' ? { name: f } : f))
+}
+
+function hasField(comp: AppComponent, col: string): boolean {
+  return (comp.fields || []).some((f) => fieldName(f as any) === col)
+}
+
+function updateField(comp: AppComponent, idx: number, patch: Partial<FormField>) {
+  const objs = normFields(comp).map((f) => ({ ...f }))
+  objs[idx] = { ...objs[idx], ...patch }
+  comp.fields = objs
+  touch()
+}
+
+function parseOptions(raw: string): (string | number)[] {
+  return raw.split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+// ------------------------------------------------------------- business rules (v30)
+const rules = ref<AppRule[]>([])
+const rulesDirty = ref(false)
+const rulesSaving = ref(false)
+const RULE_OPS = ['eq', 'ne', 'gt', 'gte', 'lt', 'lte', 'contains', 'not_contains', 'starts_with', 'ends_with', 'empty', 'not_empty']
+const VALUELESS_OPS = new Set(['empty', 'not_empty'])
+const ACTION_COLORS: Record<string, string> = {
+  block: 'bg-red-500/15 text-red-400',
+  warn: 'bg-amber-500/15 text-amber-400',
+  set: 'bg-sky-500/15 text-sky-400',
+}
+
+let ruleUid = 0
+function addRule() {
+  ruleUid++
+  const firstCol = schema.value[0]?.name || ''
+  rules.value.push({
+    id: `rule_new${ruleUid}`,
+    name: '',
+    event: 'create',
+    when: { all: [{ field: firstCol, op: 'not_empty' }] },
+    action: 'block',
+    message: '',
+  })
+  rulesDirty.value = true
+}
+
+function removeRule(i: number) {
+  rules.value.splice(i, 1)
+  rulesDirty.value = true
+}
+
+function addClause(rule: AppRule) {
+  if (!rule.when) rule.when = { all: [] }
+  rule.when.all.push({ field: schema.value[0]?.name || '', op: 'eq', value: '' })
+  rulesDirty.value = true
+}
+
+function ruleSummary(r: AppRule): string {
+  const clauses = r.when?.all || []
+  if (!clauses.length) return 'always'
+  return clauses.map((c) => `${c.field} ${c.op}${VALUELESS_OPS.has(c.op) ? '' : ` ${c.value ?? ''}`}`).join(' AND ')
+}
+
+async function saveRules() {
+  if (!appRow.value) return
+  rulesSaving.value = true
+  error.value = null
+  try {
+    const cleaned = rules.value.map((r) => ({
+      ...r,
+      name: r.name?.trim() || undefined,
+      when: r.when?.all?.length ? { all: r.when.all } : undefined,
+    }))
+    await api.put(`/apps/${appRow.value.id}/rules`, { rules: cleaned })
+    rulesDirty.value = false
+    notice.value = 'Rules saved — live immediately'
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Saving rules failed'
+  } finally {
+    rulesSaving.value = false
+  }
+}
+
+// ------------------------------------------------------------- share form link (v30)
+const formCopied = ref(false)
+async function copyFormLink() {
+  if (!appRow.value) return
+  const url = `${window.location.origin}/f/${appRow.value.slug}`
+  try {
+    await navigator.clipboard.writeText(url)
+  } catch {
+    window.prompt('Copy the form link:', url)
+  }
+  formCopied.value = true
+  setTimeout(() => (formCopied.value = false), 2000)
 }
 
 // ---------------------------------------------------------------- preview
@@ -282,6 +420,14 @@ function dtypeOf(col: string) {
             <template v-if="appRow && isPublished"> · /run/{{ appRow.slug }}</template>
           </p>
         </div>
+        <button
+          v-if="isPublished && formComp"
+          class="flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 px-3 py-1.5 text-xs font-medium text-sky-400 transition hover:bg-sky-500/20"
+          title="Copy the standalone form link (/f/slug)"
+          @click="copyFormLink"
+        >
+          <Link2 class="h-3.5 w-3.5" /> {{ formCopied ? 'Copied!' : 'Form link' }}
+        </button>
         <button
           v-if="isPublished"
           class="flex items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-1.5 text-xs font-medium text-emerald-400 transition hover:bg-emerald-500/20"
@@ -431,12 +577,68 @@ function dtypeOf(col: string) {
                       <button
                         v-for="c in schema" :key="c.name"
                         class="rounded-full border px-2 py-0.5 text-[10px] transition"
-                        :class="(comp.fields || []).includes(c.name) ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-zinc-800 text-zinc-500 hover:border-zinc-600'"
+                        :class="hasField(comp, c.name) ? 'border-amber-500/50 bg-amber-500/10 text-amber-300' : 'border-zinc-800 text-zinc-500 hover:border-zinc-600'"
                         :disabled="isPublished"
                         @click="toggleInList(comp, 'fields', c.name)"
                       >{{ c.name }}</button>
                     </div>
                     <input v-model="comp.submit_label" placeholder="Submit button label" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @input="touch" />
+
+                    <!-- v30: per-field options -->
+                    <div v-if="normFields(comp).length" class="space-y-2 border-t border-zinc-800/80 pt-2">
+                      <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">Field options</p>
+                      <div
+                        v-for="(f, fi) in normFields(comp)"
+                        :key="f.name"
+                        class="space-y-1.5 rounded-lg border border-zinc-800/80 bg-zinc-950/40 p-2"
+                      >
+                        <div class="flex items-center gap-2">
+                          <span class="text-[11px] font-semibold text-zinc-300">{{ f.name }}</span>
+                          <span class="text-[9px] text-zinc-600">{{ dtypeOf(f.name) }}</span>
+                          <label class="ml-auto flex cursor-pointer items-center gap-1 text-[10px] text-zinc-400">
+                            <input
+                              type="checkbox"
+                              class="accent-amber-500"
+                              :checked="!!f.required"
+                              :disabled="isPublished"
+                              @change="updateField(comp, fi, { required: ($event.target as HTMLInputElement).checked })"
+                            />
+                            required
+                          </label>
+                        </div>
+                        <div class="grid grid-cols-2 gap-1.5">
+                          <input
+                            :value="f.label ?? ''"
+                            placeholder="Label"
+                            class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] outline-none focus:border-violet-500/60"
+                            :disabled="isPublished"
+                            @change="updateField(comp, fi, { label: ($event.target as HTMLInputElement).value || null })"
+                          />
+                          <input
+                            :value="(f.options || []).join(', ')"
+                            placeholder="options, comma, separated"
+                            class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] outline-none focus:border-violet-500/60"
+                            :disabled="isPublished"
+                            @change="updateField(comp, fi, { options: parseOptions(($event.target as HTMLInputElement).value) })"
+                          />
+                          <input
+                            :value="f.default ?? ''"
+                            placeholder="Default value"
+                            class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] outline-none focus:border-violet-500/60"
+                            :disabled="isPublished"
+                            @change="updateField(comp, fi, { default: ($event.target as HTMLInputElement).value || null })"
+                          />
+                          <input
+                            :value="f.placeholder ?? ''"
+                            placeholder="Placeholder"
+                            class="rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] outline-none focus:border-violet-500/60"
+                            :disabled="isPublished"
+                            @change="updateField(comp, fi, { placeholder: ($event.target as HTMLInputElement).value || null })"
+                          />
+                        </div>
+                      </div>
+                      <p class="text-[10px] text-zinc-600">options → dropdown in the form · default fills empty submissions · required is enforced server-side</p>
+                    </div>
                   </template>
 
                   <!-- chart editors -->
@@ -473,6 +675,143 @@ function dtypeOf(col: string) {
                 <component :is="TYPE_ICONS[t]" class="h-3.5 w-3.5" /> + {{ t }}
               </button>
             </div>
+          </section>
+
+          <!-- business rules (v30) -->
+          <section class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+            <div class="flex items-center justify-between">
+              <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-zinc-400">
+                <ShieldCheck class="h-3.5 w-3.5 text-emerald-400" /> Rules ({{ rules.length }})
+              </h2>
+              <button
+                v-if="bindId"
+                class="flex items-center gap-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] font-semibold text-emerald-400 transition hover:bg-emerald-500/20 disabled:opacity-40"
+                :disabled="rulesSaving"
+                @click="saveRules"
+              >
+                <Loader2 v-if="rulesSaving" class="h-3 w-3 animate-spin" />
+                <Save v-else class="h-3 w-3" />
+                {{ rulesDirty ? 'Save rules*' : 'Save rules' }}
+              </button>
+            </div>
+            <p class="mt-1 text-[11px] leading-relaxed text-zinc-500">
+              Server-side guards on every record — block rejects, warn flags, set computes. Rules stay editable while the app is published.
+            </p>
+
+            <div class="mt-3 space-y-3">
+              <div
+                v-for="(rule, ri) in rules"
+                :key="rule.id || ri"
+                class="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3"
+              >
+                <div class="flex items-center gap-2">
+                  <span class="rounded-md px-1.5 py-0.5 text-[9px] font-bold uppercase" :class="ACTION_COLORS[rule.action] || 'bg-zinc-800 text-zinc-400'">{{ rule.action }}</span>
+                  <input
+                    v-model="rule.name"
+                    placeholder="Rule name"
+                    class="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-1 py-0.5 text-xs font-semibold text-zinc-200 outline-none transition hover:border-zinc-700 focus:border-violet-500/60"
+                    @input="rulesDirty = true"
+                  />
+                  <button class="rounded p-1 text-zinc-600 transition hover:bg-red-500/10 hover:text-red-400" title="Remove rule" @click="removeRule(ri)">
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+
+                <div class="mt-2 flex gap-2">
+                  <select v-model="rule.event" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] outline-none focus:border-violet-500/60" @change="rulesDirty = true">
+                    <option value="create">on create</option>
+                    <option value="update">on update</option>
+                    <option value="always">always</option>
+                  </select>
+                  <select v-model="rule.action" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] outline-none focus:border-violet-500/60" @change="rulesDirty = true">
+                    <option value="block">block (reject)</option>
+                    <option value="warn">warn (flag)</option>
+                    <option value="set">set (compute)</option>
+                  </select>
+                </div>
+
+                <!-- when clauses -->
+                <div class="mt-2 space-y-1.5">
+                  <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">When</p>
+                  <div v-for="(clause, ci) in rule.when?.all || []" :key="ci" class="flex items-center gap-1.5">
+                    <select v-model="clause.field" class="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-1.5 py-1 text-[11px] outline-none focus:border-violet-500/60" @change="rulesDirty = true">
+                      <option value="" disabled>field…</option>
+                      <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    </select>
+                    <select v-model="clause.op" class="w-24 shrink-0 rounded-lg border border-zinc-800 bg-zinc-900/60 px-1.5 py-1 text-[11px] outline-none focus:border-violet-500/60" @change="rulesDirty = true">
+                      <option v-for="op in RULE_OPS" :key="op" :value="op">{{ op }}</option>
+                    </select>
+                    <input
+                      v-if="!VALUELESS_OPS.has(clause.op)"
+                      v-model="clause.value"
+                      placeholder="value"
+                      class="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[11px] outline-none focus:border-violet-500/60"
+                      @input="rulesDirty = true"
+                    />
+                    <button class="shrink-0 rounded p-1 text-zinc-600 transition hover:bg-red-500/10 hover:text-red-400" title="Remove condition" @click="rule.when!.all.splice(ci, 1); rulesDirty = true">
+                      <XCircle class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                  <button class="flex items-center gap-1 text-[10px] text-zinc-500 transition hover:text-violet-300" @click="addClause(rule)">
+                    <PlusCircle class="h-3 w-3" /> add condition
+                  </button>
+                </div>
+
+                <!-- then -->
+                <div class="mt-2 space-y-1.5">
+                  <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-600">Then</p>
+                  <textarea
+                    v-if="rule.action === 'block' || rule.action === 'warn'"
+                    v-model="rule.message"
+                    rows="2"
+                    :placeholder="rule.action === 'block' ? 'Rejection message shown to the user' : 'Warning message attached to the record'"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px] outline-none focus:border-violet-500/60"
+                    @input="rulesDirty = true"
+                  />
+                  <template v-else>
+                    <div class="flex gap-2">
+                      <select v-model="rule.field" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-[11px] outline-none focus:border-violet-500/60" @change="rulesDirty = true">
+                        <option value="" disabled>field to set…</option>
+                        <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
+                      </select>
+                      <select
+                        :value="rule.formula ? 'formula' : 'value'"
+                        class="w-24 shrink-0 rounded-lg border border-zinc-800 bg-zinc-900/60 px-1.5 py-1.5 text-[11px] outline-none focus:border-violet-500/60"
+                        @change="($event.target as HTMLSelectElement).value === 'formula' ? (rule.formula = rule.formula || '', rule.value = undefined) : (rule.value = rule.value ?? '', rule.formula = undefined); rulesDirty = true"
+                      >
+                        <option value="value">constant</option>
+                        <option value="formula">formula</option>
+                      </select>
+                    </div>
+                    <input
+                      v-if="rule.formula !== undefined"
+                      v-model="rule.formula"
+                      placeholder="formula e.g. ltv * 0.1"
+                      class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-violet-500/60"
+                      @input="rulesDirty = true"
+                    />
+                    <input
+                      v-else
+                      v-model="rule.value"
+                      placeholder="constant value"
+                      class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px] outline-none focus:border-violet-500/60"
+                      @input="rulesDirty = true"
+                    />
+                  </template>
+                </div>
+
+                <p class="mt-2 truncate text-[10px] text-zinc-600">when {{ ruleSummary(rule) }}</p>
+              </div>
+            </div>
+
+            <button
+              v-if="bindId"
+              class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-zinc-800 py-2 text-[11px] text-zinc-500 transition hover:border-emerald-500/50 hover:text-emerald-300"
+              @click="addRule"
+            >
+              <Plus class="h-3.5 w-3.5" /> add rule
+            </button>
+            <p v-else class="mt-3 text-[11px] text-zinc-600">Bind a dataset to add rules.</p>
           </section>
         </div>
 

@@ -1879,7 +1879,8 @@ def main() -> None:
     # ---------------------------------------------------------------
     print("\n== v29: app builder (Excel -> App) ==")
     status, health29 = req("GET", "/health")
-    assert status == 200 and health29["version"].startswith("1.29"), health29
+    ver29 = tuple(int(x) for x in health29.get("version", "0").split(".")[:2])
+    assert status == 200 and ver29 >= (1, 29), health29
 
     tag29 = uuid.uuid4().hex[:6]
     rows29 = [
@@ -1939,6 +1940,99 @@ def main() -> None:
         req("DELETE", f"/apps/{app29['id']}")
         req("DELETE", f"/datasets/{ds29['id']}")
     print("v29 app builder OK")
+
+    # ---------------------------------------------------------------
+    # v30: forms & business rules — block/warn/set, field options, /form
+    # ---------------------------------------------------------------
+    print("\n== v30: forms & business rules ==")
+    status, health30 = req("GET", "/health")
+    assert status == 200 and health30["version"] == "1.30.0", health30
+
+    tag30 = uuid.uuid4().hex[:6]
+    rows30 = [
+        {"name": "Alice", "plan": "starter", "ltv": 1200, "commission": 120, "active": True},
+        {"name": "Bob", "plan": "pro", "ltv": 3400, "commission": 340, "active": True},
+        {"name": "Cara", "plan": "enterprise", "ltv": 9800, "commission": 980, "active": False},
+        {"name": "Dan", "plan": "starter", "ltv": 900, "commission": 90, "active": True},
+        {"name": "Eve", "plan": "enterprise", "ltv": 12450, "commission": 1245, "active": True},
+        {"name": "Finn", "plan": "pro", "ltv": 3100, "commission": 310, "active": False},
+    ]
+    status, ds30 = req("POST", "/datasets", {"name": f"smoke30 clients {tag30}", "rows": rows30})
+    assert status == 201, ds30
+    cfg30 = {"components": [
+        {"id": "form_main", "type": "form", "title": "Add client", "submit_label": "Save client",
+         "fields": [
+             {"name": "name", "required": True, "placeholder": "Full name"},
+             {"name": "plan", "required": True, "options": ["starter", "pro", "enterprise"], "default": "starter"},
+             {"name": "ltv"},
+             "active",
+         ]},
+        {"id": "table_main", "type": "table", "title": "Clients", "columns": ["name", "plan", "ltv"], "page_size": 5},
+    ]}
+    rules30 = [
+        {"id": "r_block", "name": "LTV cap", "event": "create",
+         "when": {"all": [{"field": "ltv", "op": "gt", "value": 15000}]},
+         "action": "block", "message": "LTV above 15000 needs sign-off"},
+        {"id": "r_warn", "name": "Big deal", "event": "always",
+         "when": {"all": [{"field": "ltv", "op": "gte", "value": 9000}]},
+         "action": "warn", "message": "Big deal — call the customer"},
+        {"id": "r_set", "name": "Commission", "event": "create",
+         "when": {"all": [{"field": "plan", "op": "eq", "value": "pro"}]},
+         "action": "set", "field": "commission", "formula": "ltv * 0.1"},
+    ]
+    try:
+        status, app30 = req("POST", "/apps", {"name": f"smoke30 CRM {tag30}", "dataset_id": ds30["id"], "config": cfg30})
+        assert status == 201, app30
+        status, _ = req("PUT", f"/apps/{app30['id']}/rules", {"rules": rules30})
+        assert status == 200
+        status, pub30 = req("POST", f"/apps/{app30['id']}/publish")
+        assert status == 200 and pub30["status"] == "published", pub30
+
+        # block fires on create — record rejected, nothing written
+        status, err = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Zed", "plan": "starter", "ltv": 20000}})
+        assert status == 400 and "15000" in err["detail"], err
+        # warn surfaces in the response; default fills the absent plan
+        status, rec = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Yara", "ltv": 9500}})
+        assert status == 201 and rec["warnings"] == ["Big deal — call the customer"], rec
+        assert req("GET", f"/apps/{app30['slug']}/records?offset=6&limit=1")[1]["rows"][0]["plan"] == "starter"
+        # set computes commission via formula (int cast on the column)
+        status, _ = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Xavi", "plan": "pro", "ltv": 2000}})
+        assert status == 201
+        assert req("GET", f"/apps/{app30['slug']}/records?offset=7&limit=1")[1]["rows"][0]["commission"] == 200
+        print("rules on create: block / warn / set(formula) OK")
+
+        # rules editable on a PUBLISHED app; the layout itself stays locked
+        status, _ = req("PATCH", f"/apps/{app30['id']}", {"config": cfg30})
+        assert status == 409
+        status, _ = req("PUT", f"/apps/{app30['id']}/rules", {"rules": rules30[:1]})
+        assert status == 200
+        status, _ = req("PUT", f"/apps/{app30['id']}/rules", {"rules": rules30})
+        assert status == 200
+        print("rules editable while published; components locked OK")
+
+        # dry-run: full match report, zero data change
+        status, dry = req("POST", f"/apps/{app30['id']}/rules/test", {"record": {"name": "T", "plan": "pro", "ltv": 3400}, "event": "create"})
+        assert status == 200 and dry["blocked"] is False and "commission = 340" in dry["matches"][0]["result"], dry
+        status, page30 = req("GET", f"/apps/{app30['slug']}/records")
+        assert page30["row_count"] == 8
+        print("rules dry-run OK")
+
+        # standalone form descriptor + anonymous submission
+        status, fd = req("GET", f"/apps/{app30['slug']}/form")
+        assert status == 200 and fd["form"]["title"] == "Add client", fd
+        ffields = fd["form"]["fields"]
+        assert ffields[1]["options"] == ["starter", "pro", "enterprise"] and ffields[1]["default"] == "starter"
+        status, sub = req("POST", f"/apps/{app30['slug']}/form-submit", {"record": {"name": "Form Guy", "ltv": 800}})
+        assert status == 201 and sub["row_count"] == 9, sub
+        status, err2 = req("POST", f"/apps/{app30['slug']}/form-submit", {"record": {"ltv": 100}})
+        assert status == 400 and "'name' is required" in err2["detail"], err2
+        status, err3 = req("POST", f"/apps/{app30['slug']}/form-submit", {"record": {"name": "Nope", "plan": "ultra"}})
+        assert status == 400 and "must be one of" in err3["detail"], err3
+        print("standalone form: descriptor + submit + required/options OK")
+    finally:
+        req("DELETE", f"/apps/{app30['id']}")
+        req("DELETE", f"/datasets/{ds30['id']}")
+    print("v30 forms & business rules OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

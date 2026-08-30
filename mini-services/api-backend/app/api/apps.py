@@ -18,6 +18,15 @@ GET    /apps/{slug}/records              paginated rows
 POST   /apps/{slug}/records              create a record (lands in the dataset parquet)
 PATCH  /apps/{slug}/records/{index}      edit a record
 DELETE /apps/{slug}/records/{index}      delete a record
+GET    /apps/{slug}/form                 standalone form descriptor (v30)
+POST   /apps/{slug}/form-submit          anonymous form submission (v30)
+
+Rules management (v30) — the config lock does NOT apply: rules are
+governance, editable on live apps without touching the layout
+------------------------------------------------------------------------------
+GET    /apps/{ref}/rules                 rules + the known ops/actions/events
+PUT    /apps/{ref}/rules                 replace all rules (validated)
+POST   /apps/{ref}/rules/test            dry-run a sample record against the rules
 
 Every mutation commits explicitly (v4 lesson).
 """
@@ -31,9 +40,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models import App, Dataset
-from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate
+from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut
 from ..services import apps as app_svc
 from ..services import datasets as ds_svc
+from ..services import rules as rule_svc
 
 router = APIRouter(prefix="/apps", tags=["apps"])
 
@@ -75,6 +85,14 @@ async def _runtime_or_404(db: AsyncSession, slug: str) -> App:
     if row is None or row.status != "published":
         raise HTTPException(status_code=404, detail="App not found (or not published)")
     return row
+
+
+def _form_comp(row: App) -> dict | None:
+    """First form component, if any (v30 forms + rules key off it)."""
+    for comp in (row.config or {}).get("components", []):
+        if comp.get("type") == "form":
+            return comp
+    return None
 
 
 # ----------------------------------------------------------------- admin
@@ -251,6 +269,93 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
     return payload
 
 
+# ----------------------------------------------------------------- rules (v30)
+@router.get("/{app_ref}/rules")
+async def get_rules(app_ref: str, db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref)
+    return {
+        "rules": (row.config or {}).get("rules", []),
+        "ops": sorted(rule_svc.RULE_OPS),
+        "actions": sorted(rule_svc.RULE_ACTIONS),
+        "events": sorted(rule_svc.RULE_EVENTS),
+    }
+
+
+@router.put("/{app_ref}/rules")
+async def put_rules(app_ref: str, body: RulesPut, db: AsyncSession = Depends(get_db)):
+    """Replace all rules — allowed on PUBLISHED apps too (layout stays locked)."""
+    row = await _get_or_404(db, app_ref)
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="Bind a dataset before adding rules")
+    try:
+        rule_svc.validate_rules(body.rules, dataset.schema_json or [])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row.config = {**(row.config or {}), "rules": body.rules}
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {"ok": True, "rules": body.rules}
+
+
+@router.post("/{app_ref}/rules/test")
+async def test_rules(app_ref: str, body: RulesTestIn, db: AsyncSession = Depends(get_db)):
+    """Dry-run a sample record — which rules fire, what they would do."""
+    row = await _get_or_404(db, app_ref)
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="Bind a dataset before testing rules")
+    return rule_svc.dry_run(
+        (row.config or {}).get("rules", []),
+        body.record,
+        body.event if body.event in ("create", "update") else "create",
+        dataset.schema_json or [],
+    )
+
+
+# ----------------------------------------------------------------- forms (v30)
+@router.get("/{slug}/form")
+async def form_descriptor(slug: str, db: AsyncSession = Depends(get_db)):
+    """Standalone form descriptor for the public /f/{slug} page."""
+    row = await _runtime_or_404(db, slug)
+    form = _form_comp(row)
+    if form is None:
+        raise HTTPException(status_code=409, detail="App has no form component")
+    dataset = await _dataset_for(db, row)
+    return {
+        "app": {"name": row.name, "slug": row.slug, "description": row.description or ""},
+        "form": {
+            "title": form.get("title", "Submit"),
+            "submit_label": form.get("submit_label", "Submit"),
+            "fields": app_svc.form_fields(form),
+        },
+        "dataset": {"name": dataset.name, "row_count": dataset.row_count} if dataset else None,
+    }
+
+
+@router.post("/{slug}/form-submit", status_code=201)
+async def form_submit(slug: str, body: AppRecordIn, db: AsyncSession = Depends(get_db)):
+    """Anonymous single-form submission — same pipeline as records POST."""
+    row = await _runtime_or_404(db, slug)
+    if _form_comp(row) is None:
+        raise HTTPException(status_code=409, detail="App has no form component")
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="App has no dataset bound")
+    try:
+        result = await app_svc.append_record(
+            dataset, body.record, dataset.schema_json or [],
+            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    db.add(dataset)
+    await db.commit()
+    await db.refresh(dataset)
+    return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"]}
+
+
 @router.get("/{slug}/records")
 async def runtime_records(
     slug: str,
@@ -280,13 +385,16 @@ async def create_record(slug: str, body: AppRecordIn, db: AsyncSession = Depends
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     try:
-        await app_svc.append_record(dataset, body.record, dataset.schema_json or [])
+        result = await app_svc.append_record(
+            dataset, body.record, dataset.schema_json or [],
+            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
-    return {"ok": True, "row_count": dataset.row_count}
+    return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"]}
 
 
 @router.patch("/{slug}/records/{index}")
@@ -296,7 +404,10 @@ async def edit_record(slug: str, index: int, body: AppRecordIn, db: AsyncSession
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     try:
-        updated = await app_svc.update_record(dataset, index, body.record)
+        result = await app_svc.update_record(
+            dataset, index, body.record,
+            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+        )
     except IndexError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -304,7 +415,7 @@ async def edit_record(slug: str, index: int, body: AppRecordIn, db: AsyncSession
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
-    return {"ok": True, "record": updated, "row_count": dataset.row_count}
+    return {"ok": True, "record": result["record"], "row_count": dataset.row_count, "warnings": result["warnings"]}
 
 
 @router.delete("/{slug}/records/{index}")

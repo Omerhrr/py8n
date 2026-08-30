@@ -1,12 +1,21 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import {
-  Loader2, Search, Plus, Pencil, Trash2, X, CircleAlert, Rocket, Database, RefreshCw, ChevronLeft, ChevronRight,
+  Loader2, Search, Plus, Pencil, Trash2, X, CircleAlert, Rocket, Database, RefreshCw, ChevronLeft, ChevronRight, TriangleAlert,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 const { api } = useApi()
 const route = useRoute()
+
+interface FormField {
+  name: string
+  label?: string | null
+  required?: boolean
+  options?: (string | number | boolean)[] | null
+  default?: string | number | boolean | null
+  placeholder?: string | null
+}
 
 interface AppComponent {
   id: string
@@ -17,7 +26,7 @@ interface AppComponent {
   column?: string
   columns?: string[]
   page_size?: number
-  fields?: string[]
+  fields?: (string | FormField)[]
   submit_label?: string
   chart_type?: string
   group_by?: string
@@ -44,6 +53,7 @@ const page = ref(1)
 const saving = ref(false)
 const mutatingId = ref<string | null>(null)
 const actionError = ref<string | null>(null)
+const lastWarnings = ref<string[]>([])
 
 // record modal
 const showModal = ref(false)
@@ -135,26 +145,36 @@ async function refreshAll() {
 onMounted(loadRuntime)
 
 // ---------------------------------------------------------------- form
+function normField(f: string | FormField): FormField {
+  return typeof f === 'string' ? { name: f } : f
+}
+
+function formFields(): FormField[] {
+  return (formComp.value?.fields || []).map((f) => normField(f))
+}
+
 function openCreate() {
   if (!formComp.value) return
   const model: Record<string, any> = {}
-  for (const f of formComp.value.fields || []) model[f] = ''
+  for (const f of formFields()) model[f.name] = f.default !== null && f.default !== undefined ? String(f.default) : ''
   formModel.value = model
   editIndex.value = null
   actionError.value = null
+  lastWarnings.value = []
   showModal.value = true
 }
 
 function openEdit(index: number) {
   if (!formComp.value || !rows.value[index]) return
   const model: Record<string, any> = {}
-  for (const f of formComp.value.fields || []) {
-    const v = rows.value[index][f]
-    model[f] = v === null || v === undefined ? '' : String(v)
+  for (const f of formFields()) {
+    const v = rows.value[index][f.name]
+    model[f.name] = v === null || v === undefined ? '' : String(v)
   }
   formModel.value = model
   editIndex.value = index
   actionError.value = null
+  lastWarnings.value = []
   showModal.value = true
 }
 
@@ -166,12 +186,15 @@ async function submitForm() {
   if (!formComp.value) return
   saving.value = true
   actionError.value = null
+  lastWarnings.value = []
   try {
+    let res: any
     if (editIndex.value === null) {
-      await api.post(`/apps/${route.params.slug}/records`, { record: formModel.value })
+      res = await api.post<any>(`/apps/${route.params.slug}/records`, { record: formModel.value })
     } else {
-      await api.patch(`/apps/${route.params.slug}/records/${editIndex.value}`, { record: formModel.value })
+      res = await api.patch<any>(`/apps/${route.params.slug}/records/${editIndex.value}`, { record: formModel.value })
     }
+    lastWarnings.value = res?.warnings || []
     showModal.value = false
     await refreshAll()
   } catch (e: any) {
@@ -244,6 +267,10 @@ async function removeRow(index: number) {
       <div class="mx-auto max-w-6xl px-4 lg:px-6">
         <p v-if="actionError" class="mt-4 flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-300">
           <CircleAlert class="h-3.5 w-3.5 shrink-0" /> {{ actionError }}
+        </p>
+        <p v-if="lastWarnings.length" class="mt-4 flex items-center gap-2 rounded-xl border border-yellow-500/40 bg-yellow-500/10 px-4 py-2 text-xs text-yellow-300">
+          <TriangleAlert class="h-3.5 w-3.5 shrink-0" />
+          <span><b>Saved with warnings:</b> {{ lastWarnings.join(' · ') }}</span>
         </p>
 
         <!-- stats -->
@@ -358,11 +385,22 @@ async function removeRow(index: number) {
             </div>
             <p v-if="actionError" class="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">{{ actionError }}</p>
             <div class="mt-3 space-y-2.5">
-              <div v-for="field in formComp?.fields || []" :key="field">
-                <label class="text-[10px] uppercase tracking-wide text-zinc-500">{{ field }}</label>
+              <div v-for="f in formFields()" :key="f.name">
+                <label class="text-[10px] uppercase tracking-wide text-zinc-500">
+                  {{ f.label || f.name }}<span v-if="f.required" class="text-red-400"> *</span>
+                </label>
+                <!-- options → dropdown (v30) -->
                 <select
-                  v-if="dtypeOf(field) === 'boolean'"
-                  v-model="formModel[field]"
+                  v-if="f.options && f.options.length"
+                  v-model="formModel[f.name]"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
+                >
+                  <option value="" disabled>choose…</option>
+                  <option v-for="o in f.options" :key="String(o)" :value="String(o)">{{ o }}</option>
+                </select>
+                <select
+                  v-else-if="dtypeOf(f.name) === 'boolean'"
+                  v-model="formModel[f.name]"
                   class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
                 >
                   <option value="">—</option>
@@ -371,9 +409,10 @@ async function removeRow(index: number) {
                 </select>
                 <input
                   v-else
-                  v-model="formModel[field]"
-                  :type="dtypeOf(field) === 'integer' || dtypeOf(field) === 'number' ? 'number' : 'text'"
-                  :step="dtypeOf(field) === 'number' ? 'any' : undefined"
+                  v-model="formModel[f.name]"
+                  :type="dtypeOf(f.name) === 'integer' || dtypeOf(f.name) === 'number' ? 'number' : 'text'"
+                  :step="dtypeOf(f.name) === 'number' ? 'any' : undefined"
+                  :placeholder="f.placeholder || ''"
                   class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
                 />
               </div>

@@ -63,7 +63,7 @@ def test_v29_apps_crud_and_slugs():
     async def _go():
         async with _client() as c:
             r = await c.get("/health")
-            assert r.json()["version"] == "1.29.0"
+            assert r.status_code == 200 and r.json()["app"] == "Py8n"  # version pinned in the latest wave's tests
 
             # blank-first: no dataset, empty components, draft
             r = await c.post("/apps", json={"name": "v29 Team"})
