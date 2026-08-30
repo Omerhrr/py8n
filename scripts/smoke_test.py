@@ -47,7 +47,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 21, "expected 21 node types after v21 wave"
+    assert len(types) == 26, "expected 26 node types after v22 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1192,7 +1192,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 21 and "respond_to_webhook" in types21, types21
+    assert len(types21) == 26 and "respond_to_webhook" in types21, types21  # 26 after v22
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1260,6 +1260,114 @@ def main() -> None:
         req("DELETE", f"/workflows/{wf21['id']}")
         req("DELETE", f"/workflows/{wf21b['id']}")
     print("v21 respond-to-webhook OK")
+
+    # ---------------------------------------------------------------
+    # v22: data ops (sort/limit/remove_duplicates), stop-and-error,
+    # and the error-trigger handler end-to-end
+    # ---------------------------------------------------------------
+    print("\n== v22: data ops + stop-and-error + error trigger ==")
+    for t in ("error_trigger", "stop_and_error", "sort", "limit", "remove_duplicates"):
+        assert t in types, f"missing v22 node {t}"
+    # error trigger def: source-only trigger node
+    et_def = next(d for d in defs["definitions"] if d["type"] == "error_trigger")
+    assert et_def["inputs"] == [] and et_def["category"] == "triggers", et_def
+    print("26 node types incl. 5 v22 nodes; error trigger def OK")
+
+    status, wf22 = req("POST", "/workflows", {"name": f"tmp v22 ops {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0},
+             "parameters": {"payload": {"items": [
+                 {"name": "b", "price": 3}, {"name": "a", "price": 10},
+                 {"name": "a", "price": 1}, {"name": "d", "price": 7},
+             ]}}},
+            {"id": "s", "type": "sort", "name": "Sort", "position": {"x": 200, "y": 0},
+             "parameters": {"field": "price", "direction": "asc"}},
+            {"id": "l", "type": "limit", "name": "Top2", "position": {"x": 400, "y": 0},
+             "parameters": {"max_items": 2, "keep": "last"}},
+            {"id": "d", "type": "remove_duplicates", "name": "Dedupe", "position": {"x": 600, "y": 0},
+             "parameters": {"field": "name"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "t", "target": "s", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e2", "source": "s", "target": "l", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e3", "source": "l", "target": "d", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf22
+    try:
+        status, run = req("POST", f"/workflows/{wf22['id']}/run", {"payload": {}})
+        assert status in (200, 202), run
+        exec_id22 = run["execution_id"]
+        detail22 = None
+        for _ in range(40):
+            status, detail22 = req("GET", f"/executions/{exec_id22}")
+            if detail22["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert detail22["status"] == "success", detail22.get("error")
+        runs22 = {r["node_id"]: r for r in detail22["node_runs"]}
+        # sort asc: 1(a),3(b),7(d),10(a); limit last 2: 7(d),10(a); dedupe by name: both distinct, kept
+        got = runs22["d"]["output"]["items"]
+        assert [i["name"] for i in got] == ["d", "a"], got
+        assert runs22["d"]["output"]["duplicates_removed"] == 0
+        print("sort -> limit -> remove_duplicates chain OK:", got)
+    finally:
+        req("DELETE", f"/workflows/{wf22['id']}")
+
+    # stop-and-error -> deliberate run failure with resolved message
+    status, wf22b = req("POST", "/workflows", {"name": f"tmp v22 halt {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0},
+             "parameters": {"payload": {"order_id": "ORD-42"}}},
+            {"id": "h", "type": "stop_and_error", "name": "Halt", "position": {"x": 200, "y": 0},
+             "parameters": {"error_message": "Order {{ nodes.t.output.payload.order_id }} is invalid", "error_type": "ValidationError"}},
+        ],
+        "edges": [{"id": "e1", "source": "t", "target": "h", "sourceHandle": "main", "targetHandle": "main"}],
+    }})
+    assert status == 201, wf22b
+    # handler workflow with the error trigger
+    status, wf22h = req("POST", "/workflows", {"name": f"tmp v22 handler {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "et", "type": "error_trigger", "name": "On Error", "position": {"x": 0, "y": 0}, "parameters": {}},
+            {"id": "a", "type": "set_variable", "name": "Alert", "position": {"x": 200, "y": 0},
+             "parameters": {"assignments": {"msg": "WF {{ nodes.et.output.workflow_name }}: {{ nodes.et.output.error }}"}, "keep_input": False}},
+        ],
+        "edges": [{"id": "e1", "source": "et", "target": "a", "sourceHandle": "main", "targetHandle": "main"}],
+    }})
+    assert status == 201, wf22h
+    try:
+        # bind handler to the failing workflow
+        status, patched = req("PATCH" if False else "PUT", f"/workflows/{wf22b['id']}", {"error_workflow_id": wf22h["id"]})
+        assert status == 200 and patched["error_workflow_id"] == wf22h["id"], patched
+        status, run = req("POST", f"/workflows/{wf22b['id']}/run", {"payload": {}})
+        assert status in (200, 202), run
+        detail22b = None
+        for _ in range(40):
+            status, detail22b = req("GET", f"/executions/{run['execution_id']}")
+            if detail22b["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert detail22b["status"] == "error", detail22b
+        assert "Order ORD-42 is invalid" in (detail22b.get("error") or ""), detail22b.get("error")
+        # handler ran with trigger_type=error and resolved the alert
+        h_exec = None
+        for _ in range(40):
+            status, execs22 = req("GET", f"/executions?workflow_id={wf22h['id']}&limit=5")
+            err_runs = [e for e in execs22 if e["trigger_type"] == "error"]
+            if err_runs and err_runs[0]["status"] != "running":
+                h_exec = err_runs[0]
+                break
+            time.sleep(0.1)
+        assert h_exec and h_exec["status"] == "success", h_exec
+        status, h_detail = req("GET", f"/executions/{h_exec['id']}")
+        runs_h = {r["node_id"]: r for r in h_detail["node_runs"]}
+        alert_out = str(runs_h["a"]["output"])
+        assert "Order ORD-42 is invalid" in alert_out, alert_out
+        print("stop-and-error -> error workflow -> error trigger handler OK")
+    finally:
+        req("DELETE", f"/workflows/{wf22b['id']}")
+        req("DELETE", f"/workflows/{wf22h['id']}")
+    print("v22 data ops + stop-and-error + error trigger OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

@@ -294,7 +294,12 @@ class GraphRunner:
                     return t
         # prefer a trigger matching the run trigger_type, else first
         for t in triggers:
-            expected = {"manual": "manual_trigger", "webhook": "webhook_trigger", "schedule": "schedule_trigger"}.get(self.trigger_type)
+            expected = {
+            "manual": "manual_trigger",
+            "webhook": "webhook_trigger",
+            "schedule": "schedule_trigger",
+            "error": "error_trigger",  # v22: error-handler workflows start from the Error Trigger
+        }.get(self.trigger_type)
             if expected and t.type == expected:
                 return t
         return triggers[0]

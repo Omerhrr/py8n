@@ -275,3 +275,92 @@ class AggregateNode(BaseNode):
         }[p.mode]
         result = int(result) if float(result).is_integer() else round(result, 4)
         return self._single({"value": result, "count": len(nums), "mode": p.mode})
+
+
+def _sort_key(value: Any) -> tuple:
+    """Total-order key tolerant of mixed types: numbers < strings, None last."""
+    if value is None:
+        return (2, 0, "")
+    if isinstance(value, bool):
+        return (1, 0, str(value).lower())
+    if isinstance(value, (int, float)):
+        return (0, value, "")
+    return (1, 0, str(value))
+
+
+class SortNode(BaseNode):
+    """Sorts the items array by a field (dot-path), ascending or descending."""
+
+    type = "sort"
+    name = "Sort"
+    description = "Sorts the items array by a field (dot-path, empty = whole item) in ascending or descending order."
+    category = "logic"
+    icon = "arrow-down-up"
+    color = "#38bdf8"
+
+    class ParamsModel(BaseModel):
+        field: str = Field(default="", description="Dot-path to sort by, e.g. price or user.name (empty = whole item)")
+        direction: str = Field(
+            default="asc",
+            description="Sort direction",
+            json_schema_extra={"widget": "select", "options": ["asc", "desc"]},
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: SortNode.ParamsModel
+        items = _items(context.current_input)
+        missing = [it for it in items if _pluck(it, p.field) is None]
+        ordered = sorted(items, key=lambda it: _sort_key(_pluck(it, p.field)), reverse=p.direction == "desc")
+        return self._single({"items": ordered, "count": len(ordered), "missing_field": len(missing)})
+
+
+class LimitNode(BaseNode):
+    """Keeps only the first or last N items of the array."""
+
+    type = "limit"
+    name = "Limit"
+    description = "Keeps only the first or last N items of the items array."
+    category = "logic"
+    icon = "list-end"
+    color = "#60a5fa"
+
+    class ParamsModel(BaseModel):
+        max_items: int = Field(default=10, ge=0, description="How many items to keep (0 = keep none)")
+        keep: str = Field(
+            default="first",
+            description="Which end of the array to keep",
+            json_schema_extra={"widget": "select", "options": ["first", "last"]},
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: LimitNode.ParamsModel
+        items = _items(context.current_input)
+        kept = items[: p.max_items] if p.keep == "first" else items[len(items) - p.max_items:] if p.max_items else []
+        return self._single({"items": kept, "kept": len(kept), "total": len(items)})
+
+
+class RemoveDuplicatesNode(BaseNode):
+    """Drops repeated items, comparing by a field (dot-path) or the whole item."""
+
+    type = "remove_duplicates"
+    name = "Remove Duplicates"
+    description = "Removes repeated items from the array — compares by a field (dot-path, empty = whole item). Keeps the first occurrence."
+    category = "logic"
+    icon = "eraser"
+    color = "#a78bfa"
+
+    class ParamsModel(BaseModel):
+        field: str = Field(default="", description="Dot-path used for comparison, e.g. email (empty = compare whole items)")
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: RemoveDuplicatesNode.ParamsModel
+        items = _items(context.current_input)
+        seen: set[str] = set()
+        unique: list[Any] = []
+        for item in items:
+            key = json.dumps(_pluck(item, p.field), sort_keys=True, default=str)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(item)
+        return self._single({"items": unique, "unique": len(unique), "duplicates_removed": len(items) - len(unique)})

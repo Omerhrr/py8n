@@ -4,15 +4,24 @@ from __future__ import annotations
 
 from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
-from .nodes.data import AggregateNode, FilterNode, MergeNode, SplitOutNode, SwitchNode
+from .nodes.data import (
+    AggregateNode,
+    FilterNode,
+    LimitNode,
+    MergeNode,
+    RemoveDuplicatesNode,
+    SortNode,
+    SplitOutNode,
+    SwitchNode,
+)
 from .nodes.integrations import EmailSendNode, SlackMessageNode
-from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode
+from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
 from .nodes.llm import LlmChatNode
 from .nodes.http import HttpRequestNode
 from .nodes.loop import BatchTriggerNode, LoopOverItemsNode
 from .nodes.sticky import StickyNoteNode
 from .nodes.subflow import ExecuteWorkflowNode
-from .nodes.triggers import ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
+from .nodes.triggers import ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
 from .nodes.wait import WaitForResumeNode
 from .nodes.webhook_respond import RespondToWebhookNode
 
@@ -27,18 +36,23 @@ def register(cls: type[BaseNode]) -> type[BaseNode]:
 for _cls in (
     ManualTriggerNode,
     WebhookTriggerNode,
+    ErrorTriggerNode,
     ScheduleTriggerNode,
     HttpRequestNode,
     ExecuteWorkflowNode,
     IfConditionNode,
     SwitchNode,
     FilterNode,
+    SortNode,
+    LimitNode,
+    RemoveDuplicatesNode,
     MergeNode,
     SplitOutNode,
     AggregateNode,
     LoopOverItemsNode,
     SetVariableNode,
     CodeNode,
+    StopAndErrorNode,
     DelayNode,
     LlmChatNode,
     AgentNode,

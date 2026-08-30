@@ -182,3 +182,37 @@ class DelayNode(BaseNode):
 
 def _json_dumps(value: Any) -> str:  # small helper kept for future nodes
     return json.dumps(value, default=str, ensure_ascii=False)
+
+
+class StopAndErrorNode(BaseNode):
+    """Fails the run deliberately with a custom message (v22).
+
+    n8n's "Stop and Error": turns data-level validation failures into real
+    run failures so error workflows fire and the UI shows a red run. The
+    message is a Jinja template, so upstream values can be embedded.
+    """
+
+    type = "stop_and_error"
+    name = "Stop and Error"
+    description = "Stops the workflow deliberately with a custom error message — use it for validation failures or to exercise error workflows."
+    category = "logic"
+    icon = "octagon-x"
+    color = "#f43f5e"
+
+    class ParamsModel(BaseModel):
+        error_message: str = Field(
+            default="Workflow stopped intentionally",
+            description="Error message to raise — supports {{ expressions }} referencing upstream outputs",
+            json_schema_extra={"widget": "textarea", "rows": 3},
+        )
+        error_type: str = Field(
+            default="ValidationError",
+            description="Label describing the failure kind (e.g. ValidationError, OutOfStock)",
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: StopAndErrorNode.ParamsModel
+        message = context.resolve(p.error_message)
+        if not isinstance(message, str):
+            message = json.dumps(message, ensure_ascii=False)
+        raise NodeExecutionError(f"[{p.error_type}] {message}")

@@ -4,6 +4,7 @@ import { Handle, Position } from '@vue-flow/core'
 import {
   Play, Webhook, Clock, Globe, GitBranch, Braces, Terminal,
   Hourglass, Brain, Box, Zap, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, Ban, Pin, Bot, Reply,
+  Siren, OctagonX, ArrowDownUp, ListEnd, Eraser,
 } from 'lucide-vue-next'
 import type { NodeDefinition, NodeRunStatus } from '~/types/node'
 
@@ -27,6 +28,8 @@ const icon = computed(() => {
     filter: Filter, split: Split, 'git-merge': GitMerge,
     ungroup: Ungroup, sigma: Sigma, workflow: Workflow,
     repeat: Repeat, mail: Mail, slack: Slack, bot: Bot, reply: Reply,
+    siren: Siren, 'octagon-x': OctagonX,
+    'arrow-down-up': ArrowDownUp, 'list-end': ListEnd, eraser: Eraser,
   }
   return map[def.value?.icon] || Box
 })

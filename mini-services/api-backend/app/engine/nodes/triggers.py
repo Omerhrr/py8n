@@ -122,3 +122,45 @@ class ScheduleTriggerNode(BaseNode):
                 "trigger_type": "schedule",
             }
         )
+
+
+class ErrorTriggerNode(BaseNode):
+    """Dedicated entry point for error-handler workflows (v22).
+
+    When a workflow fails and has an error-workflow binding, the runner
+    dispatches the handler with ``trigger_type="error"``; this trigger is
+    selected for the run (see GraphRunner._pick_trigger) and its output
+    exposes the structured error payload to downstream nodes.
+    """
+
+    type = "error_trigger"
+    name = "Error Trigger"
+    description = (
+        "Entry point for error-handler workflows: starts when another workflow "
+        "fails and exposes {execution_id, workflow_id, workflow_name, error, failed_nodes}."
+    )
+    category = "triggers"
+    icon = "siren"
+    color = "#ef4444"
+    inputs: ClassVar[list[Handle]] = []
+    outputs: ClassVar[list[Handle]] = [Handle("main", "Out")]
+
+    class ParamsModel(BaseModel):
+        include_failed_nodes: bool = Field(
+            default=True,
+            description="Include the failed_nodes list (id/name/error per failed node) in the output",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        tp = context.trigger_payload
+        payload: dict[str, Any] = {
+            "execution_id": tp.get("execution_id"),
+            "workflow_id": tp.get("workflow_id"),
+            "workflow_name": tp.get("workflow_name"),
+            "error": tp.get("error"),
+            "trigger_type": "error",
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if self.params.include_failed_nodes:
+            payload["failed_nodes"] = tp.get("failed_nodes") or []
+        return self._single(payload)
