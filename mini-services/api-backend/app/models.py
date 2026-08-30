@@ -195,3 +195,18 @@ class AppSetting(Base):
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class AgentMemory(Base):
+    """Persisted conversation buffer for AI Agent nodes (v23).
+
+    One row per session key; ``messages`` holds the rolling chat history
+    (alternating user/assistant turns) that gets injected into the next
+    agent run sharing the same key.
+    """
+
+    __tablename__ = "agent_memories"
+
+    session_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    messages: Mapped[list] = mapped_column(JSONVariant, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

@@ -8,6 +8,8 @@ and dispatches asynchronously (or awaits the last node when configured).
 from __future__ import annotations
 
 import asyncio
+import base64
+import hmac
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -69,6 +71,42 @@ def _request_envelope(request: Request, body: object) -> dict:
     }
 
 
+def _enforce_webhook_auth(request: Request, params: dict) -> None:
+    """v23: reject unauthenticated webhook calls BEFORE the flow runs.
+
+    Timing-safe comparisons (hmac.compare_digest) for both modes.
+    """
+    mode = (params.get("auth_mode") or "none").lower()
+    if mode == "none":
+        return
+
+    if mode == "header":
+        name = (params.get("auth_header_name") or "X-Webhook-Token").strip()
+        expected = str(params.get("auth_header_value") or "")
+        provided = request.headers.get(name, "")
+        if not hmac.compare_digest(provided, expected):
+            raise HTTPException(status_code=401, detail="Invalid or missing auth header")
+        return
+
+    if mode == "basic":
+        user = str(params.get("auth_user") or "")
+        password = str(params.get("auth_pass") or "")
+        header = request.headers.get("Authorization", "")
+        if not header.startswith("Basic "):
+            raise HTTPException(status_code=401, detail="Basic auth required")
+        try:
+            decoded = base64.b64decode(header[6:], validate=True).decode("utf-8")
+            provided_user, _, provided_pass = decoded.partition(":")
+        except Exception:  # noqa: BLE001
+            raise HTTPException(status_code=401, detail="Malformed Basic auth header")
+        ok = hmac.compare_digest(provided_user, user) and hmac.compare_digest(provided_pass, password)
+        if not ok:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+        return
+
+    raise HTTPException(status_code=401, detail=f"Unknown auth mode {mode!r}")
+
+
 @router.api_route("/{workflow_id}", methods=["POST", "GET", "PUT", "PATCH", "DELETE"], tags=["webhooks"])
 async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     wf = await _load_webhook_workflow(workflow_id, db)
@@ -81,6 +119,7 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
 
     node = wf.webhook_nodes()[0]
     params = node.get("parameters") or {}
+    _enforce_webhook_auth(request, params)  # v23: 401 before the flow runs
     response_mode = params.get("response_mode", "immediately")
     envelope = _request_envelope(request, body)
 

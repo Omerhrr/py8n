@@ -70,6 +70,28 @@ class WebhookTriggerNode(BaseNode):
             default="POST",
             description="Comma-separated HTTP methods accepted by this webhook",
         )
+        # v23: webhook authentication — checked BEFORE the flow runs (401 on failure)
+        auth_mode: str = Field(
+            default="none",
+            description="none = public; header = a required header must carry the expected value; basic = HTTP Basic auth",
+            json_schema_extra={"widget": "select", "options": ["none", "header", "basic"]},
+        )
+        auth_header_name: str = Field(
+            default="X-Webhook-Token",
+            description="Header mode: required header name",
+        )
+        auth_header_value: str = Field(
+            default="",
+            description="Header mode: required header value",
+        )
+        auth_user: str = Field(
+            default="",
+            description="Basic mode: expected username",
+        )
+        auth_pass: str = Field(
+            default="",
+            description="Basic mode: expected password",
+        )
 
     async def execute(self, context) -> NodeResult:
         tp = context.trigger_payload

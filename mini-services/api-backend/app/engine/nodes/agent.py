@@ -73,6 +73,19 @@ class AgentNode(BaseNode):
         max_iterations: int = Field(default=5, ge=1, le=10)
         temperature: float = Field(default=0.4, ge=0, le=2)
         credential_id: str | None = Field(default=None)
+        # v23: session memory — persisted per session_key, injected as prior turns
+        memory: str = Field(
+            default="none",
+            description="none = stateless (fresh each run); buffer = remembers prior turns for the same session key",
+            json_schema_extra={"widget": "select", "options": ["none", "buffer"]},
+        )
+        session_key: str = Field(
+            default="default",
+            description="Conversation key — same key = same memory. Supports {{ expressions }}, e.g. 'support-{{ input.customer_id }}'",
+        )
+        max_history_turns: int = Field(
+            default=5, ge=1, le=50, description="How many recent user/assistant turn pairs the agent remembers"
+        )
         tools: list[ToolSpec] = Field(
             default_factory=list,
             description="Tools the agent may call",
@@ -254,6 +267,17 @@ class AgentNode(BaseNode):
             {"role": "user", "content": str(p.user_message)},
         ]
 
+        # v23: session memory — prior turns for this key sit between the
+        # system message and the current user message.
+        memory_used = 0
+        memory_key = (p.session_key or "default").strip()
+        if p.memory == "buffer":
+            from ...services.agent_memory import load_history
+
+            history = await load_history(memory_key)
+            messages[1:1] = history
+            memory_used = len(history) // 2
+
         tool_calls: list[dict] = []
         answer: str | None = None
         iterations = 0
@@ -284,11 +308,20 @@ class AgentNode(BaseNode):
             raise NodeExecutionError(
                 f"Agent hit the iteration cap ({p.max_iterations}) without a final answer"
             )
+
+        # v23: persist the finished turn so the next run with the same key remembers it
+        if p.memory == "buffer":
+            from ...services.agent_memory import append_history
+
+            await append_history(memory_key, str(p.user_message), answer, p.max_history_turns)
+
         return self._single(
             {
                 "answer": answer,
                 "iterations": iterations,
                 "tool_calls": tool_calls,
                 "tools_available": list(tools.keys()),
+                "memory_key": memory_key if p.memory == "buffer" else None,
+                "memory_turns_loaded": memory_used,
             }
         )

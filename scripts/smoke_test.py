@@ -2,6 +2,7 @@
 """Py8n backend smoke test: run workflow, poll execution, fire webhook, WS stream."""
 
 import asyncio
+import os
 import json
 import time
 import urllib.request
@@ -13,10 +14,12 @@ import httpx
 BASE = "http://127.0.0.1:8000/api/v1"
 
 
-def req(method: str, path: str, body: dict | None = None):
+def req(method: str, path: str, body: dict | None = None, headers: dict | None = None):
     data = json.dumps(body).encode() if body is not None else None
-    r = urllib.request.Request(BASE + path, data=data, method=method,
-                               headers={"Content-Type": "application/json"})
+    hdrs = {"Content-Type": "application/json"}
+    if headers:
+        hdrs.update(headers)
+    r = urllib.request.Request(BASE + path, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(r, timeout=30) as resp:
             return resp.status, json.loads(resp.read().decode() or "{}")
@@ -1368,6 +1371,86 @@ def main() -> None:
         req("DELETE", f"/workflows/{wf22b['id']}")
         req("DELETE", f"/workflows/{wf22h['id']}")
     print("v22 data ops + stop-and-error + error trigger OK")
+
+    # ---------------------------------------------------------------
+    # v23: agent session memory + webhook authentication
+    # ---------------------------------------------------------------
+    print("\n== v23: agent session memory + webhook auth ==")
+    # webhook header auth: 401 without, 202 with
+    status, wfh = req("POST", "/workflows", {"name": f"tmp v23 auth {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "h", "type": "webhook_trigger", "name": "Hook", "position": {"x": 0, "y": 0},
+             "parameters": {"response_mode": "immediately", "auth_mode": "header",
+                            "auth_header_name": "X-Smoke-Token", "auth_header_value": "tok-123"}},
+            {"id": "s", "type": "set_variable", "name": "Set", "position": {"x": 200, "y": 0},
+             "parameters": {"assignments": {"ok": "1"}, "keep_input": False}},
+        ],
+        "edges": [{"id": "e1", "source": "h", "target": "s", "sourceHandle": "main", "targetHandle": "main"}],
+    }})
+    assert status == 201, wfh
+    try:
+        status, act = req("POST", f"/workflows/{wfh['id']}/activate")
+        assert status == 200, act
+        status, body = req("POST", f"/webhooks/{wfh['id']}", {"ping": 1})
+        assert status == 401, (status, body)
+        status, body = req("POST", f"/webhooks/{wfh['id']}", {"ping": 1}, headers={"X-Smoke-Token": "wrong"})
+        assert status == 401, (status, body)
+        status, body = req("POST", f"/webhooks/{wfh['id']}", {"ping": 1}, headers={"X-Smoke-Token": "tok-123"})
+        assert status == 202, (status, body)
+        print("webhook header auth: 401/401/202 + single execution OK")
+    finally:
+        req("DELETE", f"/workflows/{wfh['id']}")
+
+    # agent memory with the REAL bridge: turn 2 must load turn 1 from the store
+    mem_key = f"smoke-v23-{uuid.uuid4().hex[:6]}"
+    status, wfm = req("POST", "/workflows", {"name": f"tmp v23 mem {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0},
+             "parameters": {"payload": {}}},
+            {"id": "ag", "type": "ai_agent", "name": "Agent", "position": {"x": 200, "y": 0},
+             "parameters": {"memory": "buffer", "session_key": mem_key, "max_history_turns": 3,
+                            "user_message": "My favorite color is teal. Just acknowledge it briefly."}},
+        ],
+        "edges": [{"id": "e1", "source": "t", "target": "ag", "sourceHandle": "main", "targetHandle": "main"}],
+    }})
+    assert status == 201, wfm
+    try:
+        status, run1 = req("POST", f"/workflows/{wfm['id']}/run", {"payload": {}})
+        assert status in (200, 202), run1
+        d1 = None
+        for _ in range(120):
+            status, d1 = req("GET", f"/executions/{run1['execution_id']}")
+            if d1["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert d1["status"] == "success", d1.get("error")
+        out1 = next(r["output"] for r in d1["node_runs"] if r["node_id"] == "ag")
+        assert out1["memory_turns_loaded"] == 0 and out1["memory_key"] == mem_key, out1
+        print("memory run 1: stored, nothing loaded OK ->", str(out1["answer"])[:60])
+
+        # run 2 on a NEW execution asks about the color — agent must recall via injected history
+        status, r2res = req("POST", f"/workflows/{wfm['id']}/run", {"payload": {}})
+        exec2 = r2res["execution_id"]
+        d2 = None
+        for _ in range(120):
+            status, d2 = req("GET", f"/executions/{exec2}")
+            if d2["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert d2["status"] == "success", d2.get("error")
+        out2 = next(r["output"] for r in d2["node_runs"] if r["node_id"] == "ag")
+        assert out2["memory_turns_loaded"] == 1, out2
+        print("memory run 2: prior turn injected OK ->", str(out2["answer"])[:80])
+    finally:
+        req("DELETE", f"/workflows/{wfm['id']}")
+        # drop the memory row
+        import sqlite3
+        db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mini-services", "api-backend", "data", "py8n.db")
+        con = sqlite3.connect(db_path)
+        con.execute("DELETE FROM agent_memories WHERE session_key = ?", (mem_key,))
+        con.commit()
+        con.close()
+    print("v23 agent memory + webhook auth OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
