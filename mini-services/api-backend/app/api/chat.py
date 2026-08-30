@@ -11,17 +11,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
 from ..models import Workflow
+from ..services.events import get_event_bus
 from ..services.executor import _background_tasks, execute_workflow
 from .webhooks import WebhookResponder
 
@@ -150,4 +152,158 @@ async def send_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession
             "output": last_output,
         },
         status_code=status_code,
+    )
+
+
+# ---------------------------------------------------------------------------
+# v26: SSE progress stream — POST /chat/{id}/stream
+# Same validation and run semantics as the plain endpoint, but the client
+# receives live frames while the flow runs:
+#   event: start    data: {execution_id, session_id}
+#   event: node     data: {node_id, node_name, node_type, status, duration_ms?, error?}
+#   event: done     data: {status, execution_id, session_id, reply, output}
+#   event: error    data: {error, execution_id}
+#   event: timeout  data: {after_seconds}   # flow keeps running in background
+# ---------------------------------------------------------------------------
+
+def _sse_frame(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+@router.post("/{workflow_id}/stream", tags=["chat"])
+async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession = Depends(get_db)):
+    # Validate BEFORE establishing the stream so clients get normal JSON errors.
+    wf = await _load_chat_workflow(workflow_id, db)
+    node = wf.chat_nodes()[0]
+    params = node.get("parameters") or {}
+    response_mode = params.get("response_mode", "last_node")
+    trigger_payload = {
+        "session_id": msg.session_id,
+        "message": msg.message,
+        "received_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    bus = get_event_bus()
+    execution_id = uuid.uuid4().hex
+    responder: WebhookResponder | None = WebhookResponder() if response_mode == "respond_node" else None
+
+    # The pump must be created BEFORE the flow task: tasks run in creation
+    # order, so the bus subscription is registered before the first event is
+    # published. (The bus.subscribe generator only registers its queue on the
+    # first __anext__, which happens when the pump task first runs.)
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def pump() -> None:
+        async for event in bus.subscribe(execution_id):
+            await queue.put(event)
+
+    pump_task = asyncio.create_task(pump())
+    flow_task = asyncio.create_task(
+        execute_workflow(
+            workflow_id,
+            trigger_type="chat",
+            trigger_payload=trigger_payload,
+            trigger_node_id=node["id"],
+            execution_id=execution_id,
+            respond_channel=responder,
+        )
+    )
+    _background_tasks.add(flow_task)
+    flow_task.add_done_callback(_background_tasks.discard)
+
+    async def event_stream():
+        waiter: asyncio.Event | None = responder.event if responder is not None else None
+        try:
+            yield _sse_frame("start", {"execution_id": execution_id, "session_id": msg.session_id})
+            deadline = asyncio.get_event_loop().time() + settings.webhook_wait_seconds
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    yield _sse_frame("timeout", {"after_seconds": settings.webhook_wait_seconds})
+                    return
+                # respond_node mode: the responder's answer races the bus events —
+                # first one wins, exactly like the plain endpoint.
+                if waiter is not None:
+                    got_responder = asyncio.create_task(waiter.wait())
+                    got_event = asyncio.create_task(queue.get())
+                    done_set, _pending = await asyncio.wait(
+                        {got_responder, got_event},
+                        timeout=remaining,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in _pending:
+                        t.cancel()
+                    if got_responder in done_set:
+                        yield _sse_frame("done", {
+                            "status": "success",
+                            "execution_id": execution_id,
+                            "session_id": msg.session_id,
+                            "reply": _extract_reply(responder.body),
+                            "output": responder.body,
+                            "via": "respond_node",
+                        })
+                        return  # flow keeps running in the background
+                    if got_event not in done_set:
+                        yield _sse_frame("timeout", {"after_seconds": settings.webhook_wait_seconds})
+                        return
+                    event = got_event.result()
+                else:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=remaining)
+                    except asyncio.TimeoutError:
+                        yield _sse_frame("timeout", {"after_seconds": settings.webhook_wait_seconds})
+                        return
+                kind = event.get("event")
+                if kind == "node_started":
+                    yield _sse_frame("node", {
+                        "node_id": event.get("node_id"),
+                        "node_name": event.get("node_name"),
+                        "node_type": event.get("node_type"),
+                        "status": "running",
+                    })
+                elif kind == "node_finished":
+                    yield _sse_frame("node", {
+                        "node_id": event.get("node_id"),
+                        "node_name": event.get("node_name"),
+                        "node_type": event.get("node_type"),
+                        "status": event.get("status"),
+                        "duration_ms": event.get("duration_ms"),
+                        "error": event.get("error"),
+                    })
+                elif kind == "execution_finished":
+                    result_status = event.get("status", "success")
+                    if result_status == "error":
+                        yield _sse_frame("error", {"error": event.get("error") or "workflow failed", "execution_id": execution_id})
+                        return
+                    if responder is not None and responder.responded:
+                        yield _sse_frame("done", {
+                            "status": result_status,
+                            "execution_id": execution_id,
+                            "session_id": msg.session_id,
+                            "reply": _extract_reply(responder.body),
+                            "output": responder.body,
+                            "via": "respond_node",
+                        })
+                        return
+                    node_runs = event.get("node_runs") or []
+                    last_output = node_runs[-1].get("output") if node_runs else None
+                    if responder is not None:
+                        # respond_node flow finished WITHOUT answering
+                        yield _sse_frame("error", {"error": "Workflow finished without calling a Respond to Webhook node", "execution_id": execution_id})
+                        return
+                    yield _sse_frame("done", {
+                        "status": result_status,
+                        "execution_id": execution_id,
+                        "session_id": msg.session_id,
+                        "reply": _extract_reply(last_output),
+                        "output": last_output,
+                    })
+                    return
+        finally:
+            pump_task.cancel()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

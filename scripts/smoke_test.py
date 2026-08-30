@@ -1623,6 +1623,55 @@ def main() -> None:
         req("DELETE", f"/workflows/{wf25['id']}")
     print("v25 chat trigger + endpoint OK")
 
+    # ---------------------------------------------------------------
+    # v26: chat progress streaming (SSE)
+    # ---------------------------------------------------------------
+    print("\n== v26: chat progress stream ==")
+    status, wf26 = req("POST", "/workflows", {"name": f"tmp v26 stream {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "chat1", "type": "chat_trigger", "name": "Chat Trigger", "position": {"x": 0, "y": 0},
+             "parameters": {"response_mode": "last_node"}},
+            {"id": "rep", "type": "set_variable", "name": "Reply", "position": {"x": 200, "y": 0},
+             "parameters": {"assignments": {"reply": "Echo: {{ nodes.chat1.output.message }}"}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "chat1", "target": "rep", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf26
+    try:
+        status, act = req("POST", f"/workflows/{wf26['id']}/activate")
+        assert status in (200, 201), act
+        # raw SSE over urllib (no streaming support in req())
+        stream_url = f"{BASE}/chat/{wf26['id']}/stream"
+        r = urllib.request.Request(stream_url, data=json.dumps({"message": "hello stream", "session_id": "smoke-s1"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            assert resp.headers.get("content-type", "").startswith("text/event-stream"), resp.headers.get("content-type")
+            raw = resp.read().decode()
+        frames = []
+        for block in raw.split("\n\n"):
+            ev = dl = None
+            for line in block.split("\n"):
+                if line.startswith("event: "):
+                    ev = line[7:].strip()
+                elif line.startswith("data: "):
+                    dl = line[6:]
+            if ev and dl:
+                frames.append((ev, json.loads(dl)))
+        names = [e for e, _ in frames]
+        assert names[0] == "start", names
+        node_frames = [d for e, d in frames if e == "node"]
+        assert len(node_frames) == 4, node_frames  # 2 nodes x started+finished
+        assert [d["node_name"] for d in node_frames][::2] == ["Chat Trigger", "Reply"]
+        assert names[-1] == "done", names
+        done = frames[-1][1]
+        assert done["reply"] == "Echo: hello stream", done
+        assert done["session_id"] == "smoke-s1" and done["execution_id"] == frames[0][1]["execution_id"]
+        print("chat stream: start -> node progress -> done(reply) OK")
+    finally:
+        req("DELETE", f"/workflows/{wf26['id']}")
+    print("v26 chat progress stream OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")
