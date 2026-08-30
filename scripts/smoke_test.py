@@ -50,7 +50,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 33, "expected 33 node types after v27 wave"
+    assert len(types) == 36, "expected 36 node types after v28 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1195,7 +1195,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 33 and "respond_to_webhook" in types21, types21  # 33 after v27
+    assert len(types21) == 36 and "respond_to_webhook" in types21, types21  # 36 after v28
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1460,7 +1460,7 @@ def main() -> None:
     status, defs24 = req("GET", "/node-definitions")
     assert status == 200
     types24 = [d["type"] for d in defs24["definitions"]]
-    assert len(types24) == 33, f"expected 33 node types after v27, got {len(types24)}"
+    assert len(types24) == 36, f"expected 36 node types after v28, got {len(types24)}"
     cmp_def = next(d for d in defs24["definitions"] if d["type"] == "compare_datasets")
     assert [h["key"] for h in cmp_def["inputs"]] == ["main", "secondary"], cmp_def["inputs"]
     assert [h["key"] for h in cmp_def["outputs"]] == ["matched", "a_only", "b_only"]
@@ -1681,7 +1681,7 @@ def main() -> None:
     types27 = [d["type"] for d in defs27["definitions"]]
     for t in ("dataset_read", "dataset_write", "sql_query"):
         assert t in types27, types27
-    assert len(types27) == 33, len(types27)
+    assert len(types27) == 36, len(types27)
 
     tag27 = uuid.uuid4().hex[:6]
     ds_names = []
@@ -1784,6 +1784,95 @@ def main() -> None:
         for name in ds_names:
             req("DELETE", f"/datasets/{name}")
     print("v27 dataset engine OK")
+
+    # ---------------------------------------------------------------
+    # v28: data-science workbench — python_transform, chart, model_train
+    # ---------------------------------------------------------------
+    print("\n== v28: data-science workbench ==")
+    status, defs28 = req("GET", "/node-definitions")
+    assert status == 200
+    types28 = [d["type"] for d in defs28["definitions"]]
+    for t in ("python_transform", "chart", "model_train"):
+        assert t in types28, types28
+    assert len(types28) == 36, len(types28)
+
+    tag28 = uuid.uuid4().hex[:6]
+    artifact_ids28 = []
+
+    import random as _rnd
+
+    _r = _rnd.Random(11)
+    ml_rows = []
+    for _ in range(60):
+        x1 = round(_r.uniform(0, 10), 3)
+        x2 = round(_r.uniform(0, 5), 3)
+        ml_rows.append({"x1": x1, "x2": x2, "y": round(2 * x1 + 0.5 * x2 + _r.gauss(0, 0.25), 3)})
+
+    status, wf28 = req("POST", "/workflows", {"name": f"tmp v28 ds {tag28}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}},
+            {"id": "py", "type": "python_transform", "name": "Clean", "position": {"x": 140, "y": 0},
+             "parameters": {"code": "df['z'] = (df.y - df.y.mean()) / df.y.std()\nresult = df\nprint('std:', round(float(df.y.std()), 3))"}},
+            {"id": "c", "type": "chart", "name": "Scatter", "position": {"x": 280, "y": 0},
+             "parameters": {"chart_type": "scatter", "x": "x1", "y": "y", "title": f"y vs x1 {tag28}"}},
+            {"id": "m", "type": "model_train", "name": "Fit", "position": {"x": 420, "y": 0},
+             "parameters": {"model": "linear_regression", "target": "y", "features": "x1,x2"}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "t", "target": "py", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e2", "source": "py", "target": "c", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e3", "source": "c", "target": "m", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf28
+    try:
+        status, run = req("POST", f"/workflows/{wf28['id']}/run", {"payload": {"items": ml_rows}})
+        assert status in (200, 202), run
+        exec_id = run["execution_id"]
+        final = None
+        for _ in range(150):
+            status, ex = req("GET", f"/executions/{exec_id}")
+            assert status == 200
+            if ex["status"] != "running":
+                final = ex
+                break
+            time.sleep(0.05)
+        assert final and final["status"] == "success", (final or {}).get("error")
+        nodes28 = {n["node_name"]: n for n in final["node_runs"]}
+
+        py_out = nodes28["Clean"]["output"]
+        assert py_out["rows_out"] == 60 and "z" in py_out["items"][0]
+        assert "std:" in py_out.get("logs", "")
+        print("python_transform: pandas z-score + stdout capture OK")
+
+        sc_out = nodes28["Scatter"]["output"]
+        assert sc_out["chart_type"] == "scatter" and sc_out["points"] == 60
+        artifact_ids28.append(sc_out["artifact_id"])
+        r = urllib.request.Request(f"{BASE}/artifacts/{sc_out['artifact_id']}/content")
+        with urllib.request.urlopen(r, timeout=30) as resp:
+            png = resp.read()
+            assert resp.headers["Content-Type"].startswith("image/png") and png[:4] == b"\x89PNG" and len(png) > 5000
+        print("chart: PNG artifact served with real bytes OK")
+
+        fit_out = nodes28["Fit"]["output"]
+        assert fit_out["metrics"]["r2"] > 0.9, fit_out["metrics"]
+        assert abs(fit_out["metrics"]["coefficients"]["x1"] - 2.0) < 0.2
+        assert fit_out["items"] and "actual" in fit_out["items"][0]
+        artifact_ids28.append(fit_out["model_id"])
+        print(f"model_train: linear_regression r2={fit_out['metrics']['r2']} + pickle artifact OK")
+
+        # artifacts API: list contains both, then delete the model
+        status, arts = req("GET", "/artifacts?kind=chart")
+        assert status == 200 and any(a["id"] == sc_out["artifact_id"] for a in arts)
+        status, _ = req("DELETE", f"/artifacts/{fit_out['model_id']}")
+        assert status == 204
+        artifact_ids28.remove(fit_out["model_id"])
+        print("artifacts API: list + delete OK")
+    finally:
+        req("DELETE", f"/workflows/{wf28['id']}")
+        for aid in artifact_ids28:
+            req("DELETE", f"/artifacts/{aid}")
+    print("v28 data-science workbench OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

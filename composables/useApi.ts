@@ -45,5 +45,15 @@ export function useApi() {
     return `${proto}://${location.hostname}:${apiPort}/ws/executions/${executionId}`
   }
 
-  return { api, wsUrl, mode }
+  // URL for raw backend content (artifact images etc.) — gateway param honored.
+  // Accepts paths with or without the /api/v1 prefix (artifact_url ships WITH it).
+  function srcUrl(path: string): string {
+    const p = path.startsWith(PREFIX) ? path.slice(PREFIX.length) : path
+    if (mode === 'gateway') {
+      return `${PREFIX}${p}${p.includes('?') ? '&' : '?'}XTransformPort=${apiPort}`
+    }
+    return `${PREFIX}${p}`
+  }
+
+  return { api, wsUrl, srcUrl, mode }
 }

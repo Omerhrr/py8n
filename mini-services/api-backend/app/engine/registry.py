@@ -18,6 +18,7 @@ from .nodes.data import (
     SwitchNode,
 )
 from .nodes.datasets import DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27
+from .nodes.datascience import ChartNode, ModelTrainNode, PythonTransformNode  # v28
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
 from .nodes.llm import LlmChatNode
@@ -60,6 +61,9 @@ for _cls in (
     DatasetReadNode,      # v27: pull rows from a stored dataset
     DatasetWriteNode,     # v27: push items into a dataset (append/replace)
     SqlQueryNode,         # v27: DuckDB SQL across all datasets
+    PythonTransformNode,  # v28: pandas/numpy code over the input items
+    ChartNode,            # v28: matplotlib chart -> PNG artifact
+    ModelTrainNode,       # v28: sklearn training -> metrics + model artifact
     LoopOverItemsNode,
     SetVariableNode,
     CodeNode,

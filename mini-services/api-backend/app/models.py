@@ -235,3 +235,25 @@ class Dataset(Base):
     source: Mapped[str] = mapped_column(String(20), default="api")  # api|upload|workflow
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class Artifact(Base):
+    """Binary artifact produced by workflow runs (v28) — charts, ML models.
+
+    Bytes live under data/artifacts/ (``{id}.{ext}``); metadata here. Chart
+    PNGs are rendered inline in the executions drawer; model pickles are
+    re-loadable for prediction. A retention/purge policy may come later.
+    """
+
+    __tablename__ = "artifacts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    kind: Mapped[str] = mapped_column(String(20), default="file", index=True)  # chart|model|file
+    filename: Mapped[str] = mapped_column(String(200), default="")
+    content_type: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    # free-form context: {title, chart_type, model, target, features, node, workflow_id, ...}
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.27.0"
+    version: str = "1.28.0"
     debug: bool = True
 
     # ------------------------------------------------------------------
@@ -57,6 +57,9 @@ class Settings(BaseSettings):
 
     # v27: parquet files for first-class datasets live here
     datasets_dir: Path = BASE_DIR / "data" / "datasets"
+
+    # v28: chart PNGs / model pickles produced by workflow runs live here
+    artifacts_dir: Path = BASE_DIR / "data" / "artifacts"
 
     # CORS (self-hosted, permissive by default)
     cors_origins: list[str] = ["*"]

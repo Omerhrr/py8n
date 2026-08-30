@@ -2,9 +2,11 @@
 import { computed } from 'vue'
 import {
   CheckCircle2, XCircle, MinusCircle, Loader2, ChevronDown, ChevronUp,
-  Clock, Webhook, Play, Timer, PauseCircle,
+  Clock, Webhook, Play, Timer, PauseCircle, Image as ImageIcon, Network,
 } from 'lucide-vue-next'
 import type { ExecEvent, ExecutionSummary, NodeRun } from '~/types/node'
+
+const { srcUrl } = useApi()
 
 const props = defineProps<{
   executions: ExecutionSummary[]
@@ -36,6 +38,16 @@ const statusClass = (status: string) => {
 }
 
 const runs = computed(() => props.lastRun?.node_runs || [])
+
+// v28: chart artifacts render inline; model artifacts get a badge
+const chartSrc = (run: NodeRun) => {
+  const o: any = run?.output
+  return o && o.chart_type && o.artifact_id && o.artifact_url ? srcUrl(o.artifact_url) : null
+}
+const modelBadge = (run: NodeRun) => {
+  const o: any = run?.output
+  return o && o.model_id && o.model ? { label: o.model, metrics: o.metrics } : null
+}
 
 const prettyJson = (v: any) => {
   try {
@@ -122,6 +134,26 @@ const triggerIcon = (t: string) => (t === 'webhook' ? Webhook : t === 'schedule'
               <summary class="cursor-pointer px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-zinc-600 hover:text-zinc-400">
                 output
               </summary>
+              <img
+                v-if="chartSrc(run)"
+                :src="chartSrc(run)"
+                :alt="run.output?.title || 'chart'"
+                class="mx-auto mt-2 max-h-56 rounded-lg border border-zinc-800 bg-white px-1"
+              />
+              <div
+                v-else-if="modelBadge(run)"
+                class="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1.5"
+              >
+                <Network class="h-3.5 w-3.5 shrink-0 text-indigo-400" />
+                <span class="text-[10px] font-semibold text-indigo-300">model saved · {{ modelBadge(run)!.label }}</span>
+                <span class="ml-auto font-mono text-[10px] text-indigo-400/80">
+                  {{ Object.entries(modelBadge(run)!.metrics || {}).filter(([k]) => k !== 'feature_importances' && k !== 'coefficients').map(([k, v]) => `${k}=${v}`).join(' · ') }}
+                </span>
+              </div>
+              <div v-else-if="run.output?.artifact_id && run.output?.artifact_url" class="mx-3 mt-2 flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+                <ImageIcon class="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <span class="text-[10px] text-zinc-400">artifact saved</span>
+              </div>
               <pre class="max-h-40 overflow-auto px-3 pb-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ prettyJson(run.output) }}</pre>
             </details>
           </div>
