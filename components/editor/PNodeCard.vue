@@ -5,6 +5,7 @@ import {
   Play, Webhook, Clock, Globe, GitBranch, Braces, Terminal,
   Hourglass, Brain, Box, Zap, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, Ban, Pin, Bot, Reply,
   Siren, OctagonX, ArrowDownUp, ListEnd, Eraser,
+  GitCompare, TableProperties, FileSpreadsheet,
 } from 'lucide-vue-next'
 import type { NodeDefinition, NodeRunStatus } from '~/types/node'
 
@@ -30,6 +31,7 @@ const icon = computed(() => {
     repeat: Repeat, mail: Mail, slack: Slack, bot: Bot, reply: Reply,
     siren: Siren, 'octagon-x': OctagonX,
     'arrow-down-up': ArrowDownUp, 'list-end': ListEnd, eraser: Eraser,
+    'git-compare': GitCompare, 'table-properties': TableProperties, 'file-spreadsheet': FileSpreadsheet,
   }
   return map[def.value?.icon] || Box
 })

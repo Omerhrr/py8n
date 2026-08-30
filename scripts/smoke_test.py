@@ -50,7 +50,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 26, "expected 26 node types after v22 wave"
+    assert len(types) == 29, "expected 29 node types after v24 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1195,7 +1195,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 26 and "respond_to_webhook" in types21, types21  # 26 after v22
+    assert len(types21) == 29 and "respond_to_webhook" in types21, types21  # 29 after v24
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1274,7 +1274,7 @@ def main() -> None:
     # error trigger def: source-only trigger node
     et_def = next(d for d in defs["definitions"] if d["type"] == "error_trigger")
     assert et_def["inputs"] == [] and et_def["category"] == "triggers", et_def
-    print("26 node types incl. 5 v22 nodes; error trigger def OK")
+    print("29 node types incl. 5 v22 nodes; error trigger def OK")
 
     status, wf22 = req("POST", "/workflows", {"name": f"tmp v22 ops {uuid.uuid4().hex[:6]}", "graph": {
         "nodes": [
@@ -1451,6 +1451,108 @@ def main() -> None:
         con.commit()
         con.close()
     print("v23 agent memory + webhook auth OK")
+
+    # ---------------------------------------------------------------
+    # v24: compare datasets + summarize + csv
+    # ---------------------------------------------------------------
+    print("\n== v24: compare datasets + summarize + csv ==")
+    # definitions: 29 types, compare_datasets exposes 2 inputs / 3 outputs
+    status, defs24 = req("GET", "/node-definitions")
+    assert status == 200
+    types24 = [d["type"] for d in defs24["definitions"]]
+    assert len(types24) == 29, f"expected 29 node types after v24, got {len(types24)}"
+    cmp_def = next(d for d in defs24["definitions"] if d["type"] == "compare_datasets")
+    assert [h["key"] for h in cmp_def["inputs"]] == ["main", "secondary"], cmp_def["inputs"]
+    assert [h["key"] for h in cmp_def["outputs"]] == ["matched", "a_only", "b_only"]
+    assert "summarize" in types24 and "csv" in types24
+    print("29 node types incl. 3 v24 nodes; compare_datasets 2-in/3-out OK")
+
+    # live reconciliation: two split_out sources -> compare -> 3 routed branches
+    status, wf24 = req("POST", "/workflows", {"name": f"tmp v24 recon {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+            {"id": "sa", "type": "split_out", "name": "CRM", "position": {"x": 150, "y": -80}, "parameters": {"field": "a"}},
+            {"id": "sb", "type": "split_out", "name": "Billing", "position": {"x": 150, "y": 80}, "parameters": {"field": "b"}},
+            {"id": "cmp", "type": "compare_datasets", "name": "Reconcile", "position": {"x": 320, "y": 0},
+             "parameters": {"field_a": "sku", "field_b": "sku"}},
+            {"id": "mo", "type": "set_variable", "name": "Matched Out", "position": {"x": 500, "y": -120},
+             "parameters": {"assignments": {"n": "{{ input | length }}"}, "keep_input": False}},
+            {"id": "ao", "type": "set_variable", "name": "A Only Out", "position": {"x": 500, "y": 0},
+             "parameters": {"assignments": {"n": "{{ input | length }}"}, "keep_input": False}},
+            {"id": "bo", "type": "set_variable", "name": "B Only Out", "position": {"x": 500, "y": 120},
+             "parameters": {"assignments": {"n": "{{ input | length }}"}, "keep_input": False}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "t", "target": "sa", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e2", "source": "t", "target": "sb", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e3", "source": "sa", "target": "cmp", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e4", "source": "sb", "target": "cmp", "sourceHandle": "main", "targetHandle": "secondary"},
+            {"id": "e5", "source": "cmp", "target": "mo", "sourceHandle": "matched", "targetHandle": "main"},
+            {"id": "e6", "source": "cmp", "target": "ao", "sourceHandle": "a_only", "targetHandle": "main"},
+            {"id": "e7", "source": "cmp", "target": "bo", "sourceHandle": "b_only", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf24
+    try:
+        status, run = req("POST", f"/workflows/{wf24['id']}/run", {"payload": {
+            "a": [{"sku": "S1"}, {"sku": "S2"}, {"sku": "S3"}],
+            "b": [{"sku": "S2", "paid": True}, {"sku": "S9", "paid": False}],
+        }})
+        assert status in (200, 202), run
+        d24 = None
+        for _ in range(40):
+            status, d24 = req("GET", f"/executions/{run['execution_id']}")
+            if d24["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert d24["status"] == "success", d24.get("error")
+        runs24 = {r["node_id"]: r for r in d24["node_runs"]}
+        assert runs24["cmp"]["output"] == {"matched": 1, "a_only": 2, "b_only": 1, "b_duplicates_skipped": 0}, runs24["cmp"]["output"]
+        assert runs24["mo"]["output"]["n"] == 1  # S2 pair
+        assert runs24["ao"]["output"]["n"] == 2  # S1, S3
+        assert runs24["bo"]["output"]["n"] == 1  # S9
+        print("compare datasets live: 2-in routing -> matched/a_only/b_only branches OK")
+    finally:
+        req("DELETE", f"/workflows/{wf24['id']}")
+
+    # csv parse -> summarize group-by chain
+    status, wf24b = req("POST", "/workflows", {"name": f"tmp v24 csvsum {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+            {"id": "p", "type": "csv", "name": "Parse", "position": {"x": 150, "y": 0},
+             "parameters": {"mode": "parse", "content": "{{ input.payload.sheet }}", "auto_convert": True}},
+            {"id": "s", "type": "summarize", "name": "By Dept", "position": {"x": 320, "y": 0},
+             "parameters": {"group_by": ["dept"], "aggregates": [{"field": "salary", "op": "sum"}, {"field": "salary", "op": "avg"}]}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "t", "target": "p", "sourceHandle": "main", "targetHandle": "main"},
+            {"id": "e2", "source": "p", "target": "s", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf24b
+    try:
+        sheet = "name,dept,salary\nAnn,eng,120\nBob,eng,80\nCid,ops,100\n"
+        status, run = req("POST", f"/workflows/{wf24b['id']}/run", {"payload": {"sheet": sheet}})
+        assert status in (200, 202), run
+        d24b = None
+        for _ in range(40):
+            status, d24b = req("GET", f"/executions/{run['execution_id']}")
+            if d24b["status"] != "running":
+                break
+            time.sleep(0.1)
+        assert d24b["status"] == "success", d24b.get("error")
+        runs24b = {r["node_id"]: r for r in d24b["node_runs"]}
+        parsed_items = runs24b["p"]["output"]["items"]
+        assert parsed_items == [{"name": "Ann", "dept": "eng", "salary": 120},
+                                {"name": "Bob", "dept": "eng", "salary": 80},
+                                {"name": "Cid", "dept": "ops", "salary": 100}], parsed_items
+        groups = {g["dept"]: g for g in runs24b["s"]["output"]["items"]}
+        assert groups["eng"]["salary_sum"] == 200 and groups["eng"]["salary_avg"] == 100.0
+        assert groups["ops"]["salary_sum"] == 100 and runs24b["s"]["output"]["groups"] == 2
+        print("csv parse -> summarize group-by chain OK:", groups)
+    finally:
+        req("DELETE", f"/workflows/{wf24b['id']}")
+    print("v24 compare + summarize + csv OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

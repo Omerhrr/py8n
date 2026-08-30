@@ -1,4 +1,4 @@
-"""Data-flow nodes: Filter, Switch, Merge, Split Out, Aggregate.
+"""Data-flow nodes: Filter, Switch, Merge, Split Out, Aggregate, Compare, Summarize, CSV.
 
 Convention: nodes that work over lists look for an ``items`` array in the
 incoming payload; if absent, the payload itself is treated as a single item.
@@ -7,6 +7,8 @@ This mirrors n8n's item model while staying JSON-friendly.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 from typing import Any, ClassVar
 
@@ -364,3 +366,284 @@ class RemoveDuplicatesNode(BaseNode):
             seen.add(key)
             unique.append(item)
         return self._single({"items": unique, "unique": len(unique), "duplicates_removed": len(items) - len(unique)})
+
+
+class CompareDatasetsNode(BaseNode):
+    """v24: reconciles two item lists (Input A vs Input B) by a key field.
+
+    Each input arrives on its own targetHandle ("main" = Input A,
+    "secondary" = Input B). Every A item is paired with the FIRST B item
+    sharing its key; results are routed to three output handles —
+    ``matched`` ({a, b} pairs), ``a_only`` and ``b_only``. B items whose key
+    was already paired once (duplicates) are counted, never silently lost.
+    """
+
+    type = "compare_datasets"
+    name = "Compare Datasets"
+    description = (
+        "Compares two item lists by a key field: Input A vs Input B. Routes matched pairs "
+        "(as {a, b}) to Matched, and orphans to A-only / B-only."
+    )
+    category = "logic"
+    icon = "git-compare"
+    color = "#e879f9"
+    inputs: ClassVar[list[Handle]] = [Handle("main", "Input A"), Handle("secondary", "Input B")]
+    outputs: ClassVar[list[Handle]] = [
+        Handle("matched", "Matched"),
+        Handle("a_only", "A only"),
+        Handle("b_only", "B only"),
+    ]
+
+    class ParamsModel(BaseModel):
+        field_a: str = Field(default="id", description="Dot-path of the match key on Input A items, e.g. id or user.email")
+        field_b: str = Field(default="id", description="Dot-path of the match key on Input B items (may differ from field_a)")
+
+    @staticmethod
+    def _key(item: Any, path: str) -> str:
+        return json.dumps(_pluck(item, path), sort_keys=True, default=str)
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: CompareDatasetsNode.ParamsModel
+        handles = context.current_input_handles or {}
+        a_payload = handles.get("main")
+        b_payload = handles.get("secondary")
+        if "secondary" not in handles:
+            # No edge on the secondary handle: either only Input A is wired,
+            # or both edges landed on one handle — arrival (edge) order then
+            # decides: first active payload = A, second = B.
+            vals = list(context.current_inputs.values())
+            a_payload = vals[0] if vals else None
+            b_payload = vals[1] if len(vals) > 1 else None
+        if a_payload is None and b_payload is None:
+            raise NodeExecutionError("Compare Datasets needs at least one connected input")
+
+        a_items = _items(a_payload)
+        b_items = _items(b_payload)
+
+        # First B occurrence wins per key; duplicates are counted, not lost.
+        b_index: dict[str, Any] = {}
+        b_duplicate_keys = 0
+        for item in b_items:
+            key = self._key(item, p.field_b)
+            if key in b_index:
+                b_duplicate_keys += 1
+                continue
+            b_index[key] = item
+
+        matched: list[dict[str, Any]] = []
+        a_only: list[Any] = []
+        a_keys: set[str] = set()
+        for item in a_items:
+            key = self._key(item, p.field_a)
+            a_keys.add(key)
+            if key in b_index:
+                matched.append({"a": item, "b": b_index[key]})
+            else:
+                a_only.append(item)
+        b_only = [item for item in b_items if self._key(item, p.field_b) not in a_keys]
+
+        # Empty buckets emit None so their outgoing edges deactivate and
+        # downstream nodes are skipped — action branches fire only when
+        # there is something to act on (matches IF-branch semantics).
+        outputs = {
+            "matched": matched or None,
+            "a_only": a_only or None,
+            "b_only": b_only or None,
+        }
+        raw = {
+            "matched": len(matched),
+            "a_only": len(a_only),
+            "b_only": len(b_only),
+            "b_duplicates_skipped": b_duplicate_keys,
+        }
+        return NodeResult(outputs=outputs, raw_output=raw)
+
+
+class SummarizeNode(BaseNode):
+    """v24: group-by aggregation — one output item per group.
+
+    ``group_by`` lists dot-path fields; every distinct combination forms a
+    group. ``aggregates`` compute count/sum/avg/min/max over a field per
+    group. With no group_by, all items form one global group.
+    """
+
+    type = "summarize"
+    name = "Summarize"
+    description = "Groups the items array by field(s) and computes count/sum/avg/min/max per group (one output item per group)."
+    category = "logic"
+    icon = "table-properties"
+    color = "#4ade80"
+
+    class ParamsModel(BaseModel):
+        group_by: list[str] = Field(
+            default_factory=list,
+            description="Dot-path fields to group by (JSON array, empty = one global group)",
+            json_schema_extra={"widget": "code", "rows": 3, "language": "json", "hint": '["region"]'},
+        )
+        aggregates: list[dict] = Field(
+            default_factory=list,
+            description='Aggregations per group, e.g. [{"field": "amount", "op": "sum"}] — op: count|sum|avg|min|max (field optional for count)',
+            json_schema_extra={"widget": "code", "rows": 5, "language": "json", "hint": '[{"field": "amount", "op": "sum"}]'},
+        )
+
+    @staticmethod
+    def _numeric(values: list[Any]) -> list[float]:
+        nums = []
+        for v in values:
+            try:
+                if isinstance(v, bool):
+                    continue
+                nums.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        return nums
+
+    def _aggregate(self, op: str, field: str, group_items: list[Any]) -> Any:
+        if op == "count":
+            return len(group_items)
+        values = [_pluck(it, field) for it in group_items]
+        values = [v for v in values if v is not None]
+        if op in ("min", "max") and values:
+            nums = self._numeric(values)
+            if nums:
+                return min(nums) if op == "min" else max(nums)
+            # string domain (e.g. ISO dates): total-order min/max
+            ordered = sorted(values, key=_sort_key)
+            return ordered[0] if op == "min" else ordered[-1]
+        nums = self._numeric(values)
+        if op == "sum":
+            return sum(nums) if nums else None
+        if op == "avg":
+            return round(sum(nums) / len(nums), 4) if nums else None
+        if op == "min":
+            return min(nums) if nums else None
+        if op == "max":
+            return max(nums) if nums else None
+        raise NodeExecutionError(f"Summarize: unknown aggregate op {op!r} (use count|sum|avg|min|max)")
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: SummarizeNode.ParamsModel
+        items = _items(context.current_input)
+        group_by = [str(g) for g in (p.group_by or [])]
+
+        buckets: dict[tuple, list[Any]] = {}
+        for item in items:
+            key = tuple(json.dumps(_pluck(item, g), sort_keys=True, default=str) for g in group_by)
+            buckets.setdefault(key, []).append(item)
+
+        out_items: list[dict[str, Any]] = []
+        for key, group_items in buckets.items():
+            out: dict[str, Any] = {}
+            if group_by:
+                # group_items[0] is the item that created the bucket, so its
+                # raw values are exactly what the JSON key was derived from.
+                for g in group_by:
+                    out[g] = _pluck(group_items[0], g)
+            for agg in p.aggregates or []:
+                op = str(agg.get("op", "count"))
+                field = str(agg.get("field", "") or "")
+                label = f"{field}_{op}" if field else op
+                out[label] = self._aggregate(op, field, group_items)
+            out["_count"] = len(group_items)
+            out_items.append(out)
+
+        return self._single({"items": out_items, "groups": len(out_items), "total_items": len(items)})
+
+
+class CSVNode(BaseNode):
+    """v24: CSV ⇄ items conversion (parse or serialize).
+
+    Parse turns CSV text (from an expression, e.g. an HTTP response body)
+    into an items array; serialize flattens the incoming items array into
+    RFC-4180 CSV text. Deliberately dependency-free (stdlib csv).
+    """
+
+    type = "csv"
+    name = "CSV"
+    description = "Parses CSV text into items, or serializes the incoming items array into CSV text (spreadsheet interop)."
+    category = "logic"
+    icon = "file-spreadsheet"
+    color = "#fb923c"
+
+    class ParamsModel(BaseModel):
+        mode: str = Field(
+            default="parse",
+            description="parse = CSV text → items · serialize = items → CSV text",
+            json_schema_extra={"widget": "select", "options": ["parse", "serialize"]},
+        )
+        content: str = Field(
+            default="",
+            description="CSV text to parse (parse mode) — supports {{ expressions }}",
+            json_schema_extra={"widget": "textarea", "rows": 5, "hint": "name,amount\nAlice,120\nBob,90"},
+        )
+        delimiter: str = Field(default=",", description="Single delimiter character (e.g. , ; \\t)")
+        has_header: bool = Field(default=True, description="First row is the header (parse mode)")
+        auto_convert: bool = Field(default=False, description="Convert numeric/boolean cells to real numbers/booleans when parsing")
+
+    @staticmethod
+    def _convert(value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        text = value.strip()
+        low = text.lower()
+        if low == "true":
+            return True
+        if low == "false":
+            return False
+        if text:
+            try:
+                return int(text)
+            except ValueError:
+                pass
+            try:
+                return float(text)
+            except ValueError:
+                pass
+        return value
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: CSVNode.ParamsModel
+        delim = (p.delimiter or ",")[:1] or ","
+        try:
+            if p.mode == "parse":
+                rows = [r for r in csv.reader(io.StringIO(p.content or ""), delimiter=delim) if r]
+                if not rows:
+                    return self._single({"items": [], "count": 0, "columns": []})
+                if p.has_header:
+                    header = [h.strip() for h in rows[0]]
+                    items = []
+                    for row in rows[1:]:
+                        item = {header[i]: (row[i] if i < len(row) else "") for i in range(len(header))}
+                        items.append({k: self._convert(v) for k, v in item.items()} if p.auto_convert else item)
+                    return self._single({"items": items, "count": len(items), "columns": header})
+                items = [{str(i): self._convert(v) if p.auto_convert else v for i, v in enumerate(row)} for row in rows]
+                return self._single({"items": items, "count": len(items), "columns": None})
+
+            # serialize
+            items = _items(context.current_input)
+            rows: list[dict[str, Any]] = []
+            for it in items:
+                rows.append(it if isinstance(it, dict) else {"value": it})
+            columns: list[str] = []
+            for row in rows:
+                for k in row.keys():
+                    if k not in columns:
+                        columns.append(k)
+
+            def cell(v: Any) -> Any:
+                if v is None:
+                    return ""
+                if isinstance(v, (dict, list)):
+                    return json.dumps(v, ensure_ascii=False, default=str)
+                if isinstance(v, bool):
+                    return "true" if v else "false"
+                return v
+
+            buf = io.StringIO()
+            writer = csv.writer(buf, delimiter=delim)
+            writer.writerow(columns)
+            for row in rows:
+                writer.writerow([cell(row.get(c)) for c in columns])
+            return self._single({"csv": buf.getvalue(), "rows": len(rows), "columns": columns})
+        except csv.Error as exc:
+            raise NodeExecutionError(f"CSV failed: {exc}") from exc

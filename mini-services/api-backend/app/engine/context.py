@@ -37,6 +37,11 @@ class ExecutionContext:
     current_inputs: dict[str, Any] = field(default_factory=dict)
     current_input: Any = None
 
+    # v24 multi-input nodes: payload keyed by *targetHandle* ("main" /
+    # "secondary" for Compare Datasets). Populated alongside current_inputs;
+    # nodes with a single input never need to look at it.
+    current_input_handles: dict[str, Any] = field(default_factory=dict)
+
     # Nesting depth for Execute Workflow nodes (sub-workflow recursion guard)
     depth: int = 0
 

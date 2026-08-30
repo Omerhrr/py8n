@@ -6,12 +6,15 @@ from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
 from .nodes.data import (
     AggregateNode,
+    CSVNode,
+    CompareDatasetsNode,
     FilterNode,
     LimitNode,
     MergeNode,
     RemoveDuplicatesNode,
     SortNode,
     SplitOutNode,
+    SummarizeNode,
     SwitchNode,
 )
 from .nodes.integrations import EmailSendNode, SlackMessageNode
@@ -49,6 +52,9 @@ for _cls in (
     MergeNode,
     SplitOutNode,
     AggregateNode,
+    CompareDatasetsNode,  # v24: two-input reconciliation (matched / a_only / b_only)
+    SummarizeNode,        # v24: group-by aggregation
+    CSVNode,              # v24: CSV parse/serialize
     LoopOverItemsNode,
     SetVariableNode,
     CodeNode,

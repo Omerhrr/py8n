@@ -199,7 +199,7 @@ class GraphRunner:
                     # Second pass: the paused node completes with the resume
                     # payload; everything already executed stays untouched.
                     if node.id == self._resume_wait_node:
-                        context.current_inputs = self._gather_active_inputs(node)
+                        context.current_inputs, context.current_input_handles = self._gather_active_inputs(node)
                         context.current_input = next(iter(context.current_inputs.values()), None)
                         await self._record(
                             context, node, "success", {"main": self._wait_resume_output}, 0, None,
@@ -214,13 +214,14 @@ class GraphRunner:
                 if node.id in self._body_of:
                     # Executed once per batch by the owning Loop node.
                     continue
-                inputs = self._gather_active_inputs(node)
+                inputs, input_handles = self._gather_active_inputs(node)
                 has_incoming = bool(self.graph.incoming(node.id))
                 if has_incoming and not inputs:
                     await self._record(context, node, "skipped", None, 0, "no active input (upstream skipped or branch inactive)")
                     continue
 
                 context.current_inputs = inputs
+                context.current_input_handles = input_handles  # v24: keyed by targetHandle
                 context.current_input = next(iter(inputs.values()), None)
                 if node.id in self._loop_bodies:
                     await self._run_loop_node(context, node)
@@ -438,9 +439,16 @@ class GraphRunner:
                 )
         return GraphSpec(nodes=nodes, edges=edges)
 
-    def _gather_active_inputs(self, node: NodeSpec) -> dict[str, Any]:
-        """payload keyed by source node id for each *active* incoming edge."""
+    def _gather_active_inputs(self, node: NodeSpec) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Active incoming payloads, keyed two ways:
+
+        * by **source node id** — the historical ``current_inputs`` contract
+        * by **targetHandle** — v24, so multi-input nodes (Compare Datasets'
+          "main"/"secondary") can tell their inputs apart; the last edge
+          connected to a handle wins, matching visual wiring order.
+        """
         inputs: dict[str, Any] = {}
+        handles: dict[str, Any] = {}
         for edge in self.graph.incoming(node.id):
             if edge.id not in self._active_edges:
                 continue
@@ -455,7 +463,8 @@ class GraphRunner:
             if payload is None:
                 continue
             inputs[edge.source] = payload
-        return inputs
+            handles[edge.targetHandle] = payload
+        return inputs, handles
 
     async def _pass_through_disabled(self, context: ExecutionContext, node: NodeSpec) -> None:
         """Disabled node: record as skipped, pass the active input through so
