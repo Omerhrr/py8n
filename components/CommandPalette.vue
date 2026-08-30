@@ -2,7 +2,7 @@
 import {
   Search, CornerDownLeft, LayoutDashboard, Activity, BarChart3, CalendarClock,
   Sparkles, KeyRound, Plus, PanelLeftClose, PanelLeftOpen, Command as CommandIcon,
-  Workflow as WorkflowIcon, Zap, X, Variable, Database, Image as ImageIcon,
+  Workflow as WorkflowIcon, Zap, X, Variable, Database, Image as ImageIcon, LayoutGrid,
 } from 'lucide-vue-next'
 import { usePalette } from '~/composables/usePalette'
 import { useSidebar } from '~/composables/useSidebar'
@@ -56,6 +56,7 @@ const navItems = computed<PaletteItem[]>(() => [
   { id: 'nav-schedules', group: 'Navigate', label: 'Schedules', icon: CalendarClock, hint: 'Cron & intervals', keywords: 'cron timer triggers', run: () => go('/schedules') },
   { id: 'nav-templates', group: 'Navigate', label: 'Templates', icon: Sparkles, hint: 'Ready-made workflows', keywords: 'gallery presets examples', run: () => go('/templates') },
   { id: 'nav-datasets', group: 'Navigate', label: 'Datasets', icon: Database, hint: 'Stored tables & SQL', keywords: 'data excel csv parquet tables sql upload', run: () => go('/datasets') },
+  { id: 'nav-apps', group: 'Navigate', label: 'Apps', icon: LayoutGrid, hint: 'Excel → App builder & published apps', keywords: 'app builder excel crm dashboard form run publish', run: () => go('/apps') },
   { id: 'nav-artifacts', group: 'Navigate', label: 'Artifacts', icon: ImageIcon, hint: 'Charts & models from runs', keywords: 'charts images models gallery png outputs', run: () => go('/artifacts') },
   { id: 'nav-credentials', group: 'Navigate', label: 'Credentials', icon: KeyRound, hint: 'Vault & auth', keywords: 'secrets keys api tokens', run: () => go('/credentials') },
   { id: 'nav-env-vars', group: 'Navigate', label: 'Variables', icon: Variable, hint: 'Global env values', keywords: 'env environment globals config values', run: () => go('/env-vars') },

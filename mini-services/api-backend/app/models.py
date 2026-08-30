@@ -257,3 +257,26 @@ class Artifact(Base):
     workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class App(Base):
+    """First-class application (v29) — the Excel → App builder flagship.
+
+    An app binds ONE dataset and a component ``config`` (stat cards, data
+    table, form, chart). Drafts live in the builder; published apps are
+    served at ``/run/{slug}`` where end users browse, create, edit and
+    delete records — every mutation lands in the bound dataset's parquet.
+    """
+
+    __tablename__ = "apps"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
+    slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
+    description: Mapped[str] = mapped_column(Text, default="")
+    dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # {"components": [{id, type: stat|table|form|chart, ...type params}]}
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

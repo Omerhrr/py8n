@@ -315,3 +315,37 @@ class DatasetUpdate(BaseModel):
 
 class DatasetQueryIn(BaseModel):
     sql: str = Field(min_length=1, max_length=20_000, description="DuckDB SQL; datasets appear as views (lowercased name)")
+
+
+# ------------------------------------------------------------------ v29 apps
+class AppCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = Field(default="", max_length=500)
+    dataset_id: str | None = Field(default=None, max_length=36)
+    generate: bool = Field(default=True, description="Auto-lay-out components from the bound dataset")
+    config: dict | None = Field(default=None, description="Explicit config wins over generate")
+
+
+class AppUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    # Tri-state (v20 pattern): omitted = untouched; "" = unbind; str = bind.
+    dataset_id: str | None = Field(default=None, max_length=36)
+    config: dict | None = None
+
+
+class AppOut(BaseModel):
+    id: str
+    name: str
+    slug: str
+    description: str = ""
+    dataset_id: str | None = None
+    dataset_name: str | None = None
+    config: dict = Field(default_factory=dict)
+    status: str = "draft"
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class AppRecordIn(BaseModel):
+    record: dict = Field(min_length=1, max_length=200)

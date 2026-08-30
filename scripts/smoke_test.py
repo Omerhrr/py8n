@@ -1874,6 +1874,72 @@ def main() -> None:
             req("DELETE", f"/artifacts/{aid}")
     print("v28 data-science workbench OK")
 
+    # ---------------------------------------------------------------
+    # v29: app builder — Excel → App (generate, publish, runtime, records)
+    # ---------------------------------------------------------------
+    print("\n== v29: app builder (Excel -> App) ==")
+    status, health29 = req("GET", "/health")
+    assert status == 200 and health29["version"].startswith("1.29"), health29
+
+    tag29 = uuid.uuid4().hex[:6]
+    rows29 = [
+        {"name": "Alice", "email": "alice@x.io", "plan": "starter", "ltv": 1200, "active": True},
+        {"name": "Bob", "email": "bob@x.io", "plan": "pro", "ltv": 3400, "active": True},
+        {"name": "Cara", "email": "cara@x.io", "plan": "enterprise", "ltv": 9800, "active": False},
+        {"name": "Dan", "email": "dan@x.io", "plan": "starter", "ltv": 900, "active": True},
+        {"name": "Eve", "email": "eve@x.io", "plan": "enterprise", "ltv": 12450, "active": True},
+        {"name": "Finn", "email": "finn@x.io", "plan": "pro", "ltv": 3100, "active": False},
+        {"name": "Gus", "email": "gus@x.io", "plan": "enterprise", "ltv": 10200, "active": True},
+        {"name": "Hana", "email": "hana@x.io", "plan": "starter", "ltv": 1500, "active": True},
+    ]
+    status, ds29 = req("POST", "/datasets", {"name": f"smoke29 clients {tag29}", "rows": rows29})
+    assert status == 201, ds29
+    try:
+        # one-click generate from the dataset
+        status, app29 = req("POST", "/apps", {"name": f"smoke29 CRM {tag29}", "dataset_id": ds29["id"]})
+        assert status == 201, app29
+        comps = app29["config"]["components"]
+        assert [c["type"] for c in comps] == ["stat", "stat", "chart", "table", "form"], comps
+        assert req("POST", "/apps", {"name": f"smoke29 CRM {tag29}"})[0] == 409  # dup name
+
+        # draft has no runtime; publish unlocks it
+        assert req("GET", f"/apps/{app29['slug']}/runtime")[0] == 404
+        status, pub = req("POST", f"/apps/{app29['id']}/publish")
+        assert status == 200 and pub["status"] == "published", pub
+        status, rt = req("GET", f"/apps/{app29['slug']}/runtime")
+        assert status == 200, rt
+        assert rt["stats"]["stat_total"] == 8 and abs(rt["stats"]["stat_ltv"] - 5318.75) < 0.01, rt["stats"]
+        assert dict(zip(rt["chart"]["labels"], rt["chart"]["values"]))["starter"] == 3, rt["chart"]
+        print("generate + publish + runtime (stats/chart by hand) OK")
+
+        # records through the app: create with STRING values → coerced
+        status, rec = req("POST", f"/apps/{app29['slug']}/records", {
+            "record": {"name": "Zoe", "email": "zoe@x.io", "plan": "pro", "ltv": "5500", "active": "true"}})
+        assert status == 201 and rec["row_count"] == 9, rec
+        status, page = req("GET", f"/apps/{app29['slug']}/records?offset=8&limit=5")
+        assert page["rows"][0]["ltv"] == 5500 and page["rows"][0]["active"] is True, page["rows"][0]
+        # edit by index → stats react
+        status, _ = req("PATCH", f"/apps/{app29['slug']}/records/8", {"record": {"ltv": 6000}})
+        assert status == 200
+        status, rt2 = req("GET", f"/apps/{app29['slug']}/runtime")
+        assert abs(rt2["stats"]["stat_ltv"] - 48550 / 9) < 0.01, rt2["stats"]
+        # delete by index → back to 8
+        status, _ = req("DELETE", f"/apps/{app29['slug']}/records/8")
+        assert status == 200
+        status, rt3 = req("GET", f"/apps/{app29['slug']}/runtime")
+        assert rt3["stats"]["stat_total"] == 8
+        print("records create (coerced) / edit / delete OK")
+
+        # unpublish → runtime gone
+        status, _ = req("POST", f"/apps/{app29['id']}/unpublish")
+        assert status == 200
+        assert req("GET", f"/apps/{app29['slug']}/runtime")[0] == 404
+        print("unpublish guard OK")
+    finally:
+        req("DELETE", f"/apps/{app29['id']}")
+        req("DELETE", f"/datasets/{ds29['id']}")
+    print("v29 app builder OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")
