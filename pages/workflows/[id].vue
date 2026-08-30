@@ -8,6 +8,7 @@ import {
   Play, Save, Copy, Check, Zap, Globe, Loader2, AlertTriangle,
   Link2, Trash2, Download, Clock, ShieldAlert, Tag as TagIcon, X,
   History, RotateCcw, Undo2, Redo2, StickyNote, Settings2, Keyboard,
+  MessageCircle,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
 import PNodeCard from '~/components/editor/PNodeCard.vue'
@@ -15,6 +16,7 @@ import PStickyNote from '~/components/editor/PStickyNote.vue'
 import NodePalette from '~/components/editor/NodePalette.vue'
 import NodeContextMenu, { type ContextMenuItem } from '~/components/editor/NodeContextMenu.vue'
 import ShortcutsOverlay from '~/components/editor/ShortcutsOverlay.vue'
+import ChatPanel from '~/components/editor/ChatPanel.vue'
 import ConfigPanel from '~/components/editor/ConfigPanel.vue'
 import ExecutionsDrawer from '~/components/editor/ExecutionsDrawer.vue'
 import type { NodeDefinition, NodeSpec, Workflow } from '~/types/node'
@@ -34,6 +36,15 @@ const selectedNodeId = ref<string | null>(null)
 const selectedEdgeId = ref<string | null>(null)
 const drawerOpen = ref(true)
 const copied = ref(false)
+// v25: floating editor chat — shown when the canvas contains a Chat Trigger
+const chatOpen = ref(false)
+const hasChatTrigger = computed(() =>
+  vfNodes.value.some((n: any) => n?.data?.spec?.type === 'chat_trigger'),
+)
+const chatWelcome = computed(() => {
+  const spec = vfNodes.value.find((n: any) => n?.data?.spec?.type === 'chat_trigger')
+  return spec?.data?.spec?.parameters?.welcome_message || ''
+})
 const toasts = ref<{ id: number; text: string; kind: 'info' | 'error' | 'success' }[]>([])
 let toastSeq = 0
 
@@ -1151,6 +1162,17 @@ const runningCount = computed(
         >
           <StickyNote class="h-3.5 w-3.5" /> Sticky
         </button>
+
+        <!-- v25: floating chat button (workflows with a Chat Trigger) -->
+        <button
+          v-if="hasChatTrigger"
+          class="absolute bottom-3 right-3 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-600 text-white shadow-lg shadow-emerald-950/60 transition hover:bg-emerald-500 hover:shadow-emerald-900/60 active:scale-95"
+          :class="chatOpen && 'ring-2 ring-emerald-400/60 ring-offset-2 ring-offset-zinc-950'"
+          title="Open chat — talk to this workflow (requires activation)"
+          @click="chatOpen = !chatOpen"
+        >
+          <MessageCircle class="h-5 w-5" />
+        </button>
       </div>
 
       <ConfigPanel
@@ -1250,6 +1272,14 @@ const runningCount = computed(
 
     <!-- v20: shortcut cheat sheet -->
     <ShortcutsOverlay v-if="showShortcuts" @close="showShortcuts = false" />
+
+    <!-- v25: editor chat panel -->
+    <ChatPanel
+      :workflow-id="workflowId"
+      :open="chatOpen && hasChatTrigger"
+      :welcome-message="chatWelcome"
+      @close="chatOpen = false"
+    />
 
     <!-- executions drawer -->
     <ExecutionsDrawer

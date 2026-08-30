@@ -417,7 +417,7 @@ def test_v24_definitions():
             assert res.status_code == 200
             defs = res.json()["definitions"]
             types = {d["type"] for d in defs}
-            assert len(defs) == 29, f"expected 29 node types, got {len(defs)}"
+            assert len(defs) == 30, f"expected 30 node types, got {len(defs)}"
             assert {"compare_datasets", "summarize", "csv"} <= types
 
             cmp = next(d for d in defs if d["type"] == "compare_datasets")

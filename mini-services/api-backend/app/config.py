@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.24.0"
+    version: str = "1.25.0"
     debug: bool = True
 
     # ------------------------------------------------------------------

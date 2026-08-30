@@ -50,7 +50,7 @@ def main() -> None:
     assert status == 200
     types = [d["type"] for d in defs["definitions"]]
     print(f"{len(types)} node types: {types}")
-    assert len(types) == 29, "expected 29 node types after v24 wave"
+    assert len(types) == 30, "expected 30 node types after v25 wave"
     for t in ("loop_over_items", "email_send", "slack_message"):
         assert t in types, f"missing {t}"
     # internal batch trigger must stay hidden from the palette
@@ -1195,7 +1195,7 @@ def main() -> None:
     status, defs = req("GET", "/node-definitions")
     assert status == 200
     types21 = [d["type"] for d in defs["definitions"]]
-    assert len(types21) == 29 and "respond_to_webhook" in types21, types21  # 29 after v24
+    assert len(types21) == 30 and "respond_to_webhook" in types21, types21  # 30 after v25
     rdef = next(d for d in defs["definitions"] if d["type"] == "respond_to_webhook")
     assert rdef["category"] == "actions" and rdef["icon"] == "reply", rdef
     print("21 node types, respond_to_webhook exported OK")
@@ -1460,7 +1460,7 @@ def main() -> None:
     status, defs24 = req("GET", "/node-definitions")
     assert status == 200
     types24 = [d["type"] for d in defs24["definitions"]]
-    assert len(types24) == 29, f"expected 29 node types after v24, got {len(types24)}"
+    assert len(types24) == 30, f"expected 30 node types after v25, got {len(types24)}"
     cmp_def = next(d for d in defs24["definitions"] if d["type"] == "compare_datasets")
     assert [h["key"] for h in cmp_def["inputs"]] == ["main", "secondary"], cmp_def["inputs"]
     assert [h["key"] for h in cmp_def["outputs"]] == ["matched", "a_only", "b_only"]
@@ -1553,6 +1553,75 @@ def main() -> None:
     finally:
         req("DELETE", f"/workflows/{wf24b['id']}")
     print("v24 compare + summarize + csv OK")
+
+    # ---------------------------------------------------------------
+    # v25: chat trigger + /chat endpoint (last_node + respond_node)
+    # ---------------------------------------------------------------
+    print("\n== v25: chat trigger + chat endpoint ==")
+    status, defs25 = req("GET", "/node-definitions")
+    assert status == 200
+    chat_def = next(d for d in defs25["definitions"] if d["type"] == "chat_trigger")
+    assert chat_def["category"] == "triggers" and chat_def["inputs"] == []
+    chat_params = chat_def["parameters_schema"]["properties"]
+    assert chat_params["response_mode"]["options"] == ["last_node", "respond_node"]
+    assert "welcome_message" in chat_params
+
+    # live chat: last_node mode echoes the message back, session_id round-trips
+    status, wf25 = req("POST", "/workflows", {"name": f"tmp v25 chat {uuid.uuid4().hex[:6]}", "graph": {
+        "nodes": [
+            {"id": "chat1", "type": "chat_trigger", "name": "Chat Trigger", "position": {"x": 0, "y": 0},
+             "parameters": {"response_mode": "last_node"}},
+            {"id": "rep", "type": "set_variable", "name": "Reply", "position": {"x": 200, "y": 0},
+             "parameters": {"assignments": {"reply": "Echo: {{ nodes.chat1.output.message }} ({{ nodes.chat1.output.session_id }})"}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "chat1", "target": "rep", "sourceHandle": "main", "targetHandle": "main"},
+        ],
+    }})
+    assert status == 201, wf25
+    try:
+        status, act = req("POST", f"/workflows/{wf25['id']}/activate")
+        assert status in (200, 201), act
+        status, resp = req("POST", f"/chat/{wf25['id']}", {"message": "hello smoke", "session_id": "smoke-s1"})
+        assert status == 200, resp
+        assert resp["status"] == "success" and resp["session_id"] == "smoke-s1"
+        assert resp["reply"] == "Echo: hello smoke (smoke-s1)", resp["reply"]
+        # execution record attributed to the chat trigger
+        status, ex = req("GET", f"/executions/{resp['execution_id']}")
+        assert status == 200 and ex["trigger_type"] == "chat"
+        print("chat last_node: echo reply + session round-trip + trigger_type=chat OK")
+
+        # respond_node variant answers mid-flow with the custom body
+        status, wf25b = req("POST", "/workflows", {"name": f"tmp v25 chat-r {uuid.uuid4().hex[:6]}", "graph": {
+            "nodes": [
+                {"id": "chat1", "type": "chat_trigger", "name": "Chat Trigger", "position": {"x": 0, "y": 0},
+                 "parameters": {"response_mode": "respond_node"}},
+                {"id": "rw", "type": "respond_to_webhook", "name": "Respond", "position": {"x": 200, "y": 0},
+                 "parameters": {"status_code": 200, "content_type": "application/json",
+                                "body": '{"reply": "custom: {{ nodes.chat1.output.message }}"}'}},
+            ],
+            "edges": [
+                {"id": "e1", "source": "chat1", "target": "rw", "sourceHandle": "main", "targetHandle": "main"},
+            ],
+        }})
+        assert status == 201, wf25b
+        try:
+            status, act = req("POST", f"/workflows/{wf25b['id']}/activate")
+            assert status in (200, 201), act
+            status, resp = req("POST", f"/chat/{wf25b['id']}", {"message": "mid-flow", "session_id": "smoke-s2"})
+            assert status == 200, resp
+            assert resp == {"reply": "custom: mid-flow"}, resp
+            print("chat respond_node: custom mid-flow reply OK")
+        finally:
+            req("DELETE", f"/workflows/{wf25b['id']}")
+
+        # guard: chat endpoint on a workflow without a chat trigger -> 409
+        status, resp = req("POST", f"/chat/{hook['id']}", {"message": "x"})
+        assert status == 409 and "no Chat Trigger" in resp.get("detail", ""), (status, resp)
+        print("chat guard: no-chat-trigger workflow -> 409 OK")
+    finally:
+        req("DELETE", f"/workflows/{wf25['id']}")
+    print("v25 chat trigger + endpoint OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

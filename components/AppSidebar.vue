@@ -146,7 +146,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.24 · 29 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.25 · 30 node types</span>
         <button
           v-if="!collapsed"
           class="rounded-lg p-1 text-zinc-600 transition hover:bg-zinc-900 hover:text-zinc-300 max-lg:hidden"

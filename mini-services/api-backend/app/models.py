@@ -67,6 +67,9 @@ class Workflow(Base):
     def webhook_nodes(self) -> list[dict]:
         return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "webhook_trigger"]
 
+    def chat_nodes(self) -> list[dict]:
+        return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "chat_trigger"]
+
     def schedule_nodes(self) -> list[dict]:
         return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "schedule_trigger"]
 

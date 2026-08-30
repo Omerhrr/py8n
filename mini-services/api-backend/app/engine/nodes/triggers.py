@@ -107,6 +107,55 @@ class WebhookTriggerNode(BaseNode):
         )
 
 
+class ChatTriggerNode(BaseNode):
+    """Fired by a chat client POSTing to /api/v1/chat/{workflow_id} (v25).
+
+    Each chat message starts one workflow run; the reply reaches the chat UI
+    either from the last node's output (response_mode=last_node) or from a
+    Respond to Webhook node mid-flow (response_mode=respond_node).
+    """
+
+    type = "chat_trigger"
+    name = "Chat Trigger"
+    description = (
+        "Starts the workflow on each chat message sent to the workflow's chat "
+        "endpoint; exposes {message, session_id} so downstream AI nodes can "
+        "hold a per-session conversation."
+    )
+    category = "triggers"
+    icon = "message-circle"
+    color = "#10b981"
+    inputs: ClassVar[list[Handle]] = []
+    outputs: ClassVar[list[Handle]] = [Handle("main", "Out")]
+
+    class ParamsModel(BaseModel):
+        response_mode: str = Field(
+            default="last_node",
+            description=(
+                "last_node = wait and reply with the final node output; "
+                "respond_node = wait for a Respond to Webhook node to send a "
+                "custom reply mid-flow"
+            ),
+            json_schema_extra={"widget": "select", "options": ["last_node", "respond_node"]},
+        )
+        welcome_message: str = Field(
+            default="Hi! How can I help you today?",
+            description="Shown as the assistant's first line in the chat panel before any message is sent",
+            json_schema_extra={"widget": "textarea", "rows": 2},
+        )
+
+    async def execute(self, context) -> NodeResult:
+        tp = context.trigger_payload
+        return self._single(
+            {
+                "message": tp.get("message", ""),
+                "session_id": tp.get("session_id", "default"),
+                "trigger_type": "chat",
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+
 class ScheduleTriggerNode(BaseNode):
     """Fired by APScheduler on interval or CRON expressions."""
 

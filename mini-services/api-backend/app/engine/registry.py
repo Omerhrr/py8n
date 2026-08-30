@@ -24,7 +24,7 @@ from .nodes.http import HttpRequestNode
 from .nodes.loop import BatchTriggerNode, LoopOverItemsNode
 from .nodes.sticky import StickyNoteNode
 from .nodes.subflow import ExecuteWorkflowNode
-from .nodes.triggers import ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
+from .nodes.triggers import ChatTriggerNode, ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
 from .nodes.wait import WaitForResumeNode
 from .nodes.webhook_respond import RespondToWebhookNode
 
@@ -41,6 +41,7 @@ for _cls in (
     WebhookTriggerNode,
     ErrorTriggerNode,
     ScheduleTriggerNode,
+    ChatTriggerNode,    # v25: conversational workflows — one run per chat message
     HttpRequestNode,
     ExecuteWorkflowNode,
     IfConditionNode,
