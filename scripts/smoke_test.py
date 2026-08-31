@@ -2319,6 +2319,50 @@ def main() -> None:
     print("dash hygiene + brand assets OK (logo.svg + Py8nLogo.vue verified)")
     print("v35 brand and polish OK")
 
+    # ------------------------------------------------------------- v36: live agent stream
+    status, health36 = req("GET", "/health")
+    ver36 = tuple(int(x) for x in health36.get("version", "0").split(".")[:2])
+    assert status == 200 and ver36 >= (1, 36), health36
+    tag36 = uuid.uuid4().hex[:6]
+    wf36 = None
+    try:
+        status, wf36 = req("POST", "/templates/data-analyst/use", {"name": f"SMOKE36 Stream {tag36}"})
+        assert status == 201, wf36
+        status, act = req("POST", f"/workflows/{wf36['id']}/activate", {})
+        assert status == 200, act
+        # raw SSE over urllib (stream endpoint answers text/event-stream)
+        sreq = urllib.request.Request(
+            BASE + f"/chat/{wf36['id']}/stream",
+            data=json.dumps({"message": "How many rows do I have? Reply with the number only.", "session_id": f"smoke36-{tag36}"}).encode(),
+            method="POST", headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(sreq, timeout=120) as sresp:
+            ctype = sresp.headers.get("content-type", "")
+            raw = sresp.read().decode()
+        assert ctype.startswith("text/event-stream"), ctype
+        frames = []
+        for block in raw.split("\n\n"):
+            ev_name = data_line = None
+            for line in block.split("\n"):
+                if line.startswith("event: "):
+                    ev_name = line[7:].strip()
+                elif line.startswith("data: "):
+                    data_line = line[6:]
+            if ev_name and data_line:
+                frames.append((ev_name, json.loads(data_line)))
+        names = [e for e, _ in frames]
+        assert names[0] == "start" and names[-1] == "done", names
+        phases = [d.get("phase") for e, d in frames if e == "agent"]
+        assert "iteration" in phases and "answer" in phases, phases
+        done36 = frames[-1][1]
+        assert done36["status"] == "success" and done36["reply"], done36
+        print(f"live agent stream: {len(frames)} frames, phases {phases} -> reply: {done36['reply'][:60]!r}")
+    finally:
+        if wf36:
+            req("POST", f"/workflows/{wf36['id']}/deactivate", {})
+            req("DELETE", f"/workflows/{wf36['id']}")
+    print("v36 live agent streaming OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")

@@ -63,6 +63,13 @@ class ExecutionContext:
     # fails with a clear explanation instead of silently no-op'ing.
     respond_channel: Any = None
 
+    # v36 live agent trace: async callable ``emit(event: dict)`` wired by the
+    # runner to the execution event bus. The AI Agent node publishes fine-
+    # grained ``agent_*`` events (iteration / reply / tool_call / tool_result /
+    # answer) so SSE clients can watch the loop think in real time. Like
+    # respond_channel this is deliberately NOT part of snapshot().
+    emit: Any = None
+
     # ------------------------------------------------------------------
     def as_jinja_context(self) -> dict[str, Any]:
         return {

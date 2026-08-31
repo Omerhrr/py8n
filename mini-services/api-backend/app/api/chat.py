@@ -298,6 +298,15 @@ async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSessi
                         "duration_ms": event.get("duration_ms"),
                         "error": event.get("error"),
                     })
+                elif kind.startswith("agent_"):
+                    # v36: live agent trace - the loop's iterations, raw model
+                    # replies, tool calls and results stream out as they happen
+                    phase = kind[len("agent_"):]
+                    frame = {"phase": phase, "execution_id": execution_id}
+                    for key in ("iteration", "max_iterations", "reply", "tool", "arguments", "status", "preview", "answer"):
+                        if key in event:
+                            frame[key] = event[key]
+                    yield _sse_frame("agent", frame)
                 elif kind == "execution_finished":
                     result_status = event.get("status", "success")
                     if result_status == "error":

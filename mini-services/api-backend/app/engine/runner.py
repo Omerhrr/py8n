@@ -153,6 +153,7 @@ class GraphRunner:
             honor_pinned=self.honor_pinned,
         )
         context.respond_channel = self.respond_channel
+        context.emit = self.emit
         if self.inherit_node_states:
             context.node_states.update(self.inherit_node_states)
 

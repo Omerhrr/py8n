@@ -38,6 +38,12 @@ from .base import BaseNode, Handle, NodeExecutionError, NodeResult
 
 MAX_TOOL_RESULT_CHARS = 4000
 
+# v36: caps for the live SSE trace frames (keep frames small; the full data
+# still lands in the execution log via the node's final output)
+MAX_EVENT_REPLY_CHARS = 400
+MAX_EVENT_ARGS_CHARS = 300
+MAX_EVENT_PREVIEW_CHARS = 240
+
 
 class ToolSpec(BaseModel):
     kind: Literal["workflow", "http", "knowledge", "dataset", "code"] = "knowledge"
@@ -328,6 +334,24 @@ class AgentNode(BaseNode):
         return {"tool_status": "success", "output": last_run["output"] if last_run else None}
 
     # ------------------------------------------------------------------
+    # v36 live trace - fine-grained events onto the execution bus
+    # ------------------------------------------------------------------
+    async def _emit_agent(self, context: ExecutionContext, event: dict) -> None:
+        """Publish one agent_* event; a dead/absent bus must NEVER fail the run."""
+        emit = getattr(context, "emit", None)
+        if emit is None:
+            return
+        try:
+            await emit(event)
+        except Exception:  # noqa: BLE001 - live trace is best-effort by design
+            pass
+
+    @staticmethod
+    def _preview(value: Any, limit: int) -> str:
+        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
+        return text[:limit]
+
+    # ------------------------------------------------------------------
     # Main agentic loop
     # ------------------------------------------------------------------
     async def execute(self, context: ExecutionContext) -> NodeResult:
@@ -372,7 +396,14 @@ class AgentNode(BaseNode):
         iterations = 0
         while iterations < p.max_iterations:
             iterations += 1
+            await self._emit_agent(context, {
+                "event": "agent_iteration", "iteration": iterations, "max_iterations": p.max_iterations,
+            })
             content = await self._chat(messages, p.temperature)
+            await self._emit_agent(context, {
+                "event": "agent_reply", "iteration": iterations,
+                "reply": self._preview(content, MAX_EVENT_REPLY_CHARS),
+            })
             directive = self._parse_reply(content)
             # normalize the directive: some models nest the tool call as
             # {"tool": {"name": ..., "arguments": {...}}} - accept both shapes
@@ -387,11 +418,20 @@ class AgentNode(BaseNode):
                 if not isinstance(args, dict):
                     args = {"value": args}
                 try:
+                    await self._emit_agent(context, {
+                        "event": "agent_tool_call", "iteration": iterations,
+                        "tool": tool.name, "arguments": self._preview(args, MAX_EVENT_ARGS_CHARS),
+                    })
                     result = await self._run_tool(tool, args, context)
                     status = "ok"
                 except NodeExecutionError as exc:
                     result = f"tool error: {exc}"
                     status = "error"
+                await self._emit_agent(context, {
+                    "event": "agent_tool_result", "iteration": iterations,
+                    "tool": tool.name, "status": status,
+                    "preview": self._preview(result, MAX_EVENT_PREVIEW_CHARS),
+                })
                 tool_calls.append({"tool": tool.name, "arguments": args, "status": status, "result": result})
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": f"TOOL RESULT {tool.name}: {result}"})
@@ -410,6 +450,8 @@ class AgentNode(BaseNode):
             from ...services.agent_memory import append_history
 
             await append_history(memory_key, str(p.user_message), answer, p.max_history_turns)
+
+        await self._emit_agent(context, {"event": "agent_answer", "answer": answer})
 
         return self._single(
             {

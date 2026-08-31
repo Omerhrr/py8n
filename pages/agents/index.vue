@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, nextTick } from 'vue'
 import {
   Bot, Send, Loader2, Wrench, Database, Code2, Globe, GitBranch, BookOpen,
-  MessageSquare, ExternalLink, MemoryStick, AlertTriangle, CheckCircle2, ChevronDown,
+  MessageSquare, ExternalLink, MemoryStick, AlertTriangle, CheckCircle2, ChevronDown, Brain,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -20,11 +20,21 @@ interface AgentSummary {
   memory_sessions: string[]
   node_count: number
 }
-interface ToolCall { tool: string; arguments: Record<string, unknown>; status: string; result: string }
+// v36: one live trace step per SSE agent frame, rendered as it arrives
+interface LiveStep {
+  kind: 'iteration' | 'reply' | 'tool_call' | 'tool_result'
+  iteration?: number
+  reply?: string
+  tool?: string
+  arguments?: string
+  status?: string
+  preview?: string
+}
 interface Turn {
   role: 'user' | 'assistant'
   text: string
-  trace?: { iterations: number; tool_calls: ToolCall[] }
+  steps: LiveStep[]
+  streaming?: boolean
   error?: boolean
 }
 
@@ -78,11 +88,12 @@ function pick(a: AgentSummary) {
   turns.value = []
 }
 
-function pretty(result: string): string {
+function pretty(text?: string): string {
+  if (!text) return ''
   try {
-    return JSON.stringify(JSON.parse(result), null, 2)
+    return JSON.stringify(JSON.parse(text), null, 2)
   } catch {
-    return result
+    return text
   }
 }
 
@@ -92,46 +103,104 @@ function scrollBottom() {
   })
 }
 
+function streamUrl(id: string): string {
+  // gateway routes /api to the backend; raw fetch (no $fetch) so we can read
+  // the body as a stream - same pattern as the editor ChatPanel
+  const base = `/api/v1/chat/${id}/stream`
+  return base
+}
+
+function handleFrame(turn: Turn, ev: string, data: Record<string, any>) {
+  if (ev === 'agent') {
+    const step = data.phase as LiveStep['kind']
+    if (step === 'iteration') {
+      turn.steps.push({ kind: 'iteration', iteration: data.iteration })
+    } else if (step === 'reply') {
+      turn.steps.push({ kind: 'reply', iteration: data.iteration, reply: data.reply })
+    } else if (step === 'tool_call') {
+      turn.steps.push({ kind: 'tool_call', iteration: data.iteration, tool: data.tool, arguments: data.arguments })
+    } else if (step === 'tool_result') {
+      turn.steps.push({ kind: 'tool_result', iteration: data.iteration, tool: data.tool, status: data.status, preview: data.preview })
+    } else if (step === 'answer') {
+      turn.text = typeof data.answer === 'string' ? data.answer : turn.text
+    }
+  } else if (ev === 'done') {
+    if (!turn.text) turn.text = data.reply || '(empty reply)'
+  } else if (ev === 'error') {
+    turn.text = data.error || 'agent run failed'
+    turn.error = true
+  } else if (ev === 'timeout') {
+    turn.text = 'stream timed out - the run keeps going in the background'
+    turn.error = true
+  }
+  scrollBottom()
+}
+
 async function send() {
   const a = selected.value
   const message = draft.value.trim()
   if (!a || !message || sending.value) return
   draft.value = ''
-  turns.value.push({ role: 'user', text: message })
+  turns.value.push({ role: 'user', text: message, steps: [] })
   scrollBottom()
   sending.value = true
+  const turn: Turn = { role: 'assistant', text: '', steps: [], streaming: true }
+  turns.value.push(turn)
+  scrollBottom()
   try {
-    const res = await api.post<{ reply: string; execution_id: string }>(`/chat/${a.id}`, {
-      message,
-      session_id: sessionId.value.trim() || 'playground',
+    const res = await fetch(streamUrl(a.id), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, session_id: sessionId.value.trim() || 'playground' }),
     })
-    // pull the agent node's run for the tool trace
-    let trace: Turn['trace'] | undefined
-    try {
-      const detail = await api.get<{ node_runs: Array<{ node_type: string; output: any }> }>(
-        `/executions/${res.execution_id}`,
-      )
-      const agentRun = [...(detail.node_runs ?? [])].reverse().find((r) => r.node_type === 'ai_agent')
-      if (agentRun?.output?.tool_calls?.length) {
-        trace = { iterations: agentRun.output.iterations ?? 0, tool_calls: agentRun.output.tool_calls }
+    const ctype = res.headers.get('content-type') || ''
+    if (!res.ok || !ctype.includes('text/event-stream')) {
+      // guards (404/409/422) answer with plain JSON before any stream
+      const body = await res.json().catch(() => ({}) as Record<string, unknown>)
+      throw new Error((body as Record<string, string>).detail || `stream failed (${res.status})`)
+    }
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const frames = buffer.split('\n\n')
+      buffer = frames.pop() ?? ''
+      for (const frame of frames) {
+        const lines = frame.split('\n')
+        const evLine = lines.find((l) => l.startsWith('event: '))
+        const dataLine = lines.find((l) => l.startsWith('data: '))
+        if (!evLine || !dataLine) continue
+        const ev = evLine.slice(7).trim()
+        let data: Record<string, any> = {}
+        try {
+          data = JSON.parse(dataLine.slice(6))
+        } catch {
+          continue
+        }
+        handleFrame(turn, ev, data)
       }
-    } catch { /* trace is best-effort - the reply is the point */ }
-    turns.value.push({ role: 'assistant', text: res.reply || '(empty reply)', trace })
+    }
+    if (!turn.text && !turn.error) turn.text = '(stream ended without an answer)'
   } catch (e: unknown) {
-    turns.value.push({
-      role: 'assistant',
-      text: e instanceof Error ? e.message : 'Request failed - is the backend up?',
-      error: true,
-    })
+    turn.text = e instanceof Error ? e.message : 'Request failed - is the backend up?'
+    turn.error = true
   } finally {
+    turn.streaming = false
     sending.value = false
     scrollBottom()
   }
 }
 
 const toolChipTotal = computed(() =>
-  turns.value.reduce((n, t) => n + (t.trace?.tool_calls.length ?? 0), 0),
+  turns.value.reduce((n, t) => n + t.steps.filter((s) => s.kind === 'tool_call').length, 0),
 )
+
+function turnIterations(t: Turn): number {
+  return Math.max(0, ...t.steps.map((s) => s.iteration ?? 0))
+}
 
 onMounted(() => loadAgents(false))
 </script>
@@ -148,7 +217,7 @@ onMounted(() => loadAgents(false))
           <div>
             <h1 class="text-lg font-bold tracking-tight">Agent Console</h1>
             <p class="-mt-0.5 text-[11px] text-zinc-500">
-              {{ agents.length }} agent{{ agents.length === 1 ? '' : 's' }} · chat with your tool-calling workflows
+              {{ agents.length }} agent{{ agents.length === 1 ? '' : 's' }} · live tool-calling streams
             </p>
           </div>
         </div>
@@ -240,6 +309,10 @@ onMounted(() => loadAgents(false))
               <span class="rounded-md border border-zinc-700 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
                 {{ selected.agent_nodes.join(', ') }}
               </span>
+              <span
+                class="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300"
+                title="answers stream frame by frame"
+              >live</span>
             </div>
             <label class="flex items-center gap-1.5 text-[11px] text-zinc-500">
               session
@@ -254,9 +327,9 @@ onMounted(() => loadAgents(false))
             <div v-if="!turns.length" class="flex h-full flex-col items-center justify-center text-center">
               <MessageSquare class="h-7 w-7 text-zinc-700" />
               <p class="mt-2 max-w-xs text-xs leading-relaxed text-zinc-500">
-                Say something - the agent runs with its configured tools
-                ({{ selected.tools.map((t) => t.name).join(', ') || 'none' }}) and replies here.
-                Tool calls render as trace chips under each answer.
+                Say something - the agent streams its reasoning live: every iteration,
+                tool call and result lands here as it happens
+                ({{ selected.tools.map((t) => t.name).join(', ') || 'no tools' }}).
               </p>
             </div>
             <template v-for="(t, i) in turns" :key="i">
@@ -264,38 +337,62 @@ onMounted(() => loadAgents(false))
                 <div class="max-w-[80%] rounded-2xl rounded-br-md bg-violet-500/20 px-3.5 py-2 text-sm">{{ t.text }}</div>
               </div>
               <div v-else class="flex flex-col items-start gap-1.5">
+                <!-- assistant answer bubble -->
                 <div
+                  v-if="t.text || !t.steps.length"
                   class="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-bl-md px-3.5 py-2 text-sm"
                   :class="t.error ? 'border border-rose-500/40 bg-rose-500/10 text-rose-200' : 'border border-zinc-800 bg-zinc-900'"
-                >{{ t.text }}</div>
-                <div v-if="t.trace" class="ml-2 space-y-1">
+                >{{ t.text }}<span v-if="t.streaming && !t.text" class="ml-1 inline-block animate-pulse text-zinc-500">▋</span></div>
+
+                <!-- live trace: steps render as their frames arrive -->
+                <div v-if="t.steps.length" class="ml-2 w-[85%] space-y-1">
                   <div class="flex flex-wrap items-center gap-1">
                     <span class="text-[10px] font-semibold uppercase tracking-wider text-zinc-600">
-                      trace · {{ t.trace.iterations }} iteration{{ t.trace.iterations === 1 ? '' : 's' }}
+                      trace · {{ turnIterations(t) }} iteration{{ turnIterations(t) === 1 ? '' : 's' }}
                     </span>
                     <span
-                      v-for="(c, ci) in t.trace.tool_calls"
-                      :key="ci"
-                      class="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[10px]"
-                      :class="c.status === 'ok' ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/40 bg-rose-500/10 text-rose-300'"
+                      v-for="(s, si) in t.steps.filter((x) => x.kind === 'tool_call')"
+                      :key="'chip' + si"
+                      class="inline-flex items-center gap-1 rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300"
                     >
-                      <component :is="c.status === 'ok' ? CheckCircle2 : AlertTriangle" class="h-2.5 w-2.5" />
-                      {{ c.tool }}
+                      <component :is="kindIcon(selected?.tools.find((x) => x.name === s.tool)?.kind || '')" class="h-2.5 w-2.5" />
+                      {{ s.tool }}
                     </span>
                   </div>
-                  <details v-for="(c, ci) in t.trace.tool_calls" :key="'d' + ci" class="ml-1 max-w-[85%]">
-                    <summary class="flex cursor-pointer items-center gap-1 text-[10px] text-zinc-600 hover:text-zinc-400">
-                      <ChevronDown class="h-3 w-3" /> {{ c.tool }} → arguments
-                    </summary>
-                    <pre class="mt-1 overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">args:    {{ JSON.stringify(c.arguments) }}
-result:  {{ pretty(c.result) }}</pre>
-                  </details>
+                  <template v-for="(s, si) in t.steps" :key="'step' + si">
+                    <div v-if="s.kind === 'iteration'" class="flex items-center gap-2 pt-1">
+                      <span class="text-[10px] font-semibold text-zinc-600">iteration {{ s.iteration }}</span>
+                      <span class="h-px flex-1 bg-zinc-800/80" />
+                    </div>
+                    <details v-else-if="s.kind === 'reply'" class="ml-1">
+                      <summary class="flex cursor-pointer items-center gap-1 text-[10px] text-zinc-600 hover:text-zinc-400">
+                        <Brain class="h-3 w-3" /> model reply · iter {{ s.iteration }}
+                      </summary>
+                      <pre class="mt-1 max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ pretty(s.reply) }}</pre>
+                    </details>
+                    <div v-else-if="s.kind === 'tool_call'" class="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                      <Loader2 class="h-3 w-3 animate-spin text-cyan-400" />
+                      calling <span class="font-mono text-cyan-300">{{ s.tool }}</span>
+                      <details class="inline">
+                        <summary class="cursor-pointer text-zinc-600 hover:text-zinc-400">args</summary>
+                        <pre class="mt-1 max-w-full overflow-x-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ pretty(s.arguments) }}</pre>
+                      </details>
+                    </div>
+                    <div v-else-if="s.kind === 'tool_result'" class="flex items-center gap-1.5 text-[10px]">
+                      <component :is="s.status === 'ok' ? CheckCircle2 : AlertTriangle" class="h-3 w-3" :class="s.status === 'ok' ? 'text-emerald-400' : 'text-rose-400'" />
+                      <span class="font-mono" :class="s.status === 'ok' ? 'text-emerald-300' : 'text-rose-300'">{{ s.tool }}</span>
+                      <details class="inline">
+                        <summary class="cursor-pointer text-zinc-600 hover:text-zinc-400">result</summary>
+                        <pre class="mt-1 max-h-40 max-w-full overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ pretty(s.preview) }}</pre>
+                      </details>
+                    </div>
+                  </template>
+                  <div v-if="t.streaming" class="flex items-center gap-1.5 text-[10px] text-zinc-500">
+                    <Loader2 class="h-3 w-3 animate-spin" /> agent is working…
+                  </div>
                 </div>
               </div>
             </template>
-            <div v-if="sending" class="flex items-center gap-2 text-xs text-zinc-500">
-              <Loader2 class="h-3.5 w-3.5 animate-spin" /> agent is thinking (tools may take a few rounds)…
-            </div>
           </div>
 
           <div class="border-t border-zinc-800 p-3">

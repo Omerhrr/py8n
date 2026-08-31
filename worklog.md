@@ -817,3 +817,26 @@ Work Log:
 
 Stage Summary:
 - Py8n v35: a real brand - the figure-8 workflow mark (loops + amber node) now lives in the sidebar, command palette, favicon and public/logo.svg, and the entire product copy, API strings, template docs, tests and smoke are em-dash-free with a pytest guard that keeps them that way; 146/146 pytest + full smoke (v27 -> v35) + browser E2E, backend live at 1.35.0
+
+---
+Task ID: 47 (v36 feature wave - live agent streaming in the console)
+Agent: main (Super Z)
+Task: "proceed" after the v36 candidates menu (agent streaming was the recommended pick; auth next)
+
+Work Log:
+- Session start: sandbox reset again - backend down + duckdb gone (reinstalled 1.5.5 via python -m pip, daemon restart); git clean at a4e5d69 (v35) so "proceed" = v36 agent streaming
+- DESIGN: the agent's wire protocol is JSON-directive-per-iteration, so raw token streaming would pour partial JSON into the UI; the right granularity is FRAME-level live trace: iteration, the model's raw reply, tool call, tool result, final answer - each landing on the SSE bus as it happens. The result reads like watching the agent think
+- CONTEXT (engine/context.py): new emit field (async callable, v36) beside respond_channel; deliberately NOT in snapshot(); runner sets context.emit = self.emit for every run
+- AGENT NODE (engine/nodes/agent.py): _emit_agent(context, event) - no-op when emit absent, swallows bus failures (a dead trace can never fail a run); emits agent_iteration / agent_reply (raw model reply capped 400) / agent_tool_call (args capped 300) / agent_tool_result (preview capped 240) / agent_answer. Full data still lands in the execution log via node output - frames are for the live UI
+- STREAM ENDPOINT (api/chat.py): kind.startswith("agent_") branch translates bus events into SSE frames: event: agent, data: {phase, iteration, reply|tool|arguments|status|preview|answer, execution_id}; the v34 agent-only chat anchoring applies unchanged (agent-only workflows stream through the same POST /chat/{id}/stream)
+- WS safety checked: ws.py forwards unknown event kinds verbatim and only special-cases execution_finished - editor live progress unaffected
+- FRONTEND (pages/agents/index.vue rewritten): send() now POSTs the stream endpoint with fetch + getReader (ChatPanel's proven parser), frames feed handleFrame; Turn gained steps[] (live trace) + streaming flag; UI renders per-turn: answer bubble with streaming caret, TRACE - N ITERATIONS header, iteration divider rows, expandable "model reply - iter N" details, "calling <tool> args" rows with spinner, "<tool> result" rows (emerald ok / rose err, expandable preview), tool-kind icon on each chip; dropped the post-hoc GET /executions trace fetch (live frames supersede it); "live" badge on the console header
+- VERSION: 1.36.0 (config.py, footer v1.36 - 37 node types, strict pin moved to test_v36, v35 relaxed to >= 1.35.0)
+- TESTS test_v36_features.py (4, suite 150/150): health pin; THE stream test (scripted 2-iteration agent, collected the raw SSE body through ASGI: start frame, exactly [iteration, reply, tool_call, tool_result, iteration, reply, answer] agent phases, reply text / args / ok status / knowledge preview all asserted per frame, done.reply == final answer, execution_id correlation); editor-run regression (same emit machinery, plain run still success with output intact); 409 guard for neither-chat-nor-agent workflows before any stream
+- SMOKE v36 section (live 1.36.0): install data-analyst + activate -> raw urllib SSE chat -> assert text/event-stream, start/done framing, iteration+answer phases present -> print frame count + reply + cleanup; the REAL bridge did 5 SQL iterations and answered "3" (25 frames); full smoke ALL PASS v27 -> v36
+- E2E (browser): /agents console, real LLM: message 1 "How many rows..." -> live trace visible at 4s (iteration dividers 1-4, calling/result chips), final answer "The dataset 'smoke27_live_55a4cf' has 3 rows." with TRACE - 4 ITERATIONS + 3 sql_query chips; message 2 exercised python_compute; error bubble UX verified along the way (installed template was inactive -> the 409 detail rendered cleanly as a rose bubble; activated and retried); zero console/page errors. GOTCHA: the download dir gets wiped by sandbox resets mid-session - screenshots now use absolute paths and were retaken
+- Screenshots: download/e2e-v36-{stream-mid,stream-final}.png (+ e2e-v35-logo-expanded retake); demo artifacts kept LIVE: SQL Data Analyst agent (activated) + 3-row dataset
+- Scope note for the next wave menu: user auth + multi-user is the recommended v37; also open: dataset-tool row previews inside the live trace, exportable template packs
+
+Stage Summary:
+- Py8n v36: the Agent Console streams - every iteration, raw model reply, tool call and result arrives as SSE frames while the loop runs, rendered as a live trace under a typing answer bubble; context.emit threads the bus into any node (safe, optional, invisible to non-agent flows); 150/150 pytest + full smoke (real-LLM streaming section) + browser E2E with real traces; backend live at 1.36.0
