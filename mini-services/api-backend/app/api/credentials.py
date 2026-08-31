@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import Credential, Workflow
 from ..schemas import (
@@ -69,12 +70,13 @@ def _detail(cred: Credential, data: dict) -> CredentialDetail:
 
 
 @router.post("", response_model=CredentialOut, status_code=201)
-async def create_credential(body: CredentialCreate, db: AsyncSession = Depends(get_db)):
+async def create_credential(body: CredentialCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     cred = Credential(
         name=body.name,
         type=body.type,
         data_encrypted=encrypt_payload(body.data),
     )
+    cred.owner_id = user.id if user else None  # v37
     db.add(cred)
     await db.flush()
     await db.refresh(cred)
@@ -83,24 +85,25 @@ async def create_credential(body: CredentialCreate, db: AsyncSession = Depends(g
 
 
 @router.get("", response_model=list[CredentialOut])
-async def list_credentials(db: AsyncSession = Depends(get_db)):
+async def list_credentials(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Credential).order_by(Credential.created_at.desc()))).scalars().all()
-    return [_out(c, decrypt_payload(c.data_encrypted)) for c in rows]
+    return [_out(c, decrypt_payload(c.data_encrypted)) for c in scope_rows(rows, user)]  # v37
 
 
 @router.get("/{credential_id}", response_model=CredentialDetail)
-async def get_credential(credential_id: str, db: AsyncSession = Depends(get_db)):
+async def get_credential(credential_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Edit-time view: non-secret fields visible, secrets blanked - the client
     re-sends untouched secrets as ``__keep__`` and the vault substitutes them."""
     cred = await db.get(Credential, credential_id)
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
     return _detail(cred, decrypt_payload(cred.data_encrypted))
 
 
 @router.patch("/{credential_id}", response_model=CredentialOut)
 async def update_credential(
-    credential_id: str, body: CredentialUpdate, db: AsyncSession = Depends(get_db)
+    credential_id: str, body: CredentialUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
 ):
     """Rename and/or replace the secret payload. The payload is re-encrypted
     wholesale - the client sends the full field set (secrets are never
@@ -108,6 +111,7 @@ async def update_credential(
     cred = await db.get(Credential, credential_id)
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
 
     data = decrypt_payload(cred.data_encrypted)
     if body.name is not None:
@@ -134,6 +138,7 @@ async def update_credential(
 async def test_credential(
     credential_id: str,
     body: CredentialTestRequest | None = None,
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Run the live probe for this credential type. Network/auth failures are
@@ -142,6 +147,7 @@ async def test_credential(
     cred = await db.get(Credential, credential_id)
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
 
     data = decrypt_payload(cred.data_encrypted)
     try:
@@ -192,9 +198,11 @@ async def _usage(credential_id: str, db: AsyncSession) -> CredentialUsage:
 
 
 @router.get("/{credential_id}/usage", response_model=CredentialUsage)
-async def credential_usage(credential_id: str, db: AsyncSession = Depends(get_db)):
-    if await db.get(Credential, credential_id) is None:
+async def credential_usage(credential_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    cred = await db.get(Credential, credential_id)
+    if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
     return await _usage(credential_id, db)
 
 
@@ -202,11 +210,13 @@ async def credential_usage(credential_id: str, db: AsyncSession = Depends(get_db
 async def delete_credential(
     credential_id: str,
     force: bool = Query(default=False, description="Delete even when referenced by workflows"),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     cred = await db.get(Credential, credential_id)
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
     usage = await _usage(credential_id, db)
     if usage.workflow_count and not force:
         names = ", ".join(w.name for w in usage.workflows[:3])

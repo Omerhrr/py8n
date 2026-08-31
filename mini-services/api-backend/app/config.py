@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.36.0"
+    version: str = "1.37.0"
     debug: bool = True
 
     # ------------------------------------------------------------------
@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     # is generated once and persisted next to the database file.
     fernet_key: str = ""
     secret_key_file: Path = BASE_DIR / "data" / ".fernet.key"
+
+    # v37: multi-user auth. False = single-user legacy mode (anonymous works,
+    # tokens still scope). True = enforced mode (anonymous gets 401 on every
+    # build/admin surface; webhooks, chat and published runtimes stay open).
+    require_auth: bool = False
+    jwt_secret_file: Path = BASE_DIR / "data" / ".jwt.key"
+    token_ttl_seconds: int = 7 * 24 * 3600  # 7 days
 
     # Public base URL used to render shareable webhook URLs in the UI.
     # When empty the request's own base URL is used instead.

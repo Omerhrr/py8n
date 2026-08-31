@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, scope_rows
 from ..db import get_db
 from ..models import Workflow
 from ..schemas import GlobalScheduleEntryOut
@@ -22,8 +23,9 @@ _FAR_FUTURE = "9999-12-31T23:59:59+00:00"
 
 
 @router.get("", response_model=list[GlobalScheduleEntryOut])
-async def list_schedules(db: AsyncSession = Depends(get_db)):
+async def list_schedules(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Workflow).order_by(Workflow.name))).scalars().all()
+    rows = scope_rows(rows, user)  # v37
     entries: list[GlobalScheduleEntryOut] = []
     for wf in rows:
         for entry in schedule_entries_for_graph(wf.graph or {}):

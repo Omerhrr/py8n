@@ -2,7 +2,7 @@
 import {
   LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
-  LayoutGrid, Gauge, FileText, Bot,
+  LayoutGrid, Gauge, FileText, Bot, LogOut,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -10,6 +10,17 @@ import { usePalette } from '~/composables/usePalette'
 const route = useRoute()
 const { collapsed, mobileOpen, toggle, closeMobile } = useSidebar()
 const { openPalette } = usePalette()
+const auth = useAuthStore()
+
+onMounted(() => auth.boot())
+
+const userInitial = computed(() => (auth.user?.email || '?').slice(0, 1).toUpperCase())
+const userName = computed(() => auth.user?.name || auth.user?.email || '')
+
+async function signOut() {
+  await auth.logout()
+  if (auth.requireAuth) navigateTo('/login')
+}
 
 const nav = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard, match: ['/', '/workflows'] },
@@ -147,6 +158,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
     <!-- footer -->
     <div class="shrink-0 border-t border-zinc-800/80 p-3">
+      <!-- v37: signed-in user chip + logout -->
+      <div
+        v-if="auth.user"
+        class="mb-2 flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-2.5 py-2"
+        :class="collapsed && 'lg:justify-center lg:px-0'"
+        :title="userName"
+      >
+        <span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-orange-500/15 text-[10px] font-bold text-orange-400">{{ userInitial }}</span>
+        <span class="min-w-0 flex-1" :class="collapsed && 'lg:hidden'">
+          <span class="block truncate text-xs font-medium text-zinc-300">{{ userName }}</span>
+          <span class="block text-[10px] leading-tight text-zinc-600">{{ auth.user.role }}</span>
+        </span>
+        <button
+          class="shrink-0 rounded-lg p-1 text-zinc-500 transition hover:bg-zinc-800 hover:text-rose-400"
+          title="Sign out"
+          @click="signOut"
+        >
+          <LogOut class="h-3.5 w-3.5" />
+        </button>
+      </div>
       <!-- v14: quick-search trigger (Ctrl/Cmd+K) -->
       <button
         class="mb-2 flex w-full items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 text-xs text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
@@ -162,7 +193,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.36 · 37 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.37 · 37 node types</span>
       </div>
     </div>
   </aside>

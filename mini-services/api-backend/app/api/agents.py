@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, scope_rows
 from ..db import get_db
 from ..models import Workflow
 
@@ -51,7 +52,7 @@ def _summarize(wf: Workflow) -> dict[str, Any] | None:
 
 
 @router.get("")
-async def list_agents(db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
+async def list_agents(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)) -> list[dict[str, Any]]:
     rows = (await db.execute(select(Workflow).order_by(Workflow.updated_at.desc()))).scalars().all()
-    summarized = (_summarize(wf) for wf in rows)
+    summarized = (_summarize(wf) for wf in scope_rows(rows, user))  # v37
     return [a for a in summarized if a]

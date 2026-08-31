@@ -2363,6 +2363,41 @@ def main() -> None:
             req("DELETE", f"/workflows/{wf36['id']}")
     print("v36 live agent streaming OK")
 
+    # ------------------------------------------------------------- v37: auth + multi-user
+    status, health37 = req("GET", "/health")
+    ver37 = tuple(int(x) for x in health37.get("version", "0").split(".")[:2])
+    assert status == 200 and ver37 >= (1, 37), health37
+    tag37 = uuid.uuid4().hex[:6]
+    email37 = f"smoke37-{tag37}@py8n.test"
+    # register -> token -> me
+    status, reg = req("POST", "/auth/register", {"email": email37, "password": "smoke-password-1", "name": "Smoke 37"})
+    assert status == 201 and reg.get("token"), reg
+    tok37 = reg["token"]
+    status, me = req("GET", "/auth/me", headers={"Authorization": f"Bearer {tok37}"})
+    assert status == 200 and me["email"] == email37, me
+    role37 = me["role"]
+    # login roundtrip
+    status, login = req("POST", "/auth/login", {"email": email37, "password": "smoke-password-1"})
+    assert status == 200 and login.get("token"), login
+    # wrong password rejected
+    status, _ = req("POST", "/auth/login", {"email": email37, "password": "totally-wrong"})
+    assert status == 401, status
+    # bad token rejected
+    status, _ = req("GET", "/auth/me", headers={"Authorization": "Bearer forged.token.value"})
+    assert status == 401, status
+    # resource created with the token is stamped with the owner
+    status, wf37 = req("POST", "/workflows", {"name": f"SMOKE37 Owned {tag37}", "graph": {"nodes": [], "edges": []}},
+                       headers={"Authorization": f"Bearer {tok37}"})
+    assert status == 201, wf37
+    status, got = req("GET", f"/workflows/{wf37['id']}", headers={"Authorization": f"Bearer {login['token']}"})
+    assert status == 200 and got.get("owner_id") == me["id"], got
+    # status probe: open mode + users present
+    status, st37 = req("GET", "/auth/status")
+    assert status == 200 and st37.get("require_auth") in (True, False) and st37.get("has_users") is True, st37
+    print(f"auth roundtrip OK (role={role37}, owner stamp verified)")
+    req("DELETE", f"/workflows/{wf37['id']}", headers={"Authorization": f"Bearer {tok37}"})
+    print("v37 auth and multi-user OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")

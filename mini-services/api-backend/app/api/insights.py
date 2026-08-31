@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, visible_workflow_ids
 from ..db import get_db
 from ..models import ExecutionLog, Workflow
 
@@ -36,6 +37,7 @@ def _pct(part: int, whole: int) -> float:
 async def get_insights(
     days: int = Query(default=14, ge=1, le=90, description="Window length in days (incl. today)"),
     workflow_id: str | None = Query(default=None, description="Scope to a single workflow"),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Aggregate execution analytics over the trailing ``days``-day window.
@@ -50,6 +52,10 @@ async def get_insights(
     stmt = select(ExecutionLog).where(ExecutionLog.started_at >= since)
     if workflow_id:
         stmt = stmt.where(ExecutionLog.workflow_id == workflow_id)
+    if user is not None:
+        # v37: aggregate only over unclaimed or own workflows
+        visible = await visible_workflow_ids(db, user)
+        stmt = stmt.where(ExecutionLog.workflow_id.in_(visible))
     rows = (await db.execute(stmt)).scalars().all()
 
     # ------------------------------------------------------ summary

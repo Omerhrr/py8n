@@ -109,6 +109,20 @@ CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 5. Node failures mark downstream nodes skipped, other branches keep running,
    and the execution ends with status `error`.
 
+## Auth & multi-user (v37)
+
+Py8n ships in open single-user mode by default (anonymous works everywhere).
+Set `PY8N_REQUIRE_AUTH=true` to force sign-in:
+
+- `POST /api/v1/auth/register` creates accounts (PBKDF2-SHA256, 240k iters);
+  the FIRST account becomes `admin` and claims every pre-existing resource.
+- `POST /api/v1/auth/login` returns a 7-day HS256 JWT (secret auto-created at
+  `data/.jwt.key`); send it as `Authorization: Bearer <token>`.
+- Owned resources (workflows, datasets, folders, credentials, env vars, apps,
+  dashboards, executions) are scoped per user; other users' rows 404.
+- Machine + published surfaces stay token-free: webhooks, chat, published app
+  and dashboard runtimes, artifact content and `POST /datasets/query`.
+
 ## Tests
 
 ```bash

@@ -17,6 +17,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user
 from ..db import get_db
 from ..schemas import DatasetOut
 from ..services import datasets as ds_svc
@@ -79,6 +80,7 @@ async def to_dataset(
     file: UploadFile = File(...),
     name: str = Form(""),
     description: str = Form(""),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     filename, raw = await _read_upload(file)
@@ -105,6 +107,7 @@ async def to_dataset(
     row = await ds_svc.create_from_df(
         db, final_name, df, source="document", description=description
     )
+    row.owner_id = user.id if user else None  # v37
     await db.commit()
     await db.refresh(row)
 

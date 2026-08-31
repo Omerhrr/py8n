@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user
 from ..db import get_db
 from ..engine.runner import GraphValidationError, validate_graph_document
 from ..models import Workflow
@@ -37,7 +38,7 @@ class UseBody(BaseModel):
 
 
 @router.post("/{template_id}/use", response_model=WorkflowOut, status_code=201)
-async def use_template(template_id: str, body: UseBody | None = None, db: AsyncSession = Depends(get_db)):
+async def use_template(template_id: str, body: UseBody | None = None, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Instantiate a template as a real (inactive) workflow, optionally renamed."""
     t = get_template(template_id)
     if t is None:
@@ -54,6 +55,7 @@ async def use_template(template_id: str, body: UseBody | None = None, db: AsyncS
         graph=graph,
         is_active=False,
     )
+    wf.owner_id = user.id if user else None  # v37
     db.add(wf)
     await db.flush()
     await db.refresh(wf)

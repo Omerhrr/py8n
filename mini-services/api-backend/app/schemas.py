@@ -68,6 +68,7 @@ class WorkflowOut(BaseModel):
     tags: Tags = Field(default_factory=list)
     folder_id: str | None = None
     retention_days: int | None = None
+    owner_id: str | None = None  # v37: owning user (NULL = unclaimed)
     created_at: datetime
     updated_at: datetime
 

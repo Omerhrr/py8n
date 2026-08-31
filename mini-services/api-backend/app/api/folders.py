@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import Folder, Workflow
 from ..schemas import FolderCreate, FolderOut, FolderUpdate
@@ -96,9 +97,10 @@ async def _validate_parent(db: AsyncSession, parent_id: str | None) -> Folder | 
 
 
 @router.get("", response_model=list[FolderOut])
-async def list_folders(db: AsyncSession = Depends(get_db)):
+async def list_folders(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """All folders with direct + recursive workflow counts (dashboard chips)."""
     rows = (await db.execute(select(Folder).order_by(Folder.name))).scalars().all()
+    rows = scope_rows(rows, user)  # v37
     wf_counts: Counter = Counter()
     for wf_id in (await db.execute(select(Workflow.folder_id))).scalars():
         if wf_id:
@@ -107,16 +109,17 @@ async def list_folders(db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{folder_id}", response_model=FolderOut)
-async def get_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
+async def get_folder(folder_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Single folder detail with counts (edit dialogs / verification)."""
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
+    own_or_404(folder.owner_id, user)  # v37
     return await _folder_out(db, folder)
 
 
 @router.post("", response_model=FolderOut, status_code=201)
-async def create_folder(body: FolderCreate, db: AsyncSession = Depends(get_db)):
+async def create_folder(body: FolderCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     parent = await _validate_parent(db, body.parent_id)
     if parent is not None:
         # _ancestor_chain includes the parent itself → its length IS the
@@ -128,6 +131,7 @@ async def create_folder(body: FolderCreate, db: AsyncSession = Depends(get_db)):
                 detail=f"Folder nesting is limited to {MAX_FOLDER_DEPTH} levels",
             )
     folder = Folder(name=_clean_name(body.name), parent_id=parent.id if parent else None)
+    folder.owner_id = user.id if user else None  # v37
     db.add(folder)
     await db.commit()  # explicit - teardown commit races follow-up reads
     await db.refresh(folder)
@@ -135,10 +139,11 @@ async def create_folder(body: FolderCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.patch("/{folder_id}", response_model=FolderOut)
-async def update_folder(folder_id: str, body: FolderUpdate, db: AsyncSession = Depends(get_db)):
+async def update_folder(folder_id: str, body: FolderUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
+    own_or_404(folder.owner_id, user)  # v37
 
     if body.name is not None:
         folder.name = _clean_name(body.name)
@@ -182,10 +187,11 @@ async def update_folder(folder_id: str, body: FolderUpdate, db: AsyncSession = D
 
 
 @router.delete("/{folder_id}", status_code=204)
-async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_folder(folder_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     folder = await db.get(Folder, folder_id)
     if folder is None:
         raise HTTPException(status_code=404, detail="Folder not found")
+    own_or_404(folder.owner_id, user)  # v37
     children = (
         await db.execute(select(Folder.id).where(Folder.parent_id == folder_id))
     ).scalars().all()

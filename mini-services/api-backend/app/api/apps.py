@@ -38,6 +38,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import App, Dataset
 from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut
@@ -73,10 +74,11 @@ async def _out_with_dataset(db: AsyncSession, row: App) -> AppOut:
     return _out(row, await _dataset_for(db, row))
 
 
-async def _get_or_404(db: AsyncSession, ref: str) -> App:
+async def _get_or_404(db: AsyncSession, ref: str, user=None) -> App:
     row = await app_svc.get_app(db, ref)
     if row is None:
         raise HTTPException(status_code=404, detail="App not found")
+    own_or_404(row.owner_id, user)  # v37 (runtime endpoints stay public)
     return row
 
 
@@ -97,13 +99,13 @@ def _form_comp(row: App) -> dict | None:
 
 # ----------------------------------------------------------------- admin
 @router.get("", response_model=list[AppOut])
-async def list_apps(db: AsyncSession = Depends(get_db)):
+async def list_apps(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(App).order_by(App.updated_at.desc()))).scalars().all()
-    return [await _out_with_dataset(db, r) for r in rows]
+    return [await _out_with_dataset(db, r) for r in scope_rows(rows, user)]  # v37
 
 
 @router.post("", response_model=AppOut, status_code=201)
-async def create_app(body: AppCreate, db: AsyncSession = Depends(get_db)):
+async def create_app(body: AppCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     name = body.name.strip()
     if not ds_svc.NAME_RE.match(name):
         raise HTTPException(
@@ -138,6 +140,7 @@ async def create_app(body: AppCreate, db: AsyncSession = Depends(get_db)):
         config=config,
         status="draft",
     )
+    row.owner_id = user.id if user else None  # v37
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -145,13 +148,13 @@ async def create_app(body: AppCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{app_ref}", response_model=AppOut)
-async def get_app(app_ref: str, db: AsyncSession = Depends(get_db)):
-    return await _out_with_dataset(db, await _get_or_404(db, app_ref))
+async def get_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    return await _out_with_dataset(db, await _get_or_404(db, app_ref, user))
 
 
 @router.patch("/{app_ref}", response_model=AppOut)
-async def update_app(app_ref: str, body: AppUpdate, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def update_app(app_ref: str, body: AppUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     dataset = await _dataset_for(db, row)
 
     if body.name is not None:
@@ -189,15 +192,15 @@ async def update_app(app_ref: str, body: AppUpdate, db: AsyncSession = Depends(g
 
 
 @router.delete("/{app_ref}", status_code=204)
-async def delete_app(app_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def delete_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     await db.delete(row)
     await db.commit()
 
 
 @router.post("/{app_ref}/generate", response_model=AppOut)
-async def regenerate_app(app_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def regenerate_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset first")
@@ -212,8 +215,8 @@ async def regenerate_app(app_ref: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{app_ref}/publish", response_model=AppOut)
-async def publish_app(app_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def publish_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset before publishing")
@@ -229,8 +232,8 @@ async def publish_app(app_ref: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{app_ref}/unpublish", response_model=AppOut)
-async def unpublish_app(app_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def unpublish_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     row.status = "draft"
     db.add(row)
     await db.commit()
@@ -271,8 +274,8 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
 
 # ----------------------------------------------------------------- rules (v30)
 @router.get("/{app_ref}/rules")
-async def get_rules(app_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, app_ref)
+async def get_rules(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
     return {
         "rules": (row.config or {}).get("rules", []),
         "ops": sorted(rule_svc.RULE_OPS),
@@ -282,9 +285,9 @@ async def get_rules(app_ref: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/{app_ref}/rules")
-async def put_rules(app_ref: str, body: RulesPut, db: AsyncSession = Depends(get_db)):
+async def put_rules(app_ref: str, body: RulesPut, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Replace all rules - allowed on PUBLISHED apps too (layout stays locked)."""
-    row = await _get_or_404(db, app_ref)
+    row = await _get_or_404(db, app_ref, user)
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset before adding rules")
@@ -300,9 +303,9 @@ async def put_rules(app_ref: str, body: RulesPut, db: AsyncSession = Depends(get
 
 
 @router.post("/{app_ref}/rules/test")
-async def test_rules(app_ref: str, body: RulesTestIn, db: AsyncSession = Depends(get_db)):
+async def test_rules(app_ref: str, body: RulesTestIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Dry-run a sample record - which rules fire, what they would do."""
-    row = await _get_or_404(db, app_ref)
+    row = await _get_or_404(db, app_ref, user)
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset before testing rules")

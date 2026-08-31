@@ -20,9 +20,25 @@ export function useApi() {
   }
 
   async function request<T = any>(path: string, opts: any = {}): Promise<T> {
+    // v37: ride the auth token on every call (no-op when logged out) and
+    // bounce to /login when an enforced backend rejects a stale token.
+    const auth = useAuthStore()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...((opts.headers as Record<string, string>) || {}),
+    }
+    if (auth.token) headers.Authorization = `Bearer ${auth.token}`
     return await $fetch<T>(httpUrl(path), {
       ...opts,
-      headers: { 'Content-Type': 'application/json', ...(opts.headers || {}) },
+      headers,
+      onResponseError({ response }) {
+        if (response.status === 401 && auth.requireAuth) {
+          auth.clearSession()
+          if (import.meta.client && !location.pathname.startsWith('/login')) {
+            navigateTo('/login')
+          }
+        }
+      },
     })
   }
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
@@ -58,6 +58,7 @@ app.add_middleware(
 
 # ---------------------------------------------------------------- routers
 from .api.agents import router as agents_router  # noqa: E402
+from .api.auth import router as auth_router  # noqa: E402 (v37)
 from .api.credentials import router as credentials_router  # noqa: E402
 from .api.apps import router as apps_router  # noqa: E402
 from .api.artifacts import router as artifacts_router  # noqa: E402
@@ -78,24 +79,35 @@ from .api.workflows import router as workflows_router  # noqa: E402
 from .api.ws import router as ws_router  # noqa: E402
 
 API = "/api/v1"
-app.include_router(workflows_router, prefix=API)
-app.include_router(agents_router, prefix=API)  # v34
-app.include_router(executions_router, prefix=API)
-app.include_router(schedules_router, prefix=API)
+
+# v37: enforced-mode gate. Build/admin surfaces require a Bearer token when
+# PY8N_REQUIRE_AUTH=true; machine + published-runtime surfaces (webhooks,
+# chat, app/dashboard runtimes, artifact content, embedded dataset SQL) stay
+# reachable - see auth.is_public_path. In the default open mode this is a
+# no-op (anonymous still works, tokens just scope what they touch).
+from .auth import enforce_auth  # noqa: E402
+
+ENFORCED = [Depends(enforce_auth)]
+
+app.include_router(workflows_router, prefix=API, dependencies=ENFORCED)
+app.include_router(agents_router, prefix=API, dependencies=ENFORCED)  # v34
+app.include_router(executions_router, prefix=API, dependencies=ENFORCED)
+app.include_router(schedules_router, prefix=API, dependencies=ENFORCED)
 app.include_router(webhooks_router, prefix=API)
 app.include_router(chat_router, prefix=API)
-app.include_router(artifacts_router, prefix=API)
-app.include_router(datasets_router, prefix=API)
-app.include_router(apps_router, prefix=API)
-app.include_router(dashboards_router, prefix=API)
-app.include_router(documents_router, prefix=API)
-app.include_router(credentials_router, prefix=API)
-app.include_router(env_vars_router, prefix=API)
-app.include_router(folders_router, prefix=API)
-app.include_router(insights_router, prefix=API)
-app.include_router(settings_router, prefix=API)
-app.include_router(node_defs_router, prefix=API)
-app.include_router(templates_router, prefix=API)
+app.include_router(auth_router, prefix=API)  # v37: register/login/me/status
+app.include_router(artifacts_router, prefix=API, dependencies=ENFORCED)
+app.include_router(datasets_router, prefix=API, dependencies=ENFORCED)
+app.include_router(apps_router, prefix=API, dependencies=ENFORCED)
+app.include_router(dashboards_router, prefix=API, dependencies=ENFORCED)
+app.include_router(documents_router, prefix=API, dependencies=ENFORCED)
+app.include_router(credentials_router, prefix=API, dependencies=ENFORCED)
+app.include_router(env_vars_router, prefix=API, dependencies=ENFORCED)
+app.include_router(folders_router, prefix=API, dependencies=ENFORCED)
+app.include_router(insights_router, prefix=API, dependencies=ENFORCED)
+app.include_router(settings_router, prefix=API, dependencies=ENFORCED)
+app.include_router(node_defs_router, prefix=API, dependencies=ENFORCED)
+app.include_router(templates_router, prefix=API, dependencies=ENFORCED)
 app.include_router(ws_router)  # /ws/...
 
 
@@ -106,6 +118,7 @@ async def health():
         "app": settings.app_name,
         "version": settings.version,
         "execution_mode": settings.execution_mode,
+        "require_auth": settings.require_auth,
     }
 
 

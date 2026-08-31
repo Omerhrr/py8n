@@ -44,6 +44,9 @@ services:
       PY8N_REDIS_URL: redis://redis:6379/0
       PY8N_LLM_BRIDGE_URL: http://llm-bridge:3010
       PY8N_PUBLIC_BASE_URL: http://localhost:8025
+      # v37: flip to "true" to force sign-in (first registered account becomes
+      # admin and claims all pre-existing resources)
+      PY8N_REQUIRE_AUTH: "false"
     depends_on:
       postgres:
         condition: service_healthy

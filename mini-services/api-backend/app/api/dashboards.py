@@ -29,6 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import Dashboard, Dataset
 from ..schemas import DashboardCreate, DashboardOut, DashboardUpdate
@@ -51,10 +52,11 @@ def _out(row: Dashboard) -> DashboardOut:
     )
 
 
-async def _get_or_404(db: AsyncSession, ref: str) -> Dashboard:
+async def _get_or_404(db: AsyncSession, ref: str, user=None) -> Dashboard:
     row = await db_svc.get_dashboard(db, ref)
     if row is None:
         raise HTTPException(status_code=404, detail="Dashboard not found")
+    own_or_404(row.owner_id, user)  # v37 (runtime stays public)
     return row
 
 
@@ -122,13 +124,13 @@ async def _compute_payload(row: Dashboard, db: AsyncSession) -> dict:
 
 # ----------------------------------------------------------------- admin
 @router.get("", response_model=list[DashboardOut])
-async def list_dashboards(db: AsyncSession = Depends(get_db)):
+async def list_dashboards(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Dashboard).order_by(Dashboard.updated_at.desc()))).scalars().all()
-    return [_out(r) for r in rows]
+    return [_out(r) for r in scope_rows(rows, user)]  # v37
 
 
 @router.post("", response_model=DashboardOut, status_code=201)
-async def create_dashboard(body: DashboardCreate, db: AsyncSession = Depends(get_db)):
+async def create_dashboard(body: DashboardCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     name = body.name.strip()
     if not ds_svc.NAME_RE.match(name):
         raise HTTPException(
@@ -157,6 +159,7 @@ async def create_dashboard(body: DashboardCreate, db: AsyncSession = Depends(get
         config=config,
         status="draft",
     )
+    row.owner_id = user.id if user else None  # v37
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -164,13 +167,13 @@ async def create_dashboard(body: DashboardCreate, db: AsyncSession = Depends(get
 
 
 @router.get("/{dash_ref}", response_model=DashboardOut)
-async def get_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
-    return _out(await _get_or_404(db, dash_ref))
+async def get_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    return _out(await _get_or_404(db, dash_ref, user))
 
 
 @router.patch("/{dash_ref}", response_model=DashboardOut)
-async def update_dashboard(dash_ref: str, body: DashboardUpdate, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dash_ref)
+async def update_dashboard(dash_ref: str, body: DashboardUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dash_ref, user)
     if body.name is not None:
         name = body.name.strip()
         if not ds_svc.NAME_RE.match(name):
@@ -194,16 +197,16 @@ async def update_dashboard(dash_ref: str, body: DashboardUpdate, db: AsyncSessio
 
 
 @router.delete("/{dash_ref}", status_code=204)
-async def delete_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dash_ref)
+async def delete_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dash_ref, user)
     await db.delete(row)
     await db.commit()
 
 
 @router.post("/{dash_ref}/generate", response_model=DashboardOut)
-async def regenerate_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
+async def regenerate_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Re-generate the layout from the datasets the current components reference."""
-    row = await _get_or_404(db, dash_ref)
+    row = await _get_or_404(db, dash_ref, user)
     if row.status == "published":
         raise HTTPException(status_code=409, detail="Unpublish before regenerating")
     refs = _refs((row.config or {}).get("components", []))
@@ -218,9 +221,9 @@ async def regenerate_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/{dash_ref}/preview")
-async def preview_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
+async def preview_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Compute the CURRENT config - the builder's live data preview (drafts OK)."""
-    row = await _get_or_404(db, dash_ref)
+    row = await _get_or_404(db, dash_ref, user)
     return {
         "dashboard": {"name": row.name, "slug": row.slug, "status": row.status},
         "components": await _compute_payload(row, db),
@@ -228,8 +231,8 @@ async def preview_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{dash_ref}/publish", response_model=DashboardOut)
-async def publish_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dash_ref)
+async def publish_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dash_ref, user)
     components = (row.config or {}).get("components", [])
     datasets = await _collect_datasets(db, _refs(components))
     await _validate_or_400(row.config or {}, datasets)
@@ -241,8 +244,8 @@ async def publish_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{dash_ref}/unpublish", response_model=DashboardOut)
-async def unpublish_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dash_ref)
+async def unpublish_dashboard(dash_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dash_ref, user)
     row.status = "draft"
     db.add(row)
     await db.commit()

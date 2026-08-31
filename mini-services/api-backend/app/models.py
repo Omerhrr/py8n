@@ -27,12 +27,31 @@ def _now() -> datetime:
 JSONVariant = JSON().with_variant(JSONB(), "postgresql")
 
 
+class User(Base):
+    """Platform account (v37) - the unit of authentication and ownership.
+
+    The first registered user becomes ``admin`` and claims every unclaimed
+    resource row (bootstrap story for installs that flip auth on later).
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(200), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), default="")
+    password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), default="member", index=True)  # admin|member
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Workflow(Base):
     """A saved automation workflow (graph document + metadata)."""
 
     __tablename__ = "workflows"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    # v37: owning user (NULL = unclaimed / pre-auth era, visible to everyone)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     # The visual graph document: {"nodes": [...], "edges": [...]}
@@ -144,6 +163,7 @@ class Credential(Base):
     __tablename__ = "credentials"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     type: Mapped[str] = mapped_column(String(60), default="generic")  # header_auth|openai_compatible|generic
     data_encrypted: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet token
@@ -161,6 +181,7 @@ class Folder(Base):
     __tablename__ = "folders"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     name: Mapped[str] = mapped_column(String(120), nullable=False)
     parent_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
@@ -178,6 +199,7 @@ class EnvVariable(Base):
     __tablename__ = "env_variables"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
     value_encrypted: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet token
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -226,6 +248,7 @@ class Dataset(Base):
     __tablename__ = "datasets"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     file_path: Mapped[str] = mapped_column(String(200), default="")  # relative filename
@@ -271,6 +294,7 @@ class App(Base):
     __tablename__ = "apps"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
     slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")
@@ -303,6 +327,7 @@ class Dashboard(Base):
     __tablename__ = "dashboards"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37
     name: Mapped[str] = mapped_column(String(120), nullable=False, unique=True, index=True)
     slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
     description: Mapped[str] = mapped_column(Text, default="")

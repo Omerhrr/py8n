@@ -126,14 +126,14 @@ async def _collect_stream(client: httpx.AsyncClient, workflow_id: str, message: 
 
 # ------------------------------------------------------------------ test 1
 def test_v36_health_pin():
-    """Strict version pin lives in the latest wave only (v36 convention)."""
+    """Relaxed floor since v37 (strict pin moved to the latest wave)."""
 
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
             assert res.status_code == 200, res.text
             body = res.json()
-            assert body["app"] == "Py8n" and body["version"] == "1.36.0", body
+            assert body["app"] == "Py8n" and body["version"] >= "1.36.0", body
 
     try:
         asyncio.run(_go())

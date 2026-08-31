@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import EnvVariable
 from ..schemas import EnvVariableCreate, EnvVariableOut, EnvVariableUpdate
@@ -56,21 +57,22 @@ def _out(row: EnvVariable, include_value: bool) -> EnvVariableOut:
     )
 
 
-async def _get_row(db: AsyncSession, env_id: str) -> EnvVariable:
+async def _get_row(db: AsyncSession, env_id: str, user=None) -> EnvVariable:
     row = await db.get(EnvVariable, env_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Environment variable not found")
+    own_or_404(row.owner_id, user)  # v37
     return row
 
 
 @router.get("", response_model=list[EnvVariableOut])
-async def list_env_vars(db: AsyncSession = Depends(get_db)):
+async def list_env_vars(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(EnvVariable).order_by(EnvVariable.key))).scalars().all()
-    return [_out(r, include_value=True) for r in rows]
+    return [_out(r, include_value=True) for r in scope_rows(rows, user)]  # v37
 
 
 @router.post("", response_model=EnvVariableOut, status_code=201)
-async def create_env_var(body: EnvVariableCreate, db: AsyncSession = Depends(get_db)):
+async def create_env_var(body: EnvVariableCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     key = _normalize_key(body.key)
     if not KEY_RE.match(key):
         raise HTTPException(
@@ -90,6 +92,7 @@ async def create_env_var(body: EnvVariableCreate, db: AsyncSession = Depends(get
         is_secret=body.is_secret,
         description=body.description.strip(),
     )
+    row.owner_id = user.id if user else None  # v37
     db.add(row)
     await db.flush()
     await db.refresh(row)
@@ -98,14 +101,14 @@ async def create_env_var(body: EnvVariableCreate, db: AsyncSession = Depends(get
 
 
 @router.get("/{env_id}", response_model=EnvVariableOut)
-async def get_env_var(env_id: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_row(db, env_id)
+async def get_env_var(env_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_row(db, env_id, user)
     return _out(row, include_value=True)
 
 
 @router.put("/{env_id}", response_model=EnvVariableOut)
-async def update_env_var(env_id: str, body: EnvVariableUpdate, db: AsyncSession = Depends(get_db)):
-    row = await _get_row(db, env_id)
+async def update_env_var(env_id: str, body: EnvVariableUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_row(db, env_id, user)
     if body.value is not None and body.value != KEEP_MARKER:
         row.value_encrypted = encrypt_value(body.value)
     if body.is_secret is not None:
@@ -119,7 +122,7 @@ async def update_env_var(env_id: str, body: EnvVariableUpdate, db: AsyncSession 
 
 
 @router.delete("/{env_id}", status_code=204)
-async def delete_env_var(env_id: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_row(db, env_id)
+async def delete_env_var(env_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_row(db, env_id, user)
     await db.delete(row)
     await db.commit()  # explicit: teardown commit runs after the response

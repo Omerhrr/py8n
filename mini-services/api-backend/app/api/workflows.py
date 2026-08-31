@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..engine.context import ExecutionContext
 from ..engine.nodes.base import NodeExecutionError
@@ -74,9 +75,11 @@ async def list_workflows(
     tag: str | None = Query(default=None, description="Filter: workflows carrying this tag"),
     search: str | None = Query(default=None, description="Case-insensitive substring on name/description"),
     folder_id: str | None = Query(default=None, description="Filter: folder id, or 'none' for unfiled"),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     rows = (await db.execute(select(Workflow).order_by(Workflow.updated_at.desc()))).scalars().all()
+    rows = scope_rows(rows, user)  # v37: authed callers see unclaimed + their own
     # Tag / search / folder filters run in Python - the gallery is small and
     # the JSON columns keep this portable across SQLite and PostgreSQL.
     if tag:
@@ -177,7 +180,7 @@ async def _validate_folder(db: AsyncSession, folder_id: str | None) -> None:
 
 
 @router.post("", response_model=WorkflowOut, status_code=201)
-async def create_workflow(body: WorkflowCreate, db: AsyncSession = Depends(get_db)):
+async def create_workflow(body: WorkflowCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     try:
         validate_graph_document(body.graph or {"nodes": [], "edges": []})
     except (GraphValidationError, ValueError) as exc:
@@ -191,6 +194,7 @@ async def create_workflow(body: WorkflowCreate, db: AsyncSession = Depends(get_d
         error_workflow_id=body.error_workflow_id,
         tags=body.tags,
         folder_id=body.folder_id,
+        owner_id=user.id if user else None,  # v37
     )
     db.add(wf)
     await db.flush()
@@ -207,18 +211,20 @@ async def create_workflow(body: WorkflowCreate, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{workflow_id}", response_model=WorkflowOut)
-async def get_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def get_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     return wf
 
 
 @router.put("/{workflow_id}", response_model=WorkflowOut)
-async def update_workflow(workflow_id: str, body: WorkflowUpdate, db: AsyncSession = Depends(get_db)):
+async def update_workflow(workflow_id: str, body: WorkflowUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     if body.graph is not None:
         try:
             wf.graph = validate_graph_document(body.graph).model_dump()
@@ -257,30 +263,33 @@ async def update_workflow(workflow_id: str, body: WorkflowUpdate, db: AsyncSessi
 
 
 @router.delete("/{workflow_id}", status_code=204)
-async def delete_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     await db.delete(wf)
     await db.commit()  # avoid teardown-commit race on follow-up requests
     await resync_workflow_jobs(workflow_id)
 
 
 @router.get("/{workflow_id}/schedule", response_model=WorkflowScheduleOut)
-async def get_workflow_schedule(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def get_workflow_schedule(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Schedule introspection: per-node summary + upcoming fire-time previews."""
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     return _schedule_out(wf)
 
 
 @router.post("/{workflow_id}/activate", response_model=WorkflowScheduleOut)
-async def activate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def activate_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Enable triggers (schedule firing + webhook reception) with pre-flight checks."""
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     entries = schedule_entries_for_graph(wf.graph or {})
     bad = next((e for e in entries if e["error"]), None)
     if bad is not None:
@@ -295,11 +304,12 @@ async def activate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)
 
 
 @router.post("/{workflow_id}/deactivate", response_model=WorkflowScheduleOut)
-async def deactivate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def deactivate_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Pause all triggers (schedule jobs removed, webhook returns 409)."""
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     wf.is_active = False
     await db.commit()  # avoid teardown-commit race on follow-up requests
     await resync_workflow_jobs(workflow_id)
@@ -307,10 +317,11 @@ async def deactivate_workflow(workflow_id: str, db: AsyncSession = Depends(get_d
 
 
 @router.post("/{workflow_id}/run", response_model=RunAccepted)
-async def run_workflow(workflow_id: str, body: RunRequest | None = None, db: AsyncSession = Depends(get_db)):
+async def run_workflow(workflow_id: str, body: RunRequest | None = None, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     body = body or RunRequest()
     try:
         execution_id = await dispatch_execution(
@@ -329,6 +340,7 @@ async def test_node_step(
     workflow_id: str,
     node_id: str,
     body: NodeTestRequest | None = None,
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Run ONE node in isolation with ad-hoc input (v17 test step).
@@ -340,6 +352,7 @@ async def test_node_step(
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     try:
         spec = validate_graph_document(wf.graph or {"nodes": [], "edges": []})
     except (GraphValidationError, ValueError) as exc:
@@ -413,10 +426,11 @@ async def test_node_step(
 
 
 @router.get("/{workflow_id}/webhook-url", response_model=dict)
-async def webhook_url(workflow_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def webhook_url(workflow_id: str, request: Request, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     from ..services.webhook_info import public_webhook_url
 
     nodes = wf.webhook_nodes()
@@ -432,10 +446,11 @@ async def webhook_url(workflow_id: str, request: Request, db: AsyncSession = Dep
 # Export / import / duplicate (portability + sharing between instances)
 # ----------------------------------------------------------------------
 @router.get("/{workflow_id}/export", response_model=WorkflowExportDoc)
-async def export_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def export_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     return WorkflowExportDoc(
         name=wf.name,
         description=wf.description or "",
@@ -444,7 +459,7 @@ async def export_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/import", response_model=WorkflowOut, status_code=201)
-async def import_workflow(body: WorkflowImportRequest, db: AsyncSession = Depends(get_db)):
+async def import_workflow(body: WorkflowImportRequest, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     doc = body.data
     if doc is not None:
         name, description, graph = doc.name, doc.description, doc.graph
@@ -463,6 +478,7 @@ async def import_workflow(body: WorkflowImportRequest, db: AsyncSession = Depend
     # Fresh identity: strip stale node ids collisions is unnecessary (ids are
     # graph-local), but always start inactive so imports never auto-fire.
     wf = Workflow(name=str(name).strip(), description=description, graph=graph, is_active=False)
+    wf.owner_id = user.id if user else None  # v37
     db.add(wf)
     await db.flush()
     await db.refresh(wf)
@@ -473,10 +489,11 @@ async def import_workflow(body: WorkflowImportRequest, db: AsyncSession = Depend
 
 
 @router.post("/{workflow_id}/duplicate", response_model=WorkflowOut, status_code=201)
-async def duplicate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def duplicate_workflow(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     copy = Workflow(
         name=f"{wf.name} (copy)"[:200],
         description=wf.description or "",
@@ -485,6 +502,7 @@ async def duplicate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db
         tags=list(wf.tags or []),
         folder_id=wf.folder_id,  # duplicates stay organized next to the original
     )
+    copy.owner_id = user.id if user else None  # v37
     db.add(copy)
     await db.flush()
     await db.refresh(copy)
@@ -498,10 +516,11 @@ async def duplicate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db
 # Version history (v13) - bounded snapshot list + restore
 # ----------------------------------------------------------------------
 @router.get("/{workflow_id}/versions")
-async def list_versions(workflow_id: str, db: AsyncSession = Depends(get_db)):
+async def list_versions(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     rows = (
         await db.execute(
             select(
@@ -535,7 +554,11 @@ async def list_versions(workflow_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{workflow_id}/versions/{version}")
-async def get_version(workflow_id: str, version: int, db: AsyncSession = Depends(get_db)):
+async def get_version(workflow_id: str, version: int, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    wf = await db.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37
     snap = (
         await db.execute(
             select(WorkflowVersion).where(
@@ -559,7 +582,7 @@ async def get_version(workflow_id: str, version: int, db: AsyncSession = Depends
 
 
 @router.post("/{workflow_id}/versions/{version}/restore", response_model=WorkflowOut)
-async def restore_version(workflow_id: str, version: int, db: AsyncSession = Depends(get_db)):
+async def restore_version(workflow_id: str, version: int, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Roll the workflow back to a snapshot's content (name/description/graph).
 
     The restore itself lands as a NEW version on top of the history - nothing
@@ -569,6 +592,7 @@ async def restore_version(workflow_id: str, version: int, db: AsyncSession = Dep
     wf = await db.get(Workflow, workflow_id)
     if wf is None:
         raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
     snap = (
         await db.execute(
             select(WorkflowVersion).where(

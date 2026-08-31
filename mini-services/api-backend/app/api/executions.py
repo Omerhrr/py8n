@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404
 from ..db import get_db
 from ..models import ExecutionLog, Workflow
 from ..schemas import ResumeRequest
@@ -18,11 +19,18 @@ from ..services.executor import (  # noqa: F401 (rerun + cancel)
 router = APIRouter(prefix="/executions", tags=["executions"])
 
 
+async def _own_workflow_or_404(db: AsyncSession, workflow_id: str, user) -> None:
+    """v37: an execution of another user's workflow looks nonexistent."""
+    wf = await db.get(Workflow, workflow_id)
+    own_or_404(wf.owner_id if wf else None, user)
+
+
 @router.get("")
 async def list_executions(
     workflow_id: str | None = Query(default=None),
     status: str | None = Query(default=None, description="success | error | running | waiting | cancelled"),
     limit: int = Query(default=25, ge=1, le=100),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     stmt = select(ExecutionLog).order_by(ExecutionLog.started_at.desc()).limit(limit)
@@ -30,6 +38,12 @@ async def list_executions(
         stmt = stmt.where(ExecutionLog.workflow_id == workflow_id)
     if status:
         stmt = stmt.where(ExecutionLog.status == status)
+    if user is not None:
+        # v37: scope to executions of unclaimed or own workflows
+        from ..auth import visible_workflow_ids
+
+        visible = await visible_workflow_ids(db, user)
+        stmt = stmt.where(ExecutionLog.workflow_id.in_(visible))
     rows = (await db.execute(stmt)).scalars().all()
 
     # Batch-resolve workflow names (single extra query, avoids N+1).
@@ -58,10 +72,11 @@ async def list_executions(
 
 
 @router.get("/{execution_id}")
-async def get_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+async def get_execution(execution_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     r = await db.get(ExecutionLog, execution_id)
     if r is None:
         raise HTTPException(status_code=404, detail="Execution not found")
+    await _own_workflow_or_404(db, r.workflow_id, user)  # v37
     body = {
         "id": r.id,
         "workflow_id": r.workflow_id,
@@ -120,7 +135,7 @@ async def cancel_execution_endpoint(execution_id: str):
 
 
 @router.post("/{execution_id}/rerun", status_code=202)
-async def rerun_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+async def rerun_execution(execution_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Re-execute the workflow with the recorded trigger payload (n8n-style retry).
 
     Runs against the *current* workflow graph; returns the new execution id.
@@ -131,6 +146,7 @@ async def rerun_execution(execution_id: str, db: AsyncSession = Depends(get_db))
     workflow = await db.get(Workflow, src.workflow_id)
     if workflow is None:
         raise HTTPException(status_code=404, detail="Source workflow no longer exists")
+    own_or_404(workflow.owner_id, user)  # v37
     new_id = await dispatch_inline(
         src.workflow_id,
         trigger_type=src.trigger_type or "manual",
@@ -140,10 +156,11 @@ async def rerun_execution(execution_id: str, db: AsyncSession = Depends(get_db))
 
 
 @router.delete("/{execution_id}")
-async def delete_execution(execution_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_execution(execution_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     r = await db.get(ExecutionLog, execution_id)
     if r is None:
         raise HTTPException(status_code=404, detail="Execution not found")
+    await _own_workflow_or_404(db, r.workflow_id, user)  # v37
     await db.delete(r)
     # Commit inside the endpoint: the get_db dependency's teardown commit runs
     # AFTER the response is sent, which would let an immediate follow-up GET

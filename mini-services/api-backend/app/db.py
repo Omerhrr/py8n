@@ -51,5 +51,10 @@ async def init_db() -> None:
                 sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN folder_id VARCHAR(36)"))
             if "retention_days" not in cols:  # v20
                 sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN retention_days INTEGER"))
+            # v37: ownership on every user-facing resource (NULL = unclaimed)
+            for table in ("workflows", "datasets", "folders", "credentials", "env_variables", "apps", "dashboards"):
+                cols = {c["name"] for c in insp.get_columns(table)}
+                if "owner_id" not in cols:
+                    sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN owner_id VARCHAR(36)"))
 
         await conn.run_sync(_add_missing_columns)

@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import Dataset
 from ..schemas import (
@@ -57,10 +58,11 @@ def _out(row: Dataset) -> DatasetOut:
     )
 
 
-async def _get_or_404(db: AsyncSession, dataset_id: str) -> Dataset:
+async def _get_or_404(db: AsyncSession, dataset_id: str, user=None) -> Dataset:
     row = await ds_svc.get_dataset(db, dataset_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Dataset not found")
+    own_or_404(row.owner_id, user)  # v37
     return row
 
 
@@ -98,13 +100,13 @@ def _parse_upload(filename: str, raw: bytes) -> pd.DataFrame:
 
 
 @router.get("", response_model=list[DatasetOut])
-async def list_datasets(db: AsyncSession = Depends(get_db)):
+async def list_datasets(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Dataset).order_by(Dataset.updated_at.desc()))).scalars().all()
-    return [_out(r) for r in rows]
+    return [_out(r) for r in scope_rows(rows, user)]  # v37
 
 
 @router.post("", response_model=DatasetOut, status_code=201)
-async def create_dataset(body: DatasetCreate, db: AsyncSession = Depends(get_db)):
+async def create_dataset(body: DatasetCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     name = body.name.strip()
     if not ds_svc.NAME_RE.match(name):
         raise HTTPException(
@@ -115,6 +117,7 @@ async def create_dataset(body: DatasetCreate, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=409, detail=f"Dataset {name!r} already exists")
     df = ds_svc.normalize_df(pd.DataFrame(body.rows)) if body.rows else pd.DataFrame()
     row = await ds_svc.create_from_df(db, name, df, source="api", description=body.description)
+    row.owner_id = user.id if user else None  # v37
     await db.commit()
     await db.refresh(row)
     return _out(row)
@@ -125,6 +128,7 @@ async def upload_dataset(
     file: UploadFile = File(...),
     name: str = Form(...),
     description: str = Form(""),
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     name = (name or "").strip() or (file.filename or "").rsplit(".", 1)[0].strip()
@@ -139,6 +143,7 @@ async def upload_dataset(
         raise HTTPException(status_code=413, detail="File too large (max 25 MB)")
     df = _parse_upload(file.filename or name, raw)
     row = await ds_svc.create_from_df(db, name, df, source="upload", description=description)
+    row.owner_id = user.id if user else None  # v37
     await db.commit()
     await db.refresh(row)
     return _out(row)
@@ -153,8 +158,8 @@ async def query_datasets(body: DatasetQueryIn, db: AsyncSession = Depends(get_db
 
 
 @router.get("/{dataset_id}", response_model=DatasetOut)
-async def get_dataset(dataset_id: str, db: AsyncSession = Depends(get_db)):
-    return _out(await _get_or_404(db, dataset_id))
+async def get_dataset(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    return _out(await _get_or_404(db, dataset_id, user))
 
 
 @router.get("/{dataset_id}/rows")
@@ -162,9 +167,10 @@ async def get_rows(
     dataset_id: str,
     offset: int = 0,
     limit: int = 100,
+    user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
-    row = await _get_or_404(db, dataset_id)
+    row = await _get_or_404(db, dataset_id, user)
     offset = max(0, offset)
     limit = min(max(1, limit), 1000)
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(row.id))
@@ -179,15 +185,15 @@ async def get_rows(
 
 
 @router.get("/{dataset_id}/profile")
-async def get_profile(dataset_id: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dataset_id)
+async def get_profile(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(row.id))
     return ds_svc.profile_df(df)
 
 
 @router.post("/{dataset_id}/rows", response_model=DatasetOut)
-async def append_rows(dataset_id: str, body: DatasetRowsIn, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dataset_id)
+async def append_rows(dataset_id: str, body: DatasetRowsIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
     fresh = ds_svc.normalize_df(pd.DataFrame(body.rows))
     await ds_svc.append_rows(row, fresh.to_dict(orient="records"))
     db.add(row)
@@ -197,8 +203,8 @@ async def append_rows(dataset_id: str, body: DatasetRowsIn, db: AsyncSession = D
 
 
 @router.put("/{dataset_id}", response_model=DatasetOut)
-async def update_dataset(dataset_id: str, body: DatasetUpdate, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dataset_id)
+async def update_dataset(dataset_id: str, body: DatasetUpdate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
     if body.name is not None:
         name = body.name.strip()
         if not ds_svc.NAME_RE.match(name):
@@ -215,8 +221,8 @@ async def update_dataset(dataset_id: str, body: DatasetUpdate, db: AsyncSession 
 
 
 @router.delete("/{dataset_id}", status_code=204)
-async def delete_dataset(dataset_id: str, db: AsyncSession = Depends(get_db)):
-    row = await _get_or_404(db, dataset_id)
+async def delete_dataset(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
     ds_svc.delete_file(row)
     await db.delete(row)
     await db.commit()
