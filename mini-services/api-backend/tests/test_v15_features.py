@@ -1,7 +1,7 @@
 """V15 feature tests: global environment variables ({{ env.KEY }}).
 
 Covers: env-vars CRUD API (key normalization to UPPER_SNAKE_CASE, duplicate
-409 case-insensitive, invalid-key 400, secret masking — values never echoed,
+409 case-insensitive, invalid-key 400, secret masking - values never echoed,
 "__keep__" write-only semantics, is_secret flips, 404s) and the engine
 integration (a run resolves {{ env.* }} in node parameters, including the
 default filter for unknown keys, while the persisted context snapshot never

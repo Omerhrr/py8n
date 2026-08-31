@@ -53,7 +53,7 @@ def main():
         assert out["base"] == "https://api.e2e-demo.dev/v1", out
         assert out["flag"] == "on", out
         assert out["tok_len"] == len("s3cr3t-e2e-42"), out
-        print(f"E2E env resolution OK — base={out['base']!r}, flag={out['flag']!r}, "
+        print(f"E2E env resolution OK - base={out['base']!r}, flag={out['flag']!r}, "
               f"secret referenced without ever being exposed (length {out['tok_len']})")
         req("DELETE", f"/env-vars/{flag['id']}")
     finally:

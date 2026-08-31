@@ -29,13 +29,13 @@ async def lifespan(app: FastAPI):
         await session.commit()
     start_scheduler()
     await resync_all_jobs()  # register schedule_trigger jobs from saved workflows
-    # v19: execution data retention — best-effort purge at boot + daily job
+    # v19: execution data retention - best-effort purge at boot + daily job
     try:
         await retention.purge_execution_data()
         retention.schedule_daily_purge()
-    except Exception:  # noqa: BLE001 — retention must never block startup
+    except Exception:  # noqa: BLE001 - retention must never block startup
         logger.exception("retention purge failed at startup")
-    logger.info("Py8n v%s ready — execution_mode=%s, db=%s", settings.version, settings.execution_mode, settings.database_url.split("@")[-1])
+    logger.info("Py8n v%s ready - execution_mode=%s, db=%s", settings.version, settings.execution_mode, settings.database_url.split("@")[-1])
     yield
     # --- shutdown ------------------------------------------------------
     await shutdown_scheduler()
@@ -43,7 +43,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Py8n API",
-    description="Python-native visual workflow automation — n8n, but Python.",
+    description="Python-native visual workflow automation - n8n, but Python.",
     version=settings.version,
     lifespan=lifespan,
 )

@@ -2,15 +2,15 @@
 
 * Rules engine: block / warn / set (constant or safe AST formula) evaluated
   on record create/update; events create|update|always; block short-circuits.
-* Rules management: GET/PUT /apps/{ref}/rules — PUT works on PUBLISHED apps
+* Rules management: GET/PUT /apps/{ref}/rules - PUT works on PUBLISHED apps
   (rules are governance, the layout lock does not apply); 12 invalid-rule
   shapes rejected; rules also validated inside PATCH /apps config.
 * Form field options: string | object fields (required, default, options,
-  placeholder, label) — server-enforced on create (all form fields) and on
+  placeholder, label) - server-enforced on create (all form fields) and on
   update (touched fields only, legacy gaps don't block unrelated edits).
 * Standalone forms: GET /apps/{slug}/form descriptor + POST form-submit for
   anonymous collection; rules fire on form submissions too.
-* POST /apps/{ref}/rules/test — dry-run without mutating data.
+* POST /apps/{ref}/rules/test - dry-run without mutating data.
 
 Runs the FastAPI app in-process via httpx ASGITransport (same harness as v4-v29).
 """
@@ -68,7 +68,7 @@ RULES = [
         "event": "always",
         "when": {"all": [{"field": "ltv", "op": "gte", "value": 9000}]},
         "action": "warn",
-        "message": "Big deal — call the customer",
+        "message": "Big deal - call the customer",
     },
     {
         "id": "r_set",
@@ -216,7 +216,7 @@ def test_v30_rules_enforcement_create():
             # warn: accepted, warning surfaced
             r = await c.post("/apps/v30-create/records", json={"record": {"name": "Yara", "plan": "starter", "ltv": 9500}})
             assert r.status_code == 201, r.text
-            assert r.json()["warnings"] == ["Big deal — call the customer"]
+            assert r.json()["warnings"] == ["Big deal - call the customer"]
 
             # set via formula: pro plan → commission = ltv * 0.1, cast to int col
             r = await c.post("/apps/v30-create/records", json={"record": {"name": "Xavi", "plan": "pro", "ltv": 2000}})
@@ -242,7 +242,7 @@ def test_v30_rules_enforcement_create():
             r = await c.patch("/apps/v30-create/records/0", json={"record": {"ltv": 20000}})
             assert r.status_code == 200, r.text
             # …while the always-on warn rule DOES fire on update
-            assert r.json()["warnings"] == ["Big deal — call the customer"]
+            assert r.json()["warnings"] == ["Big deal - call the customer"]
 
             # non-numeric formula input → set skipped, submitted value kept
             r = await c.put(
@@ -300,12 +300,12 @@ def test_v30_rules_enforcement_update():
             assert r.json()["warnings"] == []
 
             # create-only rules never fire on update (no block!), while the
-            # always-on warn rule does — event gating verified both ways
+            # always-on warn rule does - event gating verified both ways
             r = await c.put("/apps/v30 Update/rules", json={"rules": RULES})
             assert r.status_code == 200, r.text
             r = await c.patch("/apps/v30-update/records/2", json={"record": {"ltv": 20000}})
             assert r.status_code == 200
-            assert r.json()["warnings"] == ["Big deal — call the customer"]
+            assert r.json()["warnings"] == ["Big deal - call the customer"]
 
     try:
         asyncio.run(_go())
@@ -418,7 +418,7 @@ def test_v30_form_submit_endpoint():
 
             # rules fire on form submissions: warn…
             r = await c.post("/apps/v30-submit/form-submit", json={"record": {"name": "Form Whale", "ltv": 12000}})
-            assert r.status_code == 201 and r.json()["warnings"] == ["Big deal — call the customer"]
+            assert r.status_code == 201 and r.json()["warnings"] == ["Big deal - call the customer"]
             # …and block
             r = await c.post("/apps/v30-submit/form-submit", json={"record": {"name": "Form Zed", "ltv": 99999}})
             assert r.status_code == 400 and "15000" in r.json()["detail"]
@@ -460,7 +460,7 @@ def test_v30_rules_test_dry_run():
             r = await c.post("/apps/v30 Dry/rules/test", json={"record": {"name": "T", "plan": "starter", "ltv": 9500}, "event": "update"})
             body = r.json()
             assert [m["id"] for m in body["matches"]] == ["r_warn"]
-            assert body["warnings"] == ["Big deal — call the customer"]
+            assert body["warnings"] == ["Big deal - call the customer"]
 
             # dry run mutates nothing
             r = await c.get("/apps/v30-dry/records")

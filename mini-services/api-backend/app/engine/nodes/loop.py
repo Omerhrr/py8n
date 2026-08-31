@@ -1,4 +1,4 @@
-"""Loop Over Items node — per-batch downstream execution (n8n SplitInBatches parity).
+"""Loop Over Items node - per-batch downstream execution (n8n SplitInBatches parity).
 
 Design
 ======
@@ -22,7 +22,7 @@ After all batches finish, the ``done`` handle carries::
 where ``results[i]`` is the last successful body output of batch ``i``
 (duplicated under ``items`` so Aggregate/Filter nodes can consume it directly).
 
-Structural rules (validated at save/run — see ``runner.validate_loops``):
+Structural rules (validated at save/run - see ``runner.validate_loops``):
 * every body node's inputs must come from inside the body or the Loop node
 * a body node may not also hang off the ``done`` handle
 * two sibling Loop nodes may not share body nodes (nested loops are fine)
@@ -99,7 +99,7 @@ class BatchTriggerNode(BaseNode):
     """Hidden virtual trigger that injects one batch into a loop-body sub-run.
 
     Registered so the runner can execute it, but hidden from the palette and
-    node-definitions API — users never place this node themselves.
+    node-definitions API - users never place this node themselves.
     """
 
     type = "_batch_trigger"

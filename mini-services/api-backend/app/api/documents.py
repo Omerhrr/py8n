@@ -1,4 +1,4 @@
-"""Documents API (v32) — extract structured data from uploaded documents.
+"""Documents API (v32) - extract structured data from uploaded documents.
 
 Endpoints
 ---------
@@ -7,7 +7,7 @@ POST /documents/extract       multipart file → {engine, pages, text, tables} (
 POST /documents/to-dataset    multipart file + name → best table becomes a DATASET
 
 ``to-dataset`` is the payload of the wave: a PDF/invoice/workbook lands as
-a first-class v27 dataset — SQL-queryable, app-buildable, dashboard-able.
+a first-class v27 dataset - SQL-queryable, app-buildable, dashboard-able.
 Extraction is read-only; the only persisted object is the dataset.
 """
 
@@ -24,7 +24,7 @@ from ..services import documents as doc_svc
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB — same cap as dataset uploads
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB - same cap as dataset uploads
 
 
 async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
@@ -35,7 +35,7 @@ async def _read_upload(file: UploadFile) -> tuple[str, bytes]:
     if not doc_svc.supported(filename):
         raise HTTPException(
             status_code=415,
-            detail="Unsupported document type — supported: " + ", ".join(doc_svc.SUPPORTED_EXTS),
+            detail="Unsupported document type - supported: " + ", ".join(doc_svc.SUPPORTED_EXTS),
         )
     return filename, raw
 
@@ -54,7 +54,7 @@ async def engines():
         import pytesseract
 
         ocr = {"available": True, "version": str(pytesseract.get_tesseract_version())}
-    except Exception:  # noqa: BLE001 — binary missing or pytesseract absent
+    except Exception:  # noqa: BLE001 - binary missing or pytesseract absent
         pass
     return {
         "ocr": ocr,
@@ -87,7 +87,7 @@ async def to_dataset(
     if table is None:
         raise HTTPException(
             status_code=400,
-            detail="No extractable table found in this document — it contains text only. "
+            detail="No extractable table found in this document - it contains text only. "
             "Use /documents/extract to inspect the text instead.",
         )
     items = doc_svc.table_to_items(table)

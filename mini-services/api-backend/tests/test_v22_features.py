@@ -142,7 +142,7 @@ def test_v22_error_workflow_with_error_trigger():
             assert res.status_code == 200, res.text
             handler_runs = [e for e in res.json() if e["trigger_type"] == "error"]
             assert handler_runs, f"no error-triggered handler run in {res.json()}"
-            # dispatch_inline runs the handler as a background task — wait for it
+            # dispatch_inline runs the handler as a background task - wait for it
             for _ in range(100):
                 h = (await client.get(f"/executions/{handler_runs[0]['id']}")).json()
                 if h["status"] != "running":

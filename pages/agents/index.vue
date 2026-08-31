@@ -115,12 +115,12 @@ async function send() {
       if (agentRun?.output?.tool_calls?.length) {
         trace = { iterations: agentRun.output.iterations ?? 0, tool_calls: agentRun.output.tool_calls }
       }
-    } catch { /* trace is best-effort — the reply is the point */ }
+    } catch { /* trace is best-effort - the reply is the point */ }
     turns.value.push({ role: 'assistant', text: res.reply || '(empty reply)', trace })
   } catch (e: unknown) {
     turns.value.push({
       role: 'assistant',
-      text: e instanceof Error ? e.message : 'Request failed — is the backend up?',
+      text: e instanceof Error ? e.message : 'Request failed - is the backend up?',
       error: true,
     })
   } finally {
@@ -254,7 +254,7 @@ onMounted(() => loadAgents(false))
             <div v-if="!turns.length" class="flex h-full flex-col items-center justify-center text-center">
               <MessageSquare class="h-7 w-7 text-zinc-700" />
               <p class="mt-2 max-w-xs text-xs leading-relaxed text-zinc-500">
-                Say something — the agent runs with its configured tools
+                Say something - the agent runs with its configured tools
                 ({{ selected.tools.map((t) => t.name).join(', ') || 'none' }}) and replies here.
                 Tool calls render as trace chips under each answer.
               </p>

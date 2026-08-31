@@ -3,7 +3,7 @@
 Covers: folder CRUD API (create/reparent/rename/delete), nesting depth limit
 (MAX_FOLDER_DEPTH=3), cycle prevention (cannot move a folder into its own
 subtree), delete-refusal while subfolders exist (409), workflow assignment
-(create-time folder_id, tri-state PUT — "" moves to root, unknown folder 400),
+(create-time folder_id, tri-state PUT - "" moves to root, unknown folder 400),
 list enrichment (folder_id + folder_name, ?folder_id= filter incl. "none"),
 duplicate inheriting the folder, and folder moves NOT polluting version
 history (organizational change, v13 contract).
@@ -74,7 +74,7 @@ def test_folders_crud_hierarchy_and_guards():
             res = await client.post("/folders", json={"name": "x", "parent_id": "nope"})
             assert res.status_code == 400, res.text
 
-            # nest: child + grandchild (depth 2 and 3 — both allowed)
+            # nest: child + grandchild (depth 2 and 3 - both allowed)
             res = await client.post("/folders", json={"name": f"Emails {tag}", "parent_id": root["id"]})
             assert res.status_code == 201, res.text
             child = res.json()
@@ -185,7 +185,7 @@ def test_workflow_folder_assignment_and_lifecycle():
             res = await client.put(f"/workflows/{wf['id']}", json={"folder_id": folder["id"]})
             assert res.json()["folder_id"] == folder["id"]
 
-            # folder moves are organizational — NO new version (v13 contract)
+            # folder moves are organizational - NO new version (v13 contract)
             res = await client.get(f"/workflows/{wf['id']}/versions")
             assert res.json()["latest"] == 1, res.json()
 

@@ -2,7 +2,7 @@
 usage tracking, delete protection, http_request basic_auth).
 
 Runs the FastAPI app in-process via httpx ASGITransport against the dev SQLite
-DB. Probe targets are local loopback TCP servers — no external network needed.
+DB. Probe targets are local loopback TCP servers - no external network needed.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ async def _loopback(handler):
                 + b"Connection: close\r\n\r\n" + payload
             )
             await writer.drain()
-        except Exception:  # noqa: BLE001 — test sink
+        except Exception:  # noqa: BLE001 - test sink
             pass
         finally:
             writer.close()

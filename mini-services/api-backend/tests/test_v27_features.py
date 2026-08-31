@@ -1,9 +1,9 @@
-"""V27 feature tests: Dataset Engine — first-class datasets + DuckDB SQL.
+"""V27 feature tests: Dataset Engine - first-class datasets + DuckDB SQL.
 
 Datasets are stored as Parquet via DuckDB (metadata in SQLite): create from
 JSON rows, upload xlsx/csv/json, paginate rows, profile columns, run SQL
 across ALL datasets (each registered as a view named after its lowercased
-name — joins included), and drive them from workflows with the three new
+name - joins included), and drive them from workflows with the three new
 nodes: dataset_read / dataset_write / sql_query (Jinja-resolvable params).
 
 Runs the FastAPI app in-process via httpx ASGITransport (same harness as v4-v26).

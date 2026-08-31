@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Chrome-less layout for public runtime pages (v30 standalone forms) —
+// Chrome-less layout for public runtime pages (v30 standalone forms) -
 // no sidebar, no command palette; just the page itself.
 </script>
 

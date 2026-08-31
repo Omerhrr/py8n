@@ -1,7 +1,7 @@
-"""Phase 1 milestone demo — standalone graph execution.
+"""Phase 1 milestone demo - standalone graph execution.
 
 Runs a mock JSON graph of three dummy nodes in correct dependency order using
-graphlib.TopologicalSorter + the Jinja2 templating layer. No database, no API —
+graphlib.TopologicalSorter + the Jinja2 templating layer. No database, no API -
 pure engine, exactly like the roadmap milestone describes:
 
     python demo/phase1_demo.py
@@ -70,7 +70,7 @@ def log_event(event: dict) -> None:
 
 async def main() -> None:
     print("=" * 62)
-    print("Py8n Phase 1 — standalone graph execution demo")
+    print("Py8n Phase 1 - standalone graph execution demo")
     print("=" * 62)
 
     graph = GraphSpec.model_validate(MOCK_GRAPH)
@@ -96,7 +96,7 @@ async def main() -> None:
     assert actual == expected, f"Wrong order: {actual}"
     assert result["status"] == "success"
     print("-" * 62)
-    print("PASS — three nodes executed in correct topological order.")
+    print("PASS - three nodes executed in correct topological order.")
 
 
 if __name__ == "__main__":

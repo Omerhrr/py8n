@@ -1,4 +1,4 @@
-"""Environment variables API (v15) — global template values, ``{{ env.KEY }}``.
+"""Environment variables API (v15) - global template values, ``{{ env.KEY }}``.
 
 Endpoints
 ---------
@@ -9,7 +9,7 @@ PUT    /env-vars/{id}   update value / is_secret / description ("__keep__" prese
 DELETE /env-vars/{id}   remove
 
 Keys are stored EXACTLY as typed (validated ``^[A-Za-z_][A-Za-z0-9_]*$``) so
-a template's ``{{ env.my_key }}`` matches the key verbatim — Jinja dict
+a template's ``{{ env.my_key }}`` matches the key verbatim - Jinja dict
 access is case-sensitive. Uniqueness is enforced case-insensitively. Values
 are always Fernet-encrypted at rest; every write commits explicitly (v4
 lesson: yield-dependency teardown commits run after the response is sent).
@@ -35,7 +35,7 @@ KEEP_MARKER = "__keep__"
 
 
 def _normalize_key(raw: str) -> str:
-    """Trim only — case is preserved (template access is case-sensitive)."""
+    """Trim only - case is preserved (template access is case-sensitive)."""
     return (raw or "").strip()
 
 

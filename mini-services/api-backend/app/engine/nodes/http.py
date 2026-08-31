@@ -21,7 +21,7 @@ class HttpRequestNode(BaseNode):
 
     class ParamsModel(BaseModel):
         method: str = Field(default="GET", json_schema_extra={"widget": "select", "options": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"]})
-        url: str = Field(default="https://", description="Request URL — supports {{ expressions }}")
+        url: str = Field(default="https://", description="Request URL - supports {{ expressions }}")
         headers: dict = Field(default_factory=dict, json_schema_extra={"widget": "code", "rows": 4})
         query_params: dict = Field(default_factory=dict, json_schema_extra={"widget": "code", "rows": 4})
         body_type: str = Field(default="none", json_schema_extra={"widget": "select", "options": ["none", "json", "raw"]})

@@ -1,11 +1,11 @@
-"""GraphRunner — executes a validated graph topologically.
+"""GraphRunner - executes a validated graph topologically.
 
 Pipeline
 ========
 1. Validate the graph (Pydantic `GraphSpec`) and build the adjacency map.
 2. Pick the firing trigger node; every other trigger is marked skipped.
 3. `graphlib.TopologicalSorter` yields a dependency-safe execution order
-   (raises on cycles — surfaced as a clean 400 by the API layer).
+   (raises on cycles - surfaced as a clean 400 by the API layer).
 4. Each node: gather active inputs -> resolve parameters (Jinja2 + Pydantic)
    -> execute -> emit events -> record run.
 5. A node with incoming edges but **no active input** is skipped; an IF node's
@@ -87,9 +87,9 @@ class GraphRunner:
         self.honor_pinned = (trigger_type == "manual") if honor_pinned is None else honor_pinned
         # v21 Respond to Webhook: the webhook endpoint installs an async
         # callable that the respond_to_webhook node awaits. ONLY the root run
-        # receives it — sub-workflows / loop bodies never hijack the caller.
+        # receives it - sub-workflows / loop bodies never hijack the caller.
         self.respond_channel = respond_channel
-        # Outputs of nodes that already ran in a PARENT run — seeded into the
+        # Outputs of nodes that already ran in a PARENT run - seeded into the
         # context so loop bodies / sub-runs can reference upstream nodes.
         self.inherit_node_states: dict[str, dict] = inherit_node_states or {}
 
@@ -227,13 +227,13 @@ class GraphRunner:
                     await self._run_loop_node(context, node)
                     continue
                 if node.disabled:
-                    # n8n parity: a disabled node is bypassed — its active input
+                    # n8n parity: a disabled node is bypassed - its active input
                     # passes through untouched and downstream keeps flowing.
                     await self._pass_through_disabled(context, node)
                     continue
                 if node.pinned_data is not None and self.honor_pinned:
                     # v17 n8n parity: a pinned node returns its pinned output
-                    # without executing — mock data for building workflows.
+                    # without executing - mock data for building workflows.
                     # Checked BEFORE the wait-node suspend: pinning a Wait node
                     # replaces the pause with the fake output.
                     await self._run_pinned(context, node)
@@ -287,7 +287,7 @@ class GraphRunner:
             raise GraphValidationError("Workflow has no trigger node (manual/webhook/schedule)")
         enabled = [t for t in triggers if not t.disabled]
         if not enabled:
-            raise GraphValidationError("All trigger nodes are disabled — enable one to run")
+            raise GraphValidationError("All trigger nodes are disabled - enable one to run")
         triggers = enabled
         if self.trigger_node_id:
             for t in triggers:
@@ -340,7 +340,7 @@ class GraphRunner:
             duration_ms = int((time.monotonic() - t0) * 1000)
             await self._record(
                 context, node, "error", None, duration_ms,
-                "Loop node has no body — connect at least one node to its loop output",
+                "Loop node has no body - connect at least one node to its loop output",
             )
             return
 
@@ -443,8 +443,8 @@ class GraphRunner:
     def _gather_active_inputs(self, node: NodeSpec) -> tuple[dict[str, Any], dict[str, Any]]:
         """Active incoming payloads, keyed two ways:
 
-        * by **source node id** — the historical ``current_inputs`` contract
-        * by **targetHandle** — v24, so multi-input nodes (Compare Datasets'
+        * by **source node id** - the historical ``current_inputs`` contract
+        * by **targetHandle** - v24, so multi-input nodes (Compare Datasets'
           "main"/"secondary") can tell their inputs apart; the last edge
           connected to a handle wins, matching visual wiring order.
         """
@@ -568,7 +568,7 @@ class GraphRunner:
             params = instance.validate_parameters(context)
             hint = getattr(params, "resume_hint", hint) or hint
             pass_through = bool(getattr(params, "pass_through", False))
-        except Exception:  # noqa: BLE001 — never fail the pause on bad params
+        except Exception:  # noqa: BLE001 - never fail the pause on bad params
             pass
 
         await self.emit(
@@ -757,14 +757,14 @@ def validate_loops(spec: GraphSpec) -> dict[str, set[str]]:
         for e in spec.edges:
             if e.source == ln.id and e.sourceHandle == "done" and e.target in body:
                 raise GraphValidationError(
-                    f"Node {e.target!r} is connected to both the loop and done outputs of {ln.id!r} — "
+                    f"Node {e.target!r} is connected to both the loop and done outputs of {ln.id!r} - "
                     "post-loop nodes must hang off done only"
                 )
         for nid in body:
             node_cls = get_node_class(spec.node_map()[nid].type)
             if getattr(node_cls, "pauses_execution", False):
                 raise GraphValidationError(
-                    f"Wait node {nid!r} cannot live inside a loop body — keep it on the main flow"
+                    f"Wait node {nid!r} cannot live inside a loop body - keep it on the main flow"
                 )
             for e in spec.edges:
                 if e.target == nid and e.source != ln.id and e.source not in body:
@@ -785,7 +785,7 @@ def validate_loops(spec: GraphSpec) -> dict[str, set[str]]:
             if overlap:
                 raise GraphValidationError(
                     f"Node(s) {sorted(overlap)} sit downstream of two different Loop nodes "
-                    f"({a!r}, {b!r}) — restructure so each body belongs to one loop"
+                    f"({a!r}, {b!r}) - restructure so each body belongs to one loop"
                 )
     return bodies
 

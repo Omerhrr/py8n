@@ -1,4 +1,4 @@
-"""Global schedules overview (v7) — every schedule trigger across workflows.
+"""Global schedules overview (v7) - every schedule trigger across workflows.
 
 GET /api/v1/schedules returns one row per schedule_trigger node, ordered so
 that active schedules with a known next fire time come first (soonest first),

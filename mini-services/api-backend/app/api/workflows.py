@@ -77,7 +77,7 @@ async def list_workflows(
     db: AsyncSession = Depends(get_db),
 ):
     rows = (await db.execute(select(Workflow).order_by(Workflow.updated_at.desc()))).scalars().all()
-    # Tag / search / folder filters run in Python — the gallery is small and
+    # Tag / search / folder filters run in Python - the gallery is small and
     # the JSON columns keep this portable across SQLite and PostgreSQL.
     if tag:
         want = tag.strip().lower()
@@ -197,7 +197,7 @@ async def create_workflow(body: WorkflowCreate, db: AsyncSession = Depends(get_d
     await db.refresh(wf)
     await _validate_error_workflow(db, wf.id, wf.error_workflow_id)
     await _validate_folder(db, wf.folder_id)
-    await snapshot_workflow_version(db, wf)  # v1 — the created state
+    await snapshot_workflow_version(db, wf)  # v1 - the created state
     # Commit before responding: the get_db teardown commit runs after the
     # response is sent, so an immediate follow-up request (e.g. POST .../run)
     # on another connection could miss the row.
@@ -247,11 +247,11 @@ async def update_workflow(workflow_id: str, body: WorkflowUpdate, db: AsyncSessi
     await db.flush()
     await db.refresh(wf)
     # Content change (graph/name/description) → snapshot the new state.
-    # Tags / activation / error binding are organizational, not content —
+    # Tags / activation / error binding are organizational, not content -
     # they don't pollute the history.
     if {"graph", "name", "description"} & set(body.model_dump(exclude_unset=True)):
         await snapshot_workflow_version(db, wf)
-    await db.commit()  # see create_workflow — avoid teardown-commit race
+    await db.commit()  # see create_workflow - avoid teardown-commit race
     await resync_workflow_jobs(workflow_id)  # keep APScheduler in sync with the canvas
     return wf
 
@@ -286,7 +286,7 @@ async def activate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db)
     if bad is not None:
         raise HTTPException(
             status_code=400,
-            detail=f"Cannot activate — schedule node '{bad['node_name']}': {bad['error']}",
+            detail=f"Cannot activate - schedule node '{bad['node_name']}': {bad['error']}",
         )
     wf.is_active = True
     await db.commit()  # avoid teardown-commit race on follow-up requests
@@ -333,7 +333,7 @@ async def test_node_step(
 ):
     """Run ONE node in isolation with ad-hoc input (v17 test step).
 
-    Nothing is persisted — no execution log, no scheduler touch. If the node
+    Nothing is persisted - no execution log, no scheduler touch. If the node
     has pinned data, the pinned output is returned instead (that's exactly
     what a manual run would produce) and ``pinned_used`` is set.
     """
@@ -358,7 +358,7 @@ async def test_node_step(
     context = ExecutionContext(
         workflow_id=wf.id,
         workflow_name=wf.name,
-        execution_id=uuid.uuid4().hex,  # ephemeral — never persisted
+        execution_id=uuid.uuid4().hex,  # ephemeral - never persisted
         trigger_type="manual",
         trigger_payload={},
         env_vars=await load_env_map() or {},
@@ -466,7 +466,7 @@ async def import_workflow(body: WorkflowImportRequest, db: AsyncSession = Depend
     db.add(wf)
     await db.flush()
     await db.refresh(wf)
-    await snapshot_workflow_version(db, wf)  # v1 — the imported state
+    await snapshot_workflow_version(db, wf)  # v1 - the imported state
     await db.commit()  # avoid teardown-commit race
     await resync_workflow_jobs(wf.id)
     return wf
@@ -488,14 +488,14 @@ async def duplicate_workflow(workflow_id: str, db: AsyncSession = Depends(get_db
     db.add(copy)
     await db.flush()
     await db.refresh(copy)
-    await snapshot_workflow_version(db, copy)  # v1 — the duplicated state
+    await snapshot_workflow_version(db, copy)  # v1 - the duplicated state
     await db.commit()  # avoid teardown-commit race
     await resync_workflow_jobs(copy.id)
     return copy
 
 
 # ----------------------------------------------------------------------
-# Version history (v13) — bounded snapshot list + restore
+# Version history (v13) - bounded snapshot list + restore
 # ----------------------------------------------------------------------
 @router.get("/{workflow_id}/versions")
 async def list_versions(workflow_id: str, db: AsyncSession = Depends(get_db)):
@@ -562,7 +562,7 @@ async def get_version(workflow_id: str, version: int, db: AsyncSession = Depends
 async def restore_version(workflow_id: str, version: int, db: AsyncSession = Depends(get_db)):
     """Roll the workflow back to a snapshot's content (name/description/graph).
 
-    The restore itself lands as a NEW version on top of the history — nothing
+    The restore itself lands as a NEW version on top of the history - nothing
     is destroyed, so redo is just "restore the version that was current".
     Tags / activation / error binding are left untouched.
     """

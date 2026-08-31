@@ -2,7 +2,7 @@
   "name": "py8n",
   "version": "1.0.0",
   "private": true,
-  "description": "Py8n — Python-native visual workflow automation platform (self-hosted n8n alternative)",
+  "description": "Py8n - Python-native visual workflow automation platform (self-hosted n8n alternative)",
   "scripts": {
     "dev": "nuxt dev --port 3000 2>&1 | tee dev.log",
     "build": "nuxt build",

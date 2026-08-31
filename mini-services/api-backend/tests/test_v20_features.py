@@ -3,7 +3,7 @@
 Overrides: Workflow.retention_days tri-state via PUT (omitted = untouched,
 null = inherit global policy, 0 = keep forever, N = purge after N days).
 The purge must honor each workflow's effective policy while leaving others
-untouched. Age-based only — the global volume cap stays uniform (covered in
+untouched. Age-based only - the global volume cap stays uniform (covered in
 v19 tests).
 
 Same harness as v4-v19: httpx ASGITransport in-process, per-test asyncio.run,

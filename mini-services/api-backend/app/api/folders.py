@@ -1,11 +1,11 @@
-"""Folder CRUD (v16) — hierarchical grouping for workflows.
+"""Folder CRUD (v16) - hierarchical grouping for workflows.
 
 Folders nest up to MAX_FOLDER_DEPTH levels. Integrity (parent existence,
 cycles, depth) is enforced here in the API layer with a cycle-safe ancestor
-walk rather than DB FKs — the same pattern as error-workflow bindings.
+walk rather than DB FKs - the same pattern as error-workflow bindings.
 
 Delete policy: refused while subfolders exist (409). Workflows inside the
-deleted folder fall back to the root (folder_id=None) — nothing is destroyed.
+deleted folder fall back to the root (folder_id=None) - nothing is destroyed.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ async def _ancestor_chain(db: AsyncSession, folder_id: str) -> list[Folder]:
     seen: set[str] = set()
     cursor: str | None = folder_id
     while cursor:
-        if cursor in seen:  # corrupt data guard — never loop forever
+        if cursor in seen:  # corrupt data guard - never loop forever
             break
         seen.add(cursor)
         row = await db.get(Folder, cursor)
@@ -129,7 +129,7 @@ async def create_folder(body: FolderCreate, db: AsyncSession = Depends(get_db)):
             )
     folder = Folder(name=_clean_name(body.name), parent_id=parent.id if parent else None)
     db.add(folder)
-    await db.commit()  # explicit — teardown commit races follow-up reads
+    await db.commit()  # explicit - teardown commit races follow-up reads
     await db.refresh(folder)
     return await _folder_out(db, folder)
 
@@ -192,7 +192,7 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
     if children:
         raise HTTPException(
             status_code=409,
-            detail="Folder has subfolders — delete or move them first",
+            detail="Folder has subfolders - delete or move them first",
         )
     # Workflows inside fall back to the root (folder_id=None).
     workflows = (
@@ -201,4 +201,4 @@ async def delete_folder(folder_id: str, db: AsyncSession = Depends(get_db)):
     for wf in workflows:
         wf.folder_id = None
     await db.delete(folder)
-    await db.commit()  # explicit — teardown commit races follow-up reads
+    await db.commit()  # explicit - teardown commit races follow-up reads

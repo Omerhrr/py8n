@@ -178,7 +178,7 @@ async function togglePublish() {
   try {
     if (isPublished.value) {
       appRow.value = await api.post<any>(`/apps/${appRow.value.id}/unpublish`)
-      notice.value = 'Unpublished — back to draft'
+      notice.value = 'Unpublished - back to draft'
     } else {
       appRow.value = await api.post<any>(`/apps/${appRow.value.id}/publish`)
       notice.value = `Published live at /run/${appRow.value.slug}`
@@ -228,7 +228,7 @@ function removeComponent(i: number) {
 
 function toggleInList(comp: AppComponent, key: 'columns' | 'fields', col: string) {
   if (key === 'fields') {
-    // v30: fields may be option objects — toggle by name, keep the rest intact
+    // v30: fields may be option objects - toggle by name, keep the rest intact
     const objs = normFields(comp).map((f) => ({ ...f }))
     const i = objs.findIndex((f) => f.name === col)
     if (i >= 0) objs.splice(i, 1)
@@ -324,7 +324,7 @@ async function saveRules() {
     }))
     await api.put(`/apps/${appRow.value.id}/rules`, { rules: cleaned })
     rulesDirty.value = false
-    notice.value = 'Rules saved — live immediately'
+    notice.value = 'Rules saved - live immediately'
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Saving rules failed'
   } finally {
@@ -356,7 +356,7 @@ function statValue(comp: AppComponent): string {
   if (comp.agg === 'count') return String(rows.value.length)
   const col = comp.column
   const nums = rows.value.map((r) => numVal(r[col])).filter((n): n is number => n !== null)
-  if (!nums.length) return '—'
+  if (!nums.length) return '-'
   let v: number
   if (comp.agg === 'sum') v = nums.reduce((a, b) => a + b, 0)
   else if (comp.agg === 'min') v = Math.min(...nums)
@@ -480,7 +480,7 @@ function dtypeOf(col: string) {
                 class="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
                 @change="bindDataset"
               >
-                <option value="">— no dataset —</option>
+                <option value="">- no dataset -</option>
                 <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }} ({{ d.row_count }})</option>
               </select>
               <button
@@ -519,7 +519,7 @@ function dtypeOf(col: string) {
               <h2 class="text-xs font-bold uppercase tracking-wide text-zinc-400">Components ({{ comps.length }})</h2>
             </div>
             <div v-if="isPublished" class="mt-2 rounded-lg bg-amber-500/10 px-3 py-2 text-[11px] text-amber-300">
-              Published apps are locked — unpublish to edit components.
+              Published apps are locked - unpublish to edit components.
             </div>
 
             <div class="mt-3 space-y-3">
@@ -695,7 +695,7 @@ function dtypeOf(col: string) {
               </button>
             </div>
             <p class="mt-1 text-[11px] leading-relaxed text-zinc-500">
-              Server-side guards on every record — block rejects, warn flags, set computes. Rules stay editable while the app is published.
+              Server-side guards on every record - block rejects, warn flags, set computes. Rules stay editable while the app is published.
             </p>
 
             <div class="mt-3 space-y-3">
@@ -872,7 +872,7 @@ function dtypeOf(col: string) {
                   <tbody>
                     <tr v-for="(row, ri) in tableRows" :key="ri" class="border-b border-zinc-900 text-zinc-300 last:border-0">
                       <td v-for="col in (tableComp.columns?.length ? tableComp.columns : schema.map((c) => c.name))" :key="col" class="max-w-[220px] truncate px-4 py-2">
-                        {{ row[col] ?? '—' }}
+                        {{ row[col] ?? '-' }}
                       </td>
                     </tr>
                     <tr v-if="!tableRows.length">

@@ -5,7 +5,7 @@ import {
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
-// v30 — standalone shareable form; chrome-less layout (no sidebar/palette)
+// v30 - standalone shareable form; chrome-less layout (no sidebar/palette)
 definePageMeta({ layout: 'plain' })
 
 const { api } = useApi()

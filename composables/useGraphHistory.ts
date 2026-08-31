@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------
-// v18: graph undo/redo engine — snapshot-based history for the editor.
+// v18: graph undo/redo engine - snapshot-based history for the editor.
 // The editor commits a snapshot after every completed mutation
 // (add/delete/connect/drag/config change); undo/redo walk the stack and
 // return plain {nodes, edges} graphs that the page re-renders.
@@ -32,7 +32,7 @@ export function createGraphHistory(limit = 80) {
   function commit(g: GraphSnapshot) {
     if (suspended) return
     const s = snap(g)
-    if (stack.value[pointer.value] === s) return // identical to top — nothing changed
+    if (stack.value[pointer.value] === s) return // identical to top - nothing changed
     const trimmed = stack.value.slice(0, pointer.value + 1) // drop redo branch
     trimmed.push(s)
     while (trimmed.length > limit) trimmed.shift()

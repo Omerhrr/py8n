@@ -1,8 +1,8 @@
-# 🐍 Py8n — a Python-native n8n
+# 🐍 Py8n - a Python-native n8n
 
 **Visual workflow automation, rebuilt on Python.** Drag nodes on a canvas, wire
 them up, and Py8n evaluates the graph with `graphlib.TopologicalSorter`, a
-Jinja2-templated execution context and a Pydantic-validated node registry —
+Jinja2-templated execution context and a Pydantic-validated node registry -
 then streams live progress back to the browser over WebSockets.
 
 ```
@@ -34,7 +34,7 @@ then streams live progress back to the browser over WebSockets.
 | `llm_chat` | AI | Free built-in bridge **or** your own OpenAI-compatible credential |
 
 Node configuration forms are **generated from the backend's Pydantic JSON
-schemas** (`GET /api/v1/node-definitions`) — add a node class in Python and it
+schemas** (`GET /api/v1/node-definitions`) - add a node class in Python and it
 appears in the UI palette with a working form, zero frontend changes.
 
 ## Expressions
@@ -60,7 +60,7 @@ mini-services/
     app/services/       dispatcher (inline↔Celery) · event bus · crypto · scheduler
     demo/phase1_demo.py standalone milestone script (3-node mock graph)
     tests/              pytest engine suite
-  llm-bridge/           Bun service — free OpenAI-compatible shim for the sandbox
+  llm-bridge/           Bun service - free OpenAI-compatible shim for the sandbox
 pages/                  dashboard + workflow editor (Vue Flow canvas)
 stores/py8n.ts          Pinia store (definitions, execution progress, WS)
 server/routes/api/v1/   Nitro proxy fallback for non-gateway deploys
@@ -104,7 +104,7 @@ CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 1. The graph is validated (schema, unknown types, **cycles → 400**).
 2. `graphlib.TopologicalSorter` yields a dependency-safe order.
 3. Exactly one trigger fires; other triggers are marked skipped.
-4. A node with incoming edges but no *active* input is skipped — an IF's
+4. A node with incoming edges but no *active* input is skipped - an IF's
    inactive branch deactivates exactly its own outgoing edges.
 5. Node failures mark downstream nodes skipped, other branches keep running,
    and the execution ends with status `error`.

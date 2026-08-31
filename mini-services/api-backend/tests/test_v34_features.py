@@ -1,16 +1,16 @@
 """V34 feature tests: AI Agent tool-calling deepening.
 
 Two new tool kinds on the AI Agent node:
-* dataset — READ-ONLY SQL (single SELECT/WITH) over every stored dataset
+* dataset - READ-ONLY SQL (single SELECT/WITH) over every stored dataset
   (DuckDB views named after each dataset). Guarded: non-select statements,
   multiple statements and dangerous keywords (ATTACH/COPY/...) are rejected
   and the error is fed back to the model instead of failing the run.
-* code    — sandboxed Python (same restricted runtime as the Code node);
+* code    - sandboxed Python (same restricted runtime as the Code node);
   the model gets back `result` + captured stdout, and sandbox exceptions
   are fed back as tool errors too.
 
-Plus GET /agents — inventory of agent workflows (tools, kinds, memory
-sessions) powering the /agents console — and the `data-analyst` gallery
+Plus GET /agents - inventory of agent workflows (tools, kinds, memory
+sessions) powering the /agents console - and the `data-analyst` gallery
 template showcasing both new kinds.
 
 Same harness as v4-v33: httpx ASGITransport in-process, per-test asyncio.run,
@@ -96,7 +96,7 @@ class _ScriptedChat:
     """Replaces AgentNode._chat with a scripted reply sequence.
 
     Must be a plain async FUNCTION (descriptor) so the node instance binds
-    correctly — assigning a callable object would skip self-binding.
+    correctly - assigning a callable object would skip self-binding.
     """
 
     def __init__(self, replies: list[str]):
@@ -130,14 +130,14 @@ def _agent_output(detail: dict) -> dict:
 
 # ------------------------------------------------------------------ test 1
 def test_v34_health_pin():
-    """Strict version pin lives in the latest wave only (v34 convention)."""
+    """v34 keeps the app identity check; the strict pin moved to v35 (convention)."""
 
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
             assert res.status_code == 200, res.text
             body = res.json()
-            assert body["app"] == "Py8n" and body["version"] == "1.34.0", body
+            assert body["app"] == "Py8n" and body["version"] >= "1.34.0", body
 
     try:
         asyncio.run(_go())
@@ -397,7 +397,7 @@ def test_v34_agents_inventory_and_template():
 
 # ------------------------------------------------------------------ test 6
 def test_v34_agent_only_workflow_is_chat_able():
-    """v34: /chat works for agent-only workflows (no chat_trigger) — the
+    """v34: /chat works for agent-only workflows (no chat_trigger) - the
     console can drive manual-trigger agents; reply comes from the agent."""
     tag = uuid.uuid4().hex[:8]
     wf_ids: list[str] = []

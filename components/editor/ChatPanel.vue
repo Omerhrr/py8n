@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// v25: editor chat panel — talks to a workflow's Chat Trigger.
-// v26: sends via POST /chat/{id}/stream (SSE) and renders LIVE progress —
-// one chip per node as it starts/finishes — then types out the reply.
+// v25: editor chat panel - talks to a workflow's Chat Trigger.
+// v26: sends via POST /chat/{id}/stream (SSE) and renders LIVE progress -
+// one chip per node as it starts/finishes - then types out the reply.
 // Each conversation owns a stable session_id (used by downstream agent
 // nodes for per-session memory); "New conversation" rotates it.
 import { nextTick, ref, watch } from 'vue'
@@ -139,7 +139,7 @@ async function send() {
         const j = await res.json()
         if (j?.detail) detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)
       } catch { /* not JSON */ }
-      messages.value.push({ role: 'assistant', content: String(detail).includes('inactive') ? 'Workflow is inactive — activate it ("Triggers on" toggle) to chat.' : `⚠ ${detail}`, ts: Date.now(), error: true })
+      messages.value.push({ role: 'assistant', content: String(detail).includes('inactive') ? 'Workflow is inactive - activate it ("Triggers on" toggle) to chat.' : `⚠ ${detail}`, ts: Date.now(), error: true })
       return
     }
 
@@ -177,9 +177,9 @@ async function send() {
     } else if (terminal?.event === 'error') {
       messages.value.push({ role: 'assistant', content: `⚠ ${terminal.data.error}`, ts: Date.now(), error: true })
     } else if (terminal?.event === 'timeout') {
-      messages.value.push({ role: 'assistant', content: `⚠ No reply within ${terminal.data.after_seconds}s — the workflow keeps running in the background.`, ts: Date.now(), error: true })
+      messages.value.push({ role: 'assistant', content: `⚠ No reply within ${terminal.data.after_seconds}s - the workflow keeps running in the background.`, ts: Date.now(), error: true })
     } else {
-      // stream ended without a terminal frame — fall back to the plain endpoint
+      // stream ended without a terminal frame - fall back to the plain endpoint
       await sendFallback(text)
     }
   } catch (err: any) {
@@ -189,7 +189,7 @@ async function send() {
       const detail = err2?.data?.detail || err2?.message || err?.message || 'chat request failed'
       messages.value.push({
         role: 'assistant',
-        content: String(detail).includes('inactive') ? 'Workflow is inactive — activate it ("Triggers on" toggle) to chat.' : `⚠ ${detail}`,
+        content: String(detail).includes('inactive') ? 'Workflow is inactive - activate it ("Triggers on" toggle) to chat.' : `⚠ ${detail}`,
         ts: Date.now(),
         error: true,
       })
@@ -231,7 +231,7 @@ watch(() => props.open, async (open) => {
           <div class="flex items-center gap-1">
             <button
               class="rounded-md p-1.5 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-300"
-              title="New conversation (rotates session id — agent memory starts fresh)"
+              title="New conversation (rotates session id - agent memory starts fresh)"
               @click="startNewConversation"
             >
               <RotateCcw class="h-3.5 w-3.5" />
@@ -269,7 +269,7 @@ watch(() => props.open, async (open) => {
             >{{ m.content }}</div>
           </div>
 
-          <!-- v26: live run progress — one chip per node -->
+          <!-- v26: live run progress - one chip per node -->
           <div v-if="steps.length" class="space-y-1.5 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-3 py-2">
             <div v-for="s in steps" :key="s.nodeId" class="flex items-center gap-2 text-[10px]">
               <Loader2 v-if="s.status === 'running'" class="h-3 w-3 shrink-0 animate-spin text-amber-400" />

@@ -1,4 +1,4 @@
-"""APScheduler integration (Phase 4) — fires schedule_trigger nodes.
+"""APScheduler integration (Phase 4) - fires schedule_trigger nodes.
 
 The scheduler lives inside the FastAPI lifespan and re-syncs jobs whenever a
 workflow is saved/deleted/toggled, so the canvas is the single source of truth.
@@ -120,7 +120,7 @@ async def resync_all_jobs() -> None:
 
 
 # ----------------------------------------------------------------------
-# Schedule introspection (v7) — validation, human summaries, fire previews
+# Schedule introspection (v7) - validation, human summaries, fire previews
 # ----------------------------------------------------------------------
 def _build_trigger(params: dict):
     """Build the APScheduler trigger for a schedule node's parameters.
@@ -174,7 +174,7 @@ def next_fire_times(params: dict, count: int = 5) -> list[str]:
     for _ in range(max(1, count)):
         try:
             nxt = trigger.get_next_fire_time(None, now)
-        except Exception:  # noqa: BLE001 — defensive: malformed expressions
+        except Exception:  # noqa: BLE001 - defensive: malformed expressions
             break
         if nxt is None:
             break

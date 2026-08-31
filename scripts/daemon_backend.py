@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Double-fork daemonizer for the Py8n backend — survives tool-call session teardown."""
+"""Double-fork daemonizer for the Py8n backend - survives tool-call session teardown."""
 import os
 import sys
 import time

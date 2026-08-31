@@ -58,7 +58,7 @@ const prettyJson = (v: any) => {
 }
 
 function fmtTime(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
@@ -98,7 +98,7 @@ const triggerIcon = (t: string) => (t === 'webhook' ? Webhook : t === 'schedule'
           </span>
           <span class="text-[10px] text-zinc-600">{{ run.duration_ms != null ? run.duration_ms + 'ms' : '' }}</span>
         </button>
-        <p v-if="executions.length === 0" class="px-3 py-4 text-[11px] text-zinc-600">No runs yet — press ▶ Run.</p>
+        <p v-if="executions.length === 0" class="px-3 py-4 text-[11px] text-zinc-600">No runs yet - press ▶ Run.</p>
       </div>
 
       <!-- node run log -->

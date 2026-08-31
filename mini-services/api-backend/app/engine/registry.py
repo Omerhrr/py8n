@@ -1,4 +1,4 @@
-"""Node registry — maps node type strings to executable classes."""
+"""Node registry - maps node type strings to executable classes."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ for _cls in (
     WebhookTriggerNode,
     ErrorTriggerNode,
     ScheduleTriggerNode,
-    ChatTriggerNode,    # v25: conversational workflows — one run per chat message
+    ChatTriggerNode,    # v25: conversational workflows - one run per chat message
     HttpRequestNode,
     ExecuteWorkflowNode,
     IfConditionNode,
@@ -77,7 +77,7 @@ for _cls in (
     RespondToWebhookNode,
     WaitForResumeNode,
     SlackMessageNode,
-    StickyNoteNode,    # v19: canvas annotation — hidden from definitions
+    StickyNoteNode,    # v19: canvas annotation - hidden from definitions
     BatchTriggerNode,  # internal: injected into loop-body sub-runs
 ):
     register(_cls)

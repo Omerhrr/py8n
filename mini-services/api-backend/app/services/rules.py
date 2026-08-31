@@ -1,4 +1,4 @@
-"""Business rules engine (v30) — validate, warn and auto-compute on records.
+"""Business rules engine (v30) - validate, warn and auto-compute on records.
 
 Rules live in ``app.config["rules"]``:
 
@@ -13,16 +13,16 @@ Rules live in ``app.config["rules"]``:
 
         {"id": "rule_big", "name": "Big deal", "event": "update",
          "when": {"all": [{"field": "ltv", "op": "gte", "value": 5000}]},
-         "action": "warn", "message": "Big deal — call the customer"},
+         "action": "warn", "message": "Big deal - call the customer"},
     ]}
 
 Events: ``create`` (append only), ``update`` (edit only), ``always`` (both).
 Actions: ``block`` (reject with 400 + message), ``warn`` (accept, surface
-message in the response), ``set`` (compute/insert a field value — either a
+message in the response), ``set`` (compute/insert a field value - either a
 constant ``value`` or an arithmetic ``formula`` over row fields).
 
 Formulas are parsed with :mod:`ast` and restricted to numbers, field names
-and ``+ - * / % **`` — no calls, no attributes, no imports. Non-numeric
+and ``+ - * / % **`` - no calls, no attributes, no imports. Non-numeric
 field values make the formula skip (data owns the fallout, as in v29).
 """
 
@@ -54,12 +54,12 @@ _ALLOWED_BIN = {
 
 
 class RuleBlocked(ValueError):
-    """Raised when a ``block`` rule fires — surfaces as a 400."""
+    """Raised when a ``block`` rule fires - surfaces as a 400."""
 
 
 # ----------------------------------------------------------------- matching
 def _num(v: object) -> float | None:
-    """Loose numeric coercion — bools are NOT numbers for rule purposes."""
+    """Loose numeric coercion - bools are NOT numbers for rule purposes."""
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -120,7 +120,7 @@ def _match(op: str, actual: object, expected: object) -> bool:
 
 
 def eval_condition(when: dict | None, row: dict) -> bool:
-    """``{"all": [...]}`` conjunction — missing/empty ``when`` matches everything."""
+    """``{"all": [...]}`` conjunction - missing/empty ``when`` matches everything."""
     clauses = (when or {}).get("all") if isinstance(when, dict) else None
     if not clauses:
         return True
@@ -294,7 +294,7 @@ def apply_rules(
                 try:
                     val: object = eval_formula(rule["formula"], out)
                 except ValueError:
-                    continue  # non-numeric data — leave the submitted value alone
+                    continue  # non-numeric data - leave the submitted value alone
             else:
                 val = rule.get("value")
             out[field] = _cast_set(field, val, schema)
@@ -307,7 +307,7 @@ def dry_run(
     event: str,
     schema: list[dict],
 ) -> dict:
-    """Same evaluation without raising — for the builder's test button."""
+    """Same evaluation without raising - for the builder's test button."""
     matches: list[dict] = []
     warnings: list[str] = []
     blocked = False

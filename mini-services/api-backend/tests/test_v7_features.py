@@ -1,4 +1,4 @@
-"""V7 feature tests: automation lifecycle — schedules introspection + activation.
+"""V7 feature tests: automation lifecycle - schedules introspection + activation.
 
 Covers: GET /workflows/{id}/schedule (fire-time previews), POST activate /
 deactivate with pre-flight validation, save-time cron rejection, workflow-list
@@ -6,7 +6,7 @@ schedule fields, and the global GET /schedules overview.
 
 Runs the FastAPI app in-process via httpx ASGITransport against the dev SQLite
 DB (same harness as the v4 tests). APScheduler is not started in-process, so
-resync calls are no-ops — pure API-level behaviour is exercised.
+resync calls are no-ops - pure API-level behaviour is exercised.
 """
 
 from __future__ import annotations

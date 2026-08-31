@@ -1,4 +1,4 @@
-"""Datasets API (v27) — first-class tabular data objects.
+"""Datasets API (v27) - first-class tabular data objects.
 
 Endpoints
 ---------
@@ -86,11 +86,11 @@ def _parse_upload(filename: str, raw: bytes) -> pd.DataFrame:
         else:
             raise HTTPException(
                 status_code=415,
-                detail="Unsupported file type — upload .xlsx, .csv or .json",
+                detail="Unsupported file type - upload .xlsx, .csv or .json",
             )
     except HTTPException:
         raise
-    except Exception as exc:  # noqa: BLE001 — parse failures surface as 400
+    except Exception as exc:  # noqa: BLE001 - parse failures surface as 400
         raise HTTPException(status_code=400, detail=f"Could not parse file: {exc}") from exc
     if df.empty:
         raise HTTPException(status_code=400, detail="File contains no data rows")

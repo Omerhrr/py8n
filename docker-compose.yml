@@ -1,4 +1,4 @@
-# Py8n — production cluster
+# Py8n - production cluster
 #
 #   Nuxt 3 frontend  ──►  Caddy (single entrypoint, XTransformPort routing)
 #   FastAPI api      ──►  PostgreSQL   ──►  shared volume
@@ -72,7 +72,7 @@ services:
     environment:
       LLM_BRIDGE_PORT: "3010"
     # In self-hosted deployments without platform AI credentials the bridge
-    # stays unused — the LLM node then runs against your own
+    # stays unused - the LLM node then runs against your own
     # OpenAI-compatible credentials from the encrypted vault.
 
   frontend:

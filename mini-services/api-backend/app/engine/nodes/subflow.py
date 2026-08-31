@@ -1,4 +1,4 @@
-"""Execute Workflow node — run another Py8n workflow inline (sub-workflow)."""
+"""Execute Workflow node - run another Py8n workflow inline (sub-workflow)."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class ExecuteWorkflowNode(BaseNode):
     """Loads a workflow from the library and runs it synchronously.
 
     The sub-run shares the parent's event stream silence: it does not emit
-    node events (canvas node ids would collide) — instead the summarized
+    node events (canvas node ids would collide) - instead the summarized
     result lands on this node's output. Each sub-run is NOT persisted as a
     top-level execution log; the parent execution carries everything.
     """
@@ -41,7 +41,7 @@ class ExecuteWorkflowNode(BaseNode):
     async def execute(self, context: ExecutionContext) -> NodeResult:
         p = self.params  # type: ExecuteWorkflowNode.ParamsModel
         if not p.workflow_id:
-            raise NodeExecutionError("No workflow selected — pick one in the node settings")
+            raise NodeExecutionError("No workflow selected - pick one in the node settings")
         if context.depth >= MAX_DEPTH:
             raise NodeExecutionError(f"Sub-workflow nesting too deep (limit {MAX_DEPTH})")
 
@@ -83,7 +83,7 @@ class ExecuteWorkflowNode(BaseNode):
         sub_status = result["status"]
         if sub_status == "waiting":
             raise NodeExecutionError(
-                f"Sub-workflow {workflow.name!r} paused on a Wait for Resume node — "
+                f"Sub-workflow {workflow.name!r} paused on a Wait for Resume node - "
                 "wait nodes are not supported inside sub-workflows"
             )
         if sub_status != "success":

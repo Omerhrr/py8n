@@ -1,20 +1,20 @@
-"""V32 feature tests: Document AI — documents in, structured data out.
+"""V32 feature tests: Document AI - documents in, structured data out.
 
 * /documents/engines: capability probe (OCR availability via tesseract binary,
   supported format list).
 * /documents/extract: multipart upload → {engine, pages, text, tables} with
-  per-format engines — pdfplumber (PDF text + ruled tables), pytesseract
+  per-format engines - pdfplumber (PDF text + ruled tables), pytesseract
   (image OCR), python-docx, openpyxl (sheets = tables), csv/tsv/json/text.
   Unsupported types 415, empty/broken files 400.
 * /documents/to-dataset: the best table becomes a first-class v27 dataset
-  (source="document") with numeric coercion — qty/amount strings cast to
-  real numbers, leading-zero and mixed columns stay text — immediately
+  (source="document") with numeric coercion - qty/amount strings cast to
+  real numbers, leading-zero and mixed columns stay text - immediately
   SQL-queryable. Text-only documents 400, dup names 409.
 * document_extract node: path source (missing file / unsupported ext → run
   errors), coerced items out, registry grows 36 → 37 visible node types.
 
 Fixtures are generated in-memory (reportlab PDF, PIL PNG, python-docx,
-openpyxl) — no binary assets in the repo.
+openpyxl) - no binary assets in the repo.
 """
 
 from __future__ import annotations
@@ -95,7 +95,7 @@ def _find_node_run(execution: dict, node_name: str) -> dict | None:
 
 # ----------------------------------------------------------------- fixtures
 def _invoice_pdf() -> bytes:
-    """Ruled invoice table — pdfplumber's lattice detection needs the grid lines."""
+    """Ruled invoice table - pdfplumber's lattice detection needs the grid lines."""
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import getSampleStyleSheet
@@ -103,7 +103,7 @@ def _invoice_pdf() -> bytes:
 
     buf = io.BytesIO()
     story = [
-        Paragraph("ACME Consulting — Invoice INV-2026-004", getSampleStyleSheet()["Title"]),
+        Paragraph("ACME Consulting - Invoice INV-2026-004", getSampleStyleSheet()["Title"]),
         Paragraph("Client: Globex Ltd. Terms: Net 30", getSampleStyleSheet()["Normal"]),
     ]
     rows = [
@@ -258,7 +258,7 @@ def test_v32_docx_and_xlsx():
 
             buf = io.BytesIO()
             d = docx_lib.Document()
-            d.add_paragraph("Meeting minutes — budget review")
+            d.add_paragraph("Meeting minutes - budget review")
             t = d.add_table(rows=2, cols=2)
             t.rows[0].cells[0].text = "dept"
             t.rows[0].cells[1].text = "budget"
@@ -468,7 +468,7 @@ def test_v32_coercion_rules():
     assert out[0]["amount"] == 4200.0 and out[2]["amount"] == ""  # blank kept
     assert out[0]["code"] == "007" and out[0]["note"] == "x"  # leading zeros + mixed stay text
 
-    # negatives (ints) and dot-leading floats — in SEPARATE columns (a column
+    # negatives (ints) and dot-leading floats - in SEPARATE columns (a column
     # mixing ints and floats stays text by design)
     out2 = doc_svc.coerce_items_dtypes([{"a": "-12", "b": ".5"}, {"a": "3", "b": "2.5"}])
     assert out2[0]["a"] == -12 and isinstance(out2[0]["a"], int)
@@ -499,5 +499,5 @@ def test_v32_coercion_rules():
 
 # NOTE: old node count assertions live in test_v10 (websocket), test_v22 (355),
 # test_v24 (420), test_v25 (95), test_v27 (100), test_v28 (129), test_v30 (124),
-# test_v31 (85) — all bumped 36 → 37 by scripts/bump_counts_v32.py alongside
+# test_v31 (85) - all bumped 36 → 37 by scripts/bump_counts_v32.py alongside
 # the smoke test.

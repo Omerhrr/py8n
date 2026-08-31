@@ -1,4 +1,4 @@
-"""Respond to Webhook — releases the waiting HTTP caller mid-flow.
+"""Respond to Webhook - releases the waiting HTTP caller mid-flow.
 
 n8n-parity node (v21). In a webhook-triggered workflow whose Webhook Trigger
 uses ``response_mode="respond_node"``, this node answers the inbound HTTP
@@ -44,8 +44,8 @@ class RespondToWebhookNode(BaseNode):
         body: str = Field(
             default='{"ok": true}',
             description=(
-                'Response body. Jinja is resolved first — a JSON template like '
-                '{"echo": "{{ input.body.msg }}"} — and parsed when content type is JSON.'
+                'Response body. Jinja is resolved first - a JSON template like '
+                '{"echo": "{{ input.body.msg }}"} - and parsed when content type is JSON.'
             ),
             json_schema_extra={"widget": "textarea", "rows": 6, "hint": 'e.g. {"ticket": "{{ nodes.webhook1.output.body.id }}" }'},
         )
@@ -80,6 +80,6 @@ class RespondToWebhookNode(BaseNode):
         status = int(re.sub(r"[^0-9]", "", str(p.status_code)) or 200)
 
         await context.respond_channel(status, payload, p.content_type)
-        # Pass the incoming payload through so downstream nodes keep running —
+        # Pass the incoming payload through so downstream nodes keep running -
         # answering early does not end the flow (n8n semantics).
         return self._single(context.current_input)

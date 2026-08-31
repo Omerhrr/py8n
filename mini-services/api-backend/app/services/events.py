@@ -1,9 +1,9 @@
-"""Event bus — broadcast execution events to WebSocket subscribers.
+"""Event bus - broadcast execution events to WebSocket subscribers.
 
 Two interchangeable implementations selected by ``settings.execution_mode``:
 
-* :class:`MemoryEventBus` — in-process pub/sub (sandbox / single-process mode).
-* :class:`RedisEventBus`  — Redis pub/sub fan-out across API + Celery workers
+* :class:`MemoryEventBus` - in-process pub/sub (sandbox / single-process mode).
+* :class:`RedisEventBus`  - Redis pub/sub fan-out across API + Celery workers
   (production docker-compose mode).
 """
 

@@ -1,4 +1,4 @@
-"""Execution dispatcher — picks inline (sandbox) or Celery (production) transport.
+"""Execution dispatcher - picks inline (sandbox) or Celery (production) transport.
 
 Both paths share the same contract: return an execution id immediately; the
 actual run happens in the background and streams events to the event bus.

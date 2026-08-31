@@ -76,7 +76,7 @@ def test_v31_dashboard_crud_and_validation():
 
     async def _go():
         async with _client() as client:
-            # health gate — strict pin lives in the latest wave's tests only
+            # health gate - strict pin lives in the latest wave's tests only
             r = await client.get("/health")
             assert r.status_code == 200 and r.json()["app"] == "Py8n"  # version pinned in the latest wave's tests
             # node registry untouched by v31 (dashboards are objects, not nodes)
@@ -325,7 +325,7 @@ def test_v31_slugs_and_regenerate():
 
 def test_v31_board_survives_dataset_deletion():
     """A published board stays renderable (200, empty content) when a component's
-    dataset is deleted later — compute is tolerant, never 500."""
+    dataset is deleted later - compute is tolerant, never 500."""
 
     async def _go():
         async with _client() as client:

@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models: workflows, execution logs, credentials.
 
 Graphs are stored as JSON (JSONB on PostgreSQL via variant) so the visual
-canvas document maps 1:1 to a database row — the same design used by n8n.
+canvas document maps 1:1 to a database row - the same design used by n8n.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ class Workflow(Base):
     # n8n-style error workflow: dispatched with a structured payload when an
     # execution of this workflow ends in an unhandled error (v8).
     error_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
-    # Organizational folder (v16) — plain id validated in the API layer (same
+    # Organizational folder (v16) - plain id validated in the API layer (same
     # pattern as error_workflow_id, keeps SQLite FK enforcement out of scope).
     folder_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     # Organizational labels (v12): normalized lowercase strings, max 10.
@@ -116,7 +116,7 @@ class WorkflowVersion(Base):
     """One immutable snapshot of a workflow's content (v13).
 
     Created automatically on create/import/duplicate and on every content
-    change (graph / name / description) via services.versions. Bounded —
+    change (graph / name / description) via services.versions. Bounded -
     the newest MAX_VERSIONS rows are kept per workflow.
     """
 
@@ -168,7 +168,7 @@ class Folder(Base):
 
 
 class EnvVariable(Base):
-    """Global environment variable (v15) — exposed to templates as ``env.KEY``.
+    """Global environment variable (v15) - exposed to templates as ``env.KEY``.
 
     Values are ALWAYS Fernet-encrypted at rest (uniform code path, no
     plaintext in the DB). ``is_secret`` rows are additionally masked in the
@@ -187,7 +187,7 @@ class EnvVariable(Base):
 
 
 class AppSetting(Base):
-    """Global key/value platform setting (v19) — retention policies etc.
+    """Global key/value platform setting (v19) - retention policies etc.
 
     Values are JSON documents; a missing row means "use the built-in default"
     (declared next to the consumer, e.g. services/retention.py).
@@ -216,7 +216,7 @@ class AgentMemory(Base):
 
 
 class Dataset(Base):
-    """First-class tabular dataset (v27) — the data platform foundation.
+    """First-class tabular dataset (v27) - the data platform foundation.
 
     Rows live in a Parquet file (``{id}.parquet`` under data/datasets/,
     written/read via DuckDB); this row holds metadata only. Workflows and
@@ -238,7 +238,7 @@ class Dataset(Base):
 
 
 class Artifact(Base):
-    """Binary artifact produced by workflow runs (v28) — charts, ML models.
+    """Binary artifact produced by workflow runs (v28) - charts, ML models.
 
     Bytes live under data/artifacts/ (``{id}.{ext}``); metadata here. Chart
     PNGs are rendered inline in the executions drawer; model pickles are
@@ -260,12 +260,12 @@ class Artifact(Base):
 
 
 class App(Base):
-    """First-class application (v29) — the Excel → App builder flagship.
+    """First-class application (v29) - the Excel → App builder flagship.
 
     An app binds ONE dataset and a component ``config`` (stat cards, data
     table, form, chart). Drafts live in the builder; published apps are
     served at ``/run/{slug}`` where end users browse, create, edit and
-    delete records — every mutation lands in the bound dataset's parquet.
+    delete records - every mutation lands in the bound dataset's parquet.
     """
 
     __tablename__ = "apps"
@@ -283,7 +283,7 @@ class App(Base):
 
 
 class Dashboard(Base):
-    """First-class dashboard (v31) — the analytical face of the Data OS.
+    """First-class dashboard (v31) - the analytical face of the Data OS.
 
     Where an App binds ONE dataset and owns the write path, a Dashboard is
     read-only analytics over MANY datasets: every component carries its own

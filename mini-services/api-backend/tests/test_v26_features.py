@@ -7,7 +7,7 @@ answers with text/event-stream frames while the flow runs:
 The pump subscribes to the event bus BEFORE the flow task is created, so no
 event is lost. On timeout the SSE closes with a timeout frame while the flow
 keeps running in the background (no zombie "running" executions from the
-client's perspective — the run completes and is recorded normally).
+client's perspective - the run completes and is recorded normally).
 
 Runs the FastAPI app in-process via httpx ASGITransport (same harness as v4-v25).
 """

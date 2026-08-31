@@ -1,9 +1,9 @@
-"""Dashboard core (v31) — the analytical face of the Data OS.
+"""Dashboard core (v31) - the analytical face of the Data OS.
 
 Where apps (v29) bind ONE dataset and own the write path, a dashboard is
 read-only analytics over MANY datasets. Every component carries its own
 ``dataset_id``, so one board mixes KPIs from a CRM dataset with breakdown
-charts from a billing dataset — the "aggregate view across the business"
+charts from a billing dataset - the "aggregate view across the business"
 that a single-dataset app cannot show.
 
 config = {"components": [
@@ -20,7 +20,7 @@ config = {"components": [
 Chart difference vs apps: a dashboard renders EVERY chart component (apps
 render the first only), ``line`` sorts labels ascending for trend reading,
 and ``pie`` stays capped at 8 slices. compute_config() returns the rendered
-payload for the whole board — the single source of truth used by both the
+payload for the whole board - the single source of truth used by both the
 draft preview endpoint and the published runtime.
 """
 
@@ -118,11 +118,11 @@ def generate_config(datasets: list[tuple[Dataset, pd.DataFrame]]) -> dict:
     """Inspect the datasets and lay out a sensible default board.
 
     Layout recipe (top to bottom):
-      * one KPI row — count stat per dataset + avg of the first numeric
+      * one KPI row - count stat per dataset + avg of the first numeric
         column per dataset (max 6 stat cards total),
       * one breakdown chart per dataset on its lowest-cardinality text
         column (2..12 unique values), bar + count,
-      * one table for the FIRST dataset only (top 8 rows) — boards are
+      * one table for the FIRST dataset only (top 8 rows) - boards are
         about shape, not row dumps.
     Text components are the builder author's job, not the generator's.
     """
@@ -134,7 +134,7 @@ def generate_config(datasets: list[tuple[Dataset, pd.DataFrame]]) -> dict:
                 "id": f"stat_{ds.id[:6]}_count",
                 "type": "stat",
                 "dataset_id": ds.id,
-                "label": f"{ds.name} — records",
+                "label": f"{ds.name} - records",
                 "agg": "count",
             }
         )
@@ -148,7 +148,7 @@ def generate_config(datasets: list[tuple[Dataset, pd.DataFrame]]) -> dict:
                         "id": f"stat_{ds.id[:6]}_{col}",
                         "type": "stat",
                         "dataset_id": ds.id,
-                        "label": f"{ds.name} — avg {humanize(col)}",
+                        "label": f"{ds.name} - avg {humanize(col)}",
                         "agg": "avg",
                         "column": col,
                     }
@@ -184,7 +184,7 @@ def generate_config(datasets: list[tuple[Dataset, pd.DataFrame]]) -> dict:
                     "id": "table_main",
                     "type": "table",
                     "dataset_id": first_ds.id,
-                    "title": f"{first_ds.name} — latest",
+                    "title": f"{first_ds.name} - latest",
                     "columns": [c["name"] for c in schema][:8],
                     "limit": 8,
                 }
@@ -280,7 +280,7 @@ def validate_config(config: dict, datasets: dict[str, list[dict]]) -> None:
 
 # ----------------------------------------------------------------- computation
 def _stat_value(df: pd.DataFrame, agg: str, column: str | None, present: bool = True):
-    if not present:  # dataset gone — no data is not the same as zero
+    if not present:  # dataset gone - no data is not the same as zero
         return None
     if agg == "count" or not len(df):
         return int(len(df)) if agg == "count" else None
@@ -310,7 +310,7 @@ def _chart_data(comp: dict, df: pd.DataFrame) -> dict:
         col = comp.get("column")
         if col not in df.columns:
             return empty
-        # pandas has no "avg" alias — translate ("avg" is our API vocabulary)
+        # pandas has no "avg" alias - translate ("avg" is our API vocabulary)
         grouped = (
             pd.to_numeric(df[col], errors="coerce")
             .groupby(series)
@@ -333,7 +333,7 @@ def compute_config(
     """Render EVERY component → the board payload (preview + runtime share this).
 
     ``loaders`` maps dataset_id → DataFrame (preloaded by the API layer).
-    Broken references degrade to empty content, never 500s — a board must
+    Broken references degrade to empty content, never 500s - a board must
     stay renderable if a component points at a dataset deleted later.
     """
     out: list[dict] = []

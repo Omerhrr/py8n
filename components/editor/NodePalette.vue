@@ -91,7 +91,7 @@ function onDragStart(event: DragEvent, def: NodeDefinition) {
     </div>
 
     <div class="border-t border-zinc-800/70 p-3 text-[10px] leading-relaxed text-zinc-600">
-      Drag a node onto the canvas or click to add. Connect ports to build the flow — execution order is computed automatically.
+      Drag a node onto the canvas or click to add. Connect ports to build the flow - execution order is computed automatically.
     </div>
   </aside>
 </template>

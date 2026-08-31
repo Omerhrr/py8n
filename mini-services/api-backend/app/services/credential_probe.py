@@ -1,4 +1,4 @@
-"""Live credential probes — one per credential type.
+"""Live credential probes - one per credential type.
 
 ``probe_credential`` performs a cheap, real-world check (connect / auth /
 HTTP call) and returns an honest result instead of guessing. Used by
@@ -76,7 +76,7 @@ def _probe_smtp(data: dict) -> dict[str, Any]:  # noqa: C901
                 smtp.starttls()
                 smtp.ehlo()
             except smtplib.SMTPException:
-                pass  # server may not offer STARTTLS — continue unencrypted
+                pass  # server may not offer STARTTLS - continue unencrypted
         if username:
             if not password:
                 raise ProbeError("SMTP credential has a username but no password")
@@ -164,7 +164,7 @@ async def probe_credential(
     """Run the probe for ``cred_type``. Returns {ok, message, ...detail}.
 
     Raises ``ValueError`` for unknown credential types and ``ProbeError``
-    for structurally incomplete ones — both mapped to HTTP 400 by the API.
+    for structurally incomplete ones - both mapped to HTTP 400 by the API.
     Network/auth failures are reported as ``ok: false`` results, not errors.
     """
     fn = PROBES.get(cred_type)
@@ -187,7 +187,7 @@ async def probe_credential(
             "message": f"Network error: {exc}",
             "latency_ms": int((time.monotonic() - t0) * 1000),
         }
-    except Exception as exc:  # noqa: BLE001 — smtplib.SMTPAuthenticationError etc.
+    except Exception as exc:  # noqa: BLE001 - smtplib.SMTPAuthenticationError etc.
         return {
             "ok": False,
             "message": f"{type(exc).__name__}: {exc}",

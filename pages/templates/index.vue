@@ -67,7 +67,7 @@ async function confirmInstall() {
     installTarget.value = null
     navigateTo(`/workflows/${wf.id}`)
   } catch (e: unknown) {
-    installError.value = e instanceof Error ? e.message : 'Install failed — try again.'
+    installError.value = e instanceof Error ? e.message : 'Install failed - try again.'
   } finally {
     installing.value = false
   }
@@ -102,7 +102,7 @@ watch(installTarget, (t) => {
           </div>
           <div>
             <h1 class="text-lg font-bold tracking-tight">Readymade Automations</h1>
-            <p class="-mt-0.5 text-[11px] text-zinc-500">{{ templates.length }} gallery-tested blueprints — install, tweak, run</p>
+            <p class="-mt-0.5 text-[11px] text-zinc-500">{{ templates.length }} gallery-tested blueprints - install, tweak, run</p>
           </div>
         </div>
         <label class="relative">
@@ -154,7 +154,7 @@ watch(installTarget, (t) => {
         <Search class="mx-auto mb-3 h-8 w-8 text-zinc-600" />
         <p class="font-medium text-zinc-300">{{ search || category ? 'No automations match your filters.' : 'No automations available.' }}</p>
         <p class="mx-auto mt-2 max-w-md text-sm leading-relaxed text-zinc-500">
-          Try a different keyword or category — every template validates against the engine and runs offline-safe unless it calls live integrations.
+          Try a different keyword or category - every template validates against the engine and runs offline-safe unless it calls live integrations.
         </p>
       </div>
 

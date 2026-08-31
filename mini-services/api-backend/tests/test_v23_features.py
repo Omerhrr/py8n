@@ -245,7 +245,7 @@ def test_v23_agent_memory_trim():
 
 
 # ---------------------------------------------------------------------------
-# 3) Webhook auth — header mode: 401s do NOT run the flow
+# 3) Webhook auth - header mode: 401s do NOT run the flow
 # ---------------------------------------------------------------------------
 def test_v23_webhook_auth_header():
     tag = uuid.uuid4().hex[:8]
@@ -297,7 +297,7 @@ def test_v23_webhook_auth_header():
 
 
 # ---------------------------------------------------------------------------
-# 4) Webhook auth — basic mode incl. malformed header
+# 4) Webhook auth - basic mode incl. malformed header
 # ---------------------------------------------------------------------------
 def test_v23_webhook_auth_basic():
     tag = uuid.uuid4().hex[:8]

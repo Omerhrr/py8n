@@ -2,7 +2,7 @@
   "name": "py8n-llm-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "Py8n sandbox LLM bridge — OpenAI-compatible shim over z-ai-web-dev-sdk",
+  "description": "Py8n sandbox LLM bridge - OpenAI-compatible shim over z-ai-web-dev-sdk",
   "scripts": {
     "dev": "bun --hot index.ts"
   },

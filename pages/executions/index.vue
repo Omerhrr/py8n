@@ -66,7 +66,7 @@ async function refresh({ silent = false } = {}) {
       await store.loadExecutionDetail(expandedId.value)
     }
   } catch {
-    /* backend hiccup — keep last data */
+    /* backend hiccup - keep last data */
   } finally {
     if (!silent) loading.value = false
   }
@@ -201,11 +201,11 @@ const statusDot = (status: string) => {
 const triggerIcon = (t: string) => (t === 'webhook' ? Webhook : t === 'schedule' ? Clock : Play)
 
 function fmtDuration(ms: number | null) {
-  if (ms == null) return '—'
+  if (ms == null) return '-'
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)}s`
 }
 function fmtRelative(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   const diff = Date.now() - new Date(iso).getTime()
   if (diff < 10_000) return 'just now'
   if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`
@@ -214,7 +214,7 @@ function fmtRelative(iso: string | null) {
   return new Date(iso).toLocaleDateString()
 }
 function fmtFull(iso: string | null) {
-  return iso ? new Date(iso).toLocaleString() : '—'
+  return iso ? new Date(iso).toLocaleString() : '-'
 }
 
 const prettyJson = (v: any) => {
@@ -501,7 +501,7 @@ const nodeRunsOf = (detail: ExecutionDetail | null): NodeRun[] => detail?.node_r
                 </div>
               </div>
               <p v-if="!nodeRunsOf(store.selectedExecution).length" class="rounded-xl border border-zinc-800 px-3 py-4 text-center text-[11px] text-zinc-600">
-                No node runs recorded yet — still running?
+                No node runs recorded yet - still running?
               </p>
             </template>
           </div>

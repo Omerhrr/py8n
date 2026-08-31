@@ -1,6 +1,6 @@
 // Py8n LLM bridge (port 3010)
 // Exposes a minimal OpenAI-compatible /v1/chat/completions endpoint backed by
-// the platform AI gateway — lets the Python LLM Chat node offer AI out of the
+// the platform AI gateway - lets the Python LLM Chat node offer AI out of the
 // box in the sandbox without any API keys. Production uses real
 // OpenAI-compatible credentials via the Fernet vault instead.
 //

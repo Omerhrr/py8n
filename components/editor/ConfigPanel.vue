@@ -236,7 +236,7 @@ function onPinInput(raw: string) {
   pinRaw.value = raw
   lastOutputNote.value = ''
   if (!raw.trim()) {
-    pinError.value = 'Pinned data is required — an empty list [] is fine'
+    pinError.value = 'Pinned data is required - an empty list [] is fine'
     return
   }
   try {
@@ -307,7 +307,7 @@ async function runTest() {
       <p class="text-sm font-medium text-zinc-400">No node selected</p>
       <p class="mt-1 text-xs leading-relaxed text-zinc-600">
         Click a node on the canvas to edit its parameters. Forms are generated
-        from the backend's Pydantic schemas — no UI code per node type.
+        from the backend's Pydantic schemas - no UI code per node type.
       </p>
     </div>
 
@@ -343,14 +343,14 @@ async function runTest() {
           <button
             class="flex h-5 w-9 items-center rounded-full transition"
             :class="node.disabled ? 'bg-amber-500' : 'bg-zinc-700'"
-            :title="node.disabled ? 'Enable node' : 'Disable node — input passes through'"
+            :title="node.disabled ? 'Enable node' : 'Disable node - input passes through'"
             @click="emit('toggle-disabled', !node.disabled)"
           >
             <span class="mx-0.5 h-4 w-4 rounded-full bg-white shadow transition" :class="node.disabled ? 'translate-x-4' : ''" />
           </button>
         </div>
         <p v-if="node.disabled" class="mt-1 text-[10px] leading-snug text-amber-500/70">
-          Skipped at run time — its input passes through untouched.
+          Skipped at run time - its input passes through untouched.
         </p>
 
         <p class="mt-1.5 text-[10px] leading-relaxed text-zinc-600">{{ definition?.description }}</p>
@@ -381,7 +381,7 @@ async function runTest() {
               class="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs outline-none transition focus:border-orange-500/60"
               @change="emit('update-param', field.key, ($event.target as HTMLSelectElement).value || '')"
             >
-              <option value="">— pick a workflow —</option>
+              <option value="">- pick a workflow -</option>
               <option v-for="wf in workflowOptions.filter(w => w.id !== workflowId)" :key="wf.id" :value="wf.id">
                 {{ wf.name }}
               </option>
@@ -398,7 +398,7 @@ async function runTest() {
               class="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs outline-none transition focus:border-orange-500/60"
               @change="emit('update-param', field.key, ($event.target as HTMLSelectElement).value || null)"
             >
-              <option value="">— none —</option>
+              <option value="">- none -</option>
               <option v-for="cred in credentials" :key="cred.id" :value="cred.id">
                 {{ cred.name }} ({{ prettyType(cred.type) }} {{ cred.masked_hint }})
               </option>
@@ -443,7 +443,7 @@ async function runTest() {
                 :key="f.key"
                 v-model="credData[f.key]"
                 :type="f.secret ? 'password' : 'text'"
-                :placeholder="`${f.label} — ${f.placeholder}`"
+                :placeholder="`${f.label} - ${f.placeholder}`"
                 class="mb-2 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-orange-500/60"
               />
               <button
@@ -488,11 +488,11 @@ async function runTest() {
                     class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
                     @change="setTool(ti, { kind: ($event.target as HTMLSelectElement).value })"
                   >
-                    <option value="knowledge">knowledge — static text the agent can quote</option>
-                    <option value="workflow">workflow — run a sub-workflow</option>
-                    <option value="http">http — model-driven request</option>
-                    <option value="dataset">dataset — read-only SQL over your data</option>
-                    <option value="code">code — sandboxed Python compute</option>
+                    <option value="knowledge">knowledge - static text the agent can quote</option>
+                    <option value="workflow">workflow - run a sub-workflow</option>
+                    <option value="http">http - model-driven request</option>
+                    <option value="dataset">dataset - read-only SQL over your data</option>
+                    <option value="code">code - sandboxed Python compute</option>
                   </select>
                   <input
                     :value="tool.description"
@@ -506,7 +506,7 @@ async function runTest() {
                     class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60"
                     @change="setTool(ti, { workflow_id: ($event.target as HTMLSelectElement).value || null })"
                   >
-                    <option value="">— pick a workflow —</option>
+                    <option value="">- pick a workflow -</option>
                     <option v-for="wf in workflowOptions.filter(w => w.id !== workflowId)" :key="wf.id" :value="wf.id">
                       {{ wf.name }}
                     </option>
@@ -537,7 +537,7 @@ async function runTest() {
                     @change="setTool(ti, { max_rows: Math.max(1, Math.min(200, Number(($event.target as HTMLInputElement).value) || 25)) })"
                   />
                   <p v-if="tool.kind === 'dataset'" class="text-[10px] leading-snug text-zinc-600">
-                    The model calls this with {"sql": "SELECT …"} — one read-only statement; every dataset is a view named after it.
+                    The model calls this with {"sql": "SELECT …"} - one read-only statement; every dataset is a view named after it.
                   </p>
                   <input
                     v-if="tool.kind === 'code'"
@@ -550,7 +550,7 @@ async function runTest() {
                     @change="setTool(ti, { timeout_seconds: Math.max(1, Math.min(60, Number(($event.target as HTMLInputElement).value) || 10)) })"
                   />
                   <p v-if="tool.kind === 'code'" class="text-[10px] leading-snug text-zinc-600">
-                    The model calls this with {"code": "result = …"} — restricted imports; it gets back result + stdout.
+                    The model calls this with {"code": "result = …"} - restricted imports; it gets back result + stdout.
                   </p>
                 </div>
               </div>
@@ -561,7 +561,7 @@ async function runTest() {
                 <Plus class="h-3 w-3" /> Add tool
               </button>
               <p v-if="!toolsList.length" class="text-[10px] leading-snug text-zinc-600">
-                No tools yet — the agent answers directly. Add tools to let it look things up or take action.
+                No tools yet - the agent answers directly. Add tools to let it look things up or take action.
               </p>
             </div>
           </template>
@@ -675,7 +675,7 @@ async function runTest() {
               <button
                 class="flex h-5 w-9 items-center rounded-full transition"
                 :class="isPinned ? 'bg-amber-500' : 'bg-zinc-700'"
-                :title="isPinned ? 'Unpin — node executes normally' : 'Pin output data (mock)'"
+                :title="isPinned ? 'Unpin - node executes normally' : 'Pin output data (mock)'"
                 @click="togglePin"
               >
                 <span class="mx-0.5 h-4 w-4 rounded-full bg-white shadow transition" :class="isPinned ? 'translate-x-4' : ''" />
@@ -707,7 +707,7 @@ async function runTest() {
 
             <!-- test step -->
             <div class="border-t border-zinc-800/80 pt-2.5">
-              <label class="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Test input (JSON) — reaches the node as its input</label>
+              <label class="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Test input (JSON) - reaches the node as its input</label>
               <textarea
                 v-model="testRaw"
                 :rows="3"

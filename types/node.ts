@@ -50,7 +50,7 @@ export interface NodeSpec {
   parameters: Record<string, any>
   settings?: NodeSettings
   disabled?: boolean // skipped at run time, input passes through
-  pinned_data?: any | null // v17: pinned output — returned without executing (manual runs + test step)
+  pinned_data?: any | null // v17: pinned output - returned without executing (manual runs + test step)
 }
 
 export interface EdgeSpec {
@@ -315,7 +315,7 @@ export type NodeRunStatus = 'idle' | 'running' | 'success' | 'error' | 'skipped'
 export interface EnvVariable {
   id: string
   key: string
-  /** Plaintext value — null when the row is a secret (write-only). */
+  /** Plaintext value - null when the row is a secret (write-only). */
   value: string | null
   is_secret: boolean
   description: string

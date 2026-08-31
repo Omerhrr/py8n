@@ -1,4 +1,4 @@
-"""LLM Chat node — OpenAI-compatible or the built-in sandbox bridge."""
+"""LLM Chat node - OpenAI-compatible or the built-in sandbox bridge."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ class LlmChatNode(BaseNode):
         system_prompt: str = Field(default="You are a helpful automation assistant.", json_schema_extra={"widget": "textarea", "rows": 3})
         user_prompt: str = Field(
             default="Summarize: {{ input }}",
-            description="User message — supports {{ expressions }}",
+            description="User message - supports {{ expressions }}",
             json_schema_extra={"widget": "textarea", "rows": 5},
         )
         temperature: float = Field(default=0.7, ge=0, le=2)

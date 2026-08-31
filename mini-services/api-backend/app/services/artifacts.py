@@ -1,4 +1,4 @@
-"""Artifact storage (v28) — chart PNGs, model pickles, future files.
+"""Artifact storage (v28) - chart PNGs, model pickles, future files.
 
 Bytes live under ``data/artifacts/{id}.{ext}``; an ``artifacts`` row holds
 metadata (kind, content_type, size, free-form meta). Nodes call

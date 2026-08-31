@@ -1,4 +1,4 @@
-"""WebSocket router (Phase 5) — live step-by-step execution progress.
+"""WebSocket router (Phase 5) - live step-by-step execution progress.
 
 GET /ws/executions/{execution_id}
 

@@ -118,13 +118,13 @@ async function removeDataset() {
 }
 
 function fmtCell(v: any): string {
-  if (v === null || v === undefined) return '—'
+  if (v === null || v === undefined) return '-'
   if (typeof v === 'object') return JSON.stringify(v)
   return String(v)
 }
 
 function fmtDate(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
@@ -201,7 +201,7 @@ const dtypeColor: Record<string, string> = {
             <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
               <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">Data preview</h2>
               <div class="flex items-center gap-2 text-xs text-zinc-500">
-                <span>rows {{ offset + 1 }}–{{ Math.min(offset + pageSize, meta.row_count) }} of {{ meta.row_count.toLocaleString() }}</span>
+                <span>rows {{ offset + 1 }}-{{ Math.min(offset + pageSize, meta.row_count) }} of {{ meta.row_count.toLocaleString() }}</span>
                 <button
                   class="rounded-lg border border-zinc-800 p-1 transition hover:text-zinc-200 disabled:opacity-30"
                   :disabled="offset === 0 || loadingRows"
@@ -231,14 +231,14 @@ const dtypeColor: Record<string, string> = {
                   </tr>
                 </tbody>
               </table>
-              <p v-else class="px-4 py-8 text-center text-xs text-zinc-500">No rows yet — write some from a workflow or append via the API.</p>
+              <p v-else class="px-4 py-8 text-center text-xs text-zinc-500">No rows yet - write some from a workflow or append via the API.</p>
             </div>
           </div>
 
           <!-- sql console -->
           <div class="mt-5 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
             <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
-              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">SQL console — DuckDB across all datasets</h2>
+              <h2 class="text-xs font-bold uppercase tracking-wider text-zinc-400">SQL console - DuckDB across all datasets</h2>
               <button
                 class="flex items-center gap-1.5 rounded-lg bg-orange-500 px-3 py-1 text-xs font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
                 :disabled="running || !sql.trim()"

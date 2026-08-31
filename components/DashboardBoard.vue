@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// Shared dashboard board renderer (v31) — used by the builder's live preview
+// Shared dashboard board renderer (v31) - used by the builder's live preview
 // and the public /d/{slug} page. Input: the RENDERED component payload from
 // POST /dashboards/{ref}/preview or GET /dashboards/{slug}/runtime.
 import { computed } from 'vue'
@@ -13,7 +13,7 @@ const ACCENT = computed(() => props.accent || 'from-cyan-500/80 to-cyan-400/50')
 
 // ---------- helpers ----------
 function statDisplay(v: any) {
-  if (v === null || v === undefined) return '—'
+  if (v === null || v === undefined) return '-'
   const n = Number(v)
   if (Number.isFinite(n)) {
     if (Math.abs(n) >= 1000000) return `${(n / 1000000).toFixed(1)}M`
@@ -146,7 +146,7 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
             <tbody>
               <tr v-for="(row, ri) in comp.rows" :key="ri" class="border-b border-zinc-800/40 last:border-0">
                 <td v-for="col in comp.columns" :key="col" class="max-w-[220px] truncate px-4 py-2 text-zinc-300">
-                  {{ row[col] === null || row[col] === undefined || row[col] === '' ? '—' : row[col] }}
+                  {{ row[col] === null || row[col] === undefined || row[col] === '' ? '-' : row[col] }}
                 </td>
               </tr>
             </tbody>

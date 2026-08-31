@@ -3,7 +3,7 @@
 Each chat message POSTed to /api/v1/chat/{workflow_id} starts one run. The
 reply comes from the last node's output (response_mode=last_node, default,
 extracted to a plain-text "reply") or from a Respond to Webhook node mid-flow
-(response_mode=respond_node — the v21 WebhookResponder channel reused).
+(response_mode=respond_node - the v21 WebhookResponder channel reused).
 Chat workflows must be ACTIVE and contain a chat_trigger node; the runner's
 _pick_trigger map gained "chat" so chat runs pick the Chat Trigger even when
 a Manual Trigger also sits on the canvas. session_id flows into the run so
@@ -190,7 +190,7 @@ def test_v25_chat_respond_node_mode():
             assert res.status_code == 200, res.text
             assert res.json() == {"reply": "custom: mid", "via": "respond"}
 
-            # the flow keeps running after answering — poll the execution
+            # the flow keeps running after answering - poll the execution
             for _ in range(100):
                 res = await client.get("/executions", params={"workflow_id": wf_id, "limit": 1})
                 assert res.status_code == 200
@@ -204,7 +204,7 @@ def test_v25_chat_respond_node_mode():
                 raise AssertionError("execution did not finish in time")
             assert execution["status"] == "success"
             assert execution["trigger_type"] == "chat"
-            # list items are summaries — fetch the detail for node runs
+            # list items are summaries - fetch the detail for node runs
             res = await client.get(f"/executions/{execution['id']}")
             assert res.status_code == 200
             detail = res.json()
@@ -302,7 +302,7 @@ def test_v25_chat_trigger_picked_over_manual():
 
 
 # ---------------------------------------------------------------------------
-# 6) Session synergy: agent memory keyed on the chat session_id — same session
+# 6) Session synergy: agent memory keyed on the chat session_id - same session
 #    recalls the earlier turn, a different session does not
 # ---------------------------------------------------------------------------
 def test_v25_chat_session_memory_synergy():
@@ -342,7 +342,7 @@ def test_v25_chat_session_memory_synergy():
             wf_id = await _make_workflow(client, f"tmp v25 chat memory {tag}", graph, is_active=True)
             wf_ids.append(wf_id)
 
-            # run 1 — session alpha: no prior turns
+            # run 1 - session alpha: no prior turns
             res = await client.post(f"/chat/{wf_id}", json={"message": "my name is Ada", "session_id": "alpha"})
             assert res.status_code == 200, res.text
             first = res.json()
@@ -350,7 +350,7 @@ def test_v25_chat_session_memory_synergy():
             assert len(seen_messages) == 1
             assert sum(1 for m in seen_messages[0] if m["role"] == "user") == 1
 
-            # run 2 — same session: the prior turn is injected
+            # run 2 - same session: the prior turn is injected
             res = await client.post(f"/chat/{wf_id}", json={"message": "what is my name?", "session_id": "alpha"})
             assert res.status_code == 200
             assert len(seen_messages) == 2
@@ -359,7 +359,7 @@ def test_v25_chat_session_memory_synergy():
             prior_user = [m["content"] for m in seen_messages[1] if m["role"] == "user"][0]
             assert "Ada" in prior_user
 
-            # run 3 — different session: isolated, no recall
+            # run 3 - different session: isolated, no recall
             res = await client.post(f"/chat/{wf_id}", json={"message": "hello", "session_id": "beta"})
             assert res.status_code == 200
             assert len(seen_messages) == 3

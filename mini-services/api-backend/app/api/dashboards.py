@@ -1,4 +1,4 @@
-"""Dashboards API (v31) — read-only analytics boards over MANY datasets.
+"""Dashboards API (v31) - read-only analytics boards over MANY datasets.
 
 Admin endpoints (resolve by id OR case-insensitive name)
 ----------------------------------------------------------
@@ -8,7 +8,7 @@ GET    /dashboards/{ref}              metadata
 PATCH  /dashboards/{ref}              rename (re-slugs) / re-describe / set config
 DELETE /dashboards/{ref}              drop board (datasets untouched)
 POST   /dashboards/{ref}/generate     re-generate config from fresh dataset order
-POST   /dashboards/{ref}/preview      compute the CURRENT config (drafts welcome) — builder live preview
+POST   /dashboards/{ref}/preview      compute the CURRENT config (drafts welcome) - builder live preview
 POST   /dashboards/{ref}/publish      draft → published (guards: ≥1 component, all datasets resolve, config valid)
 POST   /dashboards/{ref}/unpublish    published → draft
 
@@ -113,7 +113,7 @@ async def _load_generators(db: AsyncSession, dataset_ids: list[str]):
 
 
 async def _compute_payload(row: Dashboard, db: AsyncSession) -> dict:
-    """Rendered board payload — shared by preview and runtime (tolerant)."""
+    """Rendered board payload - shared by preview and runtime (tolerant)."""
     components = (row.config or {}).get("components", [])
     datasets = await _collect_datasets(db, _refs(components), strict=False)
     frames = await _load_frames(datasets)
@@ -147,7 +147,7 @@ async def create_dashboard(body: DashboardCreate, db: AsyncSession = Depends(get
         config = db_svc.generate_config(pairs)
     else:
         # No config and nothing to generate from (generate defaults to True,
-        # so blank creates land here too — same tolerance as apps).
+        # so blank creates land here too - same tolerance as apps).
         config = {"components": []}
 
     row = Dashboard(
@@ -208,7 +208,7 @@ async def regenerate_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)
         raise HTTPException(status_code=409, detail="Unpublish before regenerating")
     refs = _refs((row.config or {}).get("components", []))
     if not refs:
-        raise HTTPException(status_code=409, detail="No datasets referenced yet — add a component first")
+        raise HTTPException(status_code=409, detail="No datasets referenced yet - add a component first")
     pairs = await _load_generators(db, refs)
     row.config = db_svc.generate_config(pairs)
     db.add(row)
@@ -219,7 +219,7 @@ async def regenerate_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)
 
 @router.post("/{dash_ref}/preview")
 async def preview_dashboard(dash_ref: str, db: AsyncSession = Depends(get_db)):
-    """Compute the CURRENT config — the builder's live data preview (drafts OK)."""
+    """Compute the CURRENT config - the builder's live data preview (drafts OK)."""
     row = await _get_or_404(db, dash_ref)
     return {
         "dashboard": {"name": row.name, "slug": row.slug, "status": row.status},

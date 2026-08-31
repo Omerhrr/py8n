@@ -121,7 +121,7 @@ function compSummary(b: DashMeta) {
 }
 
 function fmtDate(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 </script>
@@ -135,7 +135,7 @@ function fmtDate(iso: string | null) {
         </span>
         <div class="min-w-0 flex-1">
           <h1 class="truncate text-base font-bold leading-tight">Dashboards</h1>
-          <p class="text-xs text-zinc-500">Read-only analytics over many datasets — KPIs, breakdown charts and tables on one wall</p>
+          <p class="text-xs text-zinc-500">Read-only analytics over many datasets - KPIs, breakdown charts and tables on one wall</p>
         </div>
         <button
           class="flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white shadow-lg shadow-cyan-500/20 transition hover:bg-cyan-400"
@@ -174,7 +174,7 @@ function fmtDate(iso: string | null) {
           <Gauge class="h-6 w-6 text-zinc-600" />
         </span>
         <p class="mt-4 text-sm font-medium text-zinc-300">No dashboards yet</p>
-        <p class="mx-auto mt-1 max-w-md text-xs text-zinc-500">Pick a few datasets and generate a board in one click — KPI stat cards, breakdown charts and a live table, publishable to /d/{slug}.</p>
+        <p class="mx-auto mt-1 max-w-md text-xs text-zinc-500">Pick a few datasets and generate a board in one click - KPI stat cards, breakdown charts and a live table, publishable to /d/{slug}.</p>
         <button class="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-cyan-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-cyan-400" @click="showCreate = true; crFromDataset = datasets.length > 0">
           <Plus class="h-3.5 w-3.5" /> New dashboard
         </button>
@@ -213,7 +213,7 @@ function fmtDate(iso: string | null) {
             >
               <ExternalLink class="h-3 w-3" /> Open /d/{{ b.slug }}
             </button>
-            <span v-else class="flex items-center gap-1 text-[11px] text-zinc-600"><Square class="h-2.5 w-2.5" /> draft — publish in builder</span>
+            <span v-else class="flex items-center gap-1 text-[11px] text-zinc-600"><Square class="h-2.5 w-2.5" /> draft - publish in builder</span>
           </div>
           <button
             class="absolute right-3 top-3 rounded-lg p-1.5 text-zinc-600 opacity-0 transition hover:bg-amber-500/10 hover:text-amber-400 group-hover:opacity-100"
@@ -255,7 +255,7 @@ function fmtDate(iso: string | null) {
           </div>
 
           <template v-if="crFromDataset">
-            <p class="mt-3 text-[11px] text-zinc-500">Pick one or more datasets — stats, charts and a table are laid out automatically.</p>
+            <p class="mt-3 text-[11px] text-zinc-500">Pick one or more datasets - stats, charts and a table are laid out automatically.</p>
             <div class="mt-2 max-h-44 space-y-1.5 overflow-y-auto pr-1">
               <button
                 v-for="d in datasets"

@@ -1,10 +1,10 @@
-"""Artifacts API (v28) — chart PNGs / model pickles produced by runs.
+"""Artifacts API (v28) - chart PNGs / model pickles produced by runs.
 
 Endpoints
 ---------
 GET    /artifacts                  list metadata (newest first)
 GET    /artifacts/{id}             one metadata row
-GET    /artifacts/{id}/content     raw bytes (image/png etc.) — used by the
+GET    /artifacts/{id}/content     raw bytes (image/png etc.) - used by the
                                    executions drawer to render charts inline
 DELETE /artifacts/{id}             drop metadata + file
 """

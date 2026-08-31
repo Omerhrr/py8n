@@ -1,4 +1,4 @@
-"""App builder core (v29) — Excel → App flagship.
+"""App builder core (v29) - Excel → App flagship.
 
 An App binds ONE dataset and a component config:
 
@@ -14,18 +14,18 @@ One-click generation inspects the bound dataset's schema + values and lays
 out a sensible CRM-style app: a count stat + numeric means, a breakdown
 chart on the first low-cardinality text column, a full table and a create
 form. Records written through a published app land in the dataset's
-parquet via the datasets service (v27) — one storage engine, no drift.
+parquet via the datasets service (v27) - one storage engine, no drift.
 
 Record addressing: rows are index-addressable (parquet order). Mutations
 rewrite the parquet atomically; deleting the LAST row preserves the schema
 (the empty-with-columns frame is still writable, unlike the fileless
 0-column case the v27 tests caught).
 
-v30 — forms get field options and records get business rules:
+v30 - forms get field options and records get business rules:
 
-* form fields may be plain strings (shorthand) or objects —
+* form fields may be plain strings (shorthand) or objects -
   ``{"name": "plan", "label": "Plan", "required": true, "default": "starter",
-  "options": ["starter", "pro"], "placeholder": "choose"}`` — both validate;
+  "options": ["starter", "pro"], "placeholder": "choose"}`` - both validate;
   ``required`` / ``options`` are enforced server-side on create (and on
   update for touched fields), ``default`` fills empty/absent fields on create.
 * ``config["rules"]`` runs through :mod:`.rules` on every record create/update:
@@ -117,7 +117,7 @@ def generate_config(df: pd.DataFrame, schema: list[dict]) -> dict:
     """Inspect the dataset and lay out a sensible default app."""
     components: list[dict] = []
 
-    # stats — row count + up to two numeric means
+    # stats - row count + up to two numeric means
     components.append(
         {"id": "stat_total", "type": "stat", "label": "Total records", "agg": "count"}
     )
@@ -132,8 +132,8 @@ def generate_config(df: pd.DataFrame, schema: list[dict]) -> dict:
             }
         )
 
-    # chart — text column with the LOWEST chartable cardinality (2..12):
-    # "plan" (3 values) beats "name" (8) — the breakdown is the point.
+    # chart - text column with the LOWEST chartable cardinality (2..12):
+    # "plan" (3 values) beats "name" (8) - the breakdown is the point.
     candidates: list[tuple[int, str]] = []
     for col in _text_cols(schema):
         uniq = int(df[col].nunique(dropna=True)) if col in df.columns else 0
@@ -152,7 +152,7 @@ def generate_config(df: pd.DataFrame, schema: list[dict]) -> dict:
             }
         )
 
-    # table — every column (cap 8), pagination built in
+    # table - every column (cap 8), pagination built in
     components.append(
         {
             "id": "table_main",
@@ -163,7 +163,7 @@ def generate_config(df: pd.DataFrame, schema: list[dict]) -> dict:
         }
     )
 
-    # form — first 6 schema columns become create/edit fields
+    # form - first 6 schema columns become create/edit fields
     components.append(
         {
             "id": "form_main",
@@ -240,12 +240,12 @@ def validate_config(config: dict, schema: list[dict]) -> None:
                 if not col or col not in names:
                     raise ValueError(f"{ctx} ({cid}): agg={agg} requires a valid column")
 
-    # v30 — rules ride in the same config, validated against the schema
+    # v30 - rules ride in the same config, validated against the schema
     rule_svc.validate_rules(config.get("rules"), schema)
 
 
 def validate_fields(fields: list, names: set[str], ctx: str, cid: str) -> None:
-    """Form fields: strings (shorthand) or option objects — v30."""
+    """Form fields: strings (shorthand) or option objects - v30."""
     seen: set[str] = set()
     for j, f in enumerate(fields):
         fctx = f"{ctx} ({cid}) field[{j}]"
@@ -391,7 +391,7 @@ def apply_form_options(record: dict, fields: list[dict], event: str, touched: se
     * create: empty/absent fields with a ``default`` get it, then EVERY form
       field marked required must be non-empty (absent counts as empty), and
       submitted values must honour ``options`` when configured.
-    * update: only TOUCHED fields (patch keys) are validated — legacy rows
+    * update: only TOUCHED fields (patch keys) are validated - legacy rows
       with gaps must not block unrelated edits; a touched required field may
       not land empty and its new value must honour ``options``.
     """
@@ -437,7 +437,7 @@ async def append_record(
     form: dict | None = None,
     rules: list[dict] | None = None,
 ) -> dict:
-    """Create one record through an app — schema keys, form options, rules.
+    """Create one record through an app - schema keys, form options, rules.
 
     Order: unknown-field guard → coercion → form defaults/required/options →
     business rules (block raises, set mutates, warn collects) → parquet.

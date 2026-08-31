@@ -70,7 +70,7 @@ class WebhookTriggerNode(BaseNode):
             default="POST",
             description="Comma-separated HTTP methods accepted by this webhook",
         )
-        # v23: webhook authentication — checked BEFORE the flow runs (401 on failure)
+        # v23: webhook authentication - checked BEFORE the flow runs (401 on failure)
         auth_mode: str = Field(
             default="none",
             description="none = public; header = a required header must carry the expected value; basic = HTTP Basic auth",

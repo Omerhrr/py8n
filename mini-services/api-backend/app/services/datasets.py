@@ -1,9 +1,9 @@
-"""Dataset storage core (v27) — first-class tabular data objects.
+"""Dataset storage core (v27) - first-class tabular data objects.
 
 Storage layout
 ==============
 * Every dataset's ROWS live in a Parquet file under ``data/datasets/``,
-  written and read through DuckDB (parquet support is built in — no pyarrow).
+  written and read through DuckDB (parquet support is built in - no pyarrow).
 * Every dataset's METADATA (name, schema, row_count, source) lives in the
   ``datasets`` SQLite table. The parquet file is named ``{id}.parquet`` and
   writes are atomic (temp file + os.replace).
@@ -21,7 +21,7 @@ SQL
 ===
 ``run_sql`` registers every stored dataset as a DuckDB view named by
 :func:`view_name` (lowercase, non-alphanumerics folded to ``_``), so a
-dataset called "Customers" is queryable as ``SELECT * FROM customers`` —
+dataset called "Customers" is queryable as ``SELECT * FROM customers`` -
 including joins across datasets.
 """
 

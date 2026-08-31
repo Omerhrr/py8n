@@ -29,14 +29,14 @@ class EmailSendNode(BaseNode):
 
     type = "email_send"
     name = "Send Email"
-    description = "Sends an email over SMTP using a vault credential — dry-run preview by default."
+    description = "Sends an email over SMTP using a vault credential - dry-run preview by default."
     category = "actions"
     icon = "mail"
     color = "#f472b6"
 
     class ParamsModel(BaseModel):
-        to: str = Field(default="", description="Recipient(s), comma-separated — supports {{ expressions }}")
-        subject: str = Field(default="", description="Subject line — supports {{ expressions }}")
+        to: str = Field(default="", description="Recipient(s), comma-separated - supports {{ expressions }}")
+        subject: str = Field(default="", description="Subject line - supports {{ expressions }}")
         body: str = Field(default="", description="Plain-text or HTML body", json_schema_extra={"widget": "textarea", "rows": 6})
         html: bool = Field(default=False, description="Send the body as HTML")
         dry_run: bool = Field(default=True, description="Render the message without sending (safe default)")
@@ -50,14 +50,14 @@ class EmailSendNode(BaseNode):
         p = self.params  # type: EmailSendNode.ParamsModel
         to = [addr.strip() for addr in (p.to or "").split(",") if addr.strip()]
         if not to:
-            raise NodeExecutionError("No recipient — fill the 'to' field")
+            raise NodeExecutionError("No recipient - fill the 'to' field")
         message = {"to": to, "subject": p.subject, "body": p.body, "html": p.html}
 
         if p.dry_run:
             return self._single({"delivered": False, "dry_run": True, "message": message})
 
         if not p.credential_id:
-            raise NodeExecutionError("Sending requires an SMTP credential — attach one or keep dry_run enabled")
+            raise NodeExecutionError("Sending requires an SMTP credential - attach one or keep dry_run enabled")
 
         from ...services.crypto import decrypt_credential
 
@@ -114,11 +114,11 @@ class SlackMessageNode(BaseNode):
     class ParamsModel(BaseModel):
         webhook_url: str = Field(
             default="",
-            description="Slack incoming webhook URL (https://hooks.slack.com/...) — supports {{ expressions }}",
+            description="Slack incoming webhook URL (https://hooks.slack.com/...) - supports {{ expressions }}",
         )
         text: str = Field(
             default="{{ input }}",
-            description="Message text — supports {{ expressions }}",
+            description="Message text - supports {{ expressions }}",
             json_schema_extra={"widget": "textarea", "rows": 4},
         )
         channel: str = Field(default="", description="Channel / user ID (bot-token mode only, e.g. #alerts)")

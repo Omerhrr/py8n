@@ -277,7 +277,7 @@ async function removeRow(index: number) {
         <div v-if="statsComps.length" class="mt-5 grid gap-3 sm:grid-cols-3">
           <div v-for="comp in statsComps" :key="comp.id" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
             <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ comp.label || comp.id }}</p>
-            <p class="mt-1 text-2xl font-bold">{{ rt.stats[comp.id] === null || rt.stats[comp.id] === undefined ? '—' : rt.stats[comp.id] }}</p>
+            <p class="mt-1 text-2xl font-bold">{{ rt.stats[comp.id] === null || rt.stats[comp.id] === undefined ? '-' : rt.stats[comp.id] }}</p>
           </div>
         </div>
 
@@ -335,7 +335,7 @@ async function removeRow(index: number) {
               <tbody>
                 <tr v-for="(row, ri) in pagedRows" :key="ri" class="border-b border-zinc-900/80 text-zinc-300 last:border-0 hover:bg-zinc-900/40">
                   <td v-for="col in tableColumns" :key="col" class="max-w-[240px] truncate px-4 py-2.5">
-                    {{ row[col] ?? '—' }}
+                    {{ row[col] ?? '-' }}
                   </td>
                   <td v-if="formComp" class="whitespace-nowrap px-4 py-2 text-right">
                     <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-sky-500/10 hover:text-sky-400" title="Edit" @click="openEdit((page - 1) * pageSize + ri)">
@@ -349,7 +349,7 @@ async function removeRow(index: number) {
                 </tr>
                 <tr v-if="!pagedRows.length">
                   <td :colspan="tableColumns.length + 1" class="px-4 py-8 text-center text-zinc-600">
-                    {{ search ? 'No records match the search.' : 'No records yet — add the first one.' }}
+                    {{ search ? 'No records match the search.' : 'No records yet - add the first one.' }}
                   </td>
                 </tr>
               </tbody>
@@ -371,7 +371,7 @@ async function removeRow(index: number) {
         </div>
 
         <p v-if="!statsComps.length && !chartComp && !tableComp" class="mt-10 text-center text-sm text-zinc-500">
-          This app has no components yet — ask the builder to add some.
+          This app has no components yet - ask the builder to add some.
         </p>
       </div>
 
@@ -403,7 +403,7 @@ async function removeRow(index: number) {
                   v-model="formModel[f.name]"
                   class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
                 >
-                  <option value="">—</option>
+                  <option value="">-</option>
                   <option value="true">true</option>
                   <option value="false">false</option>
                 </select>

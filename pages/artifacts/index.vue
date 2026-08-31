@@ -76,7 +76,7 @@ function fmtSize(n: number) {
 }
 
 function fmtDate(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 </script>
@@ -121,7 +121,7 @@ function fmtDate(iso: string | null) {
           <ImageIcon class="h-6 w-6 text-zinc-600" />
         </span>
         <p class="mt-4 text-sm font-medium text-zinc-300">No artifacts yet</p>
-        <p class="mt-1 text-xs text-zinc-500">Add a Chart or Model Train node to a workflow — every run's outputs are collected here.</p>
+        <p class="mt-1 text-xs text-zinc-500">Add a Chart or Model Train node to a workflow - every run's outputs are collected here.</p>
       </div>
       <div v-else class="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <div
@@ -185,7 +185,7 @@ function fmtDate(iso: string | null) {
             <div class="text-center">
               <FileCode2 class="mx-auto h-8 w-8 text-indigo-400" />
               <p class="mt-2 font-mono text-xs text-zinc-400">{{ preview.filename }}</p>
-              <p class="mt-1 text-[11px] text-zinc-600">Binary model artifact — load it in code via python_transform</p>
+              <p class="mt-1 text-[11px] text-zinc-600">Binary model artifact - load it in code via python_transform</p>
             </div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-// v19: sticky note canvas element — annotation only, never executes.
+// v19: sticky note canvas element - annotation only, never executes.
 // Rendered as a Vue Flow custom node type ("sticky"); edits mutate the
 // node's spec in place (same pattern as PNodeCard) and the page commits
 // history / dirty state on input.

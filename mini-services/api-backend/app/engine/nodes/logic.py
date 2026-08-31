@@ -25,7 +25,7 @@ class IfConditionNode(BaseNode):
     outputs: ClassVar[list[Handle]] = [Handle("true", "True"), Handle("false", "False")]
 
     class ParamsModel(BaseModel):
-        left_value: Any = Field(default="", description="Left operand — supports {{ expressions }}")
+        left_value: Any = Field(default="", description="Left operand - supports {{ expressions }}")
         operator: str = Field(
             default="equals",
             json_schema_extra={
@@ -162,7 +162,7 @@ class CodeNode(BaseNode):
 
 
 class DelayNode(BaseNode):
-    """Pauses the branch for N seconds — useful to demo the async queue."""
+    """Pauses the branch for N seconds - useful to demo the async queue."""
 
     type = "delay"
     name = "Delay"
@@ -194,7 +194,7 @@ class StopAndErrorNode(BaseNode):
 
     type = "stop_and_error"
     name = "Stop and Error"
-    description = "Stops the workflow deliberately with a custom error message — use it for validation failures or to exercise error workflows."
+    description = "Stops the workflow deliberately with a custom error message - use it for validation failures or to exercise error workflows."
     category = "logic"
     icon = "octagon-x"
     color = "#f43f5e"
@@ -202,7 +202,7 @@ class StopAndErrorNode(BaseNode):
     class ParamsModel(BaseModel):
         error_message: str = Field(
             default="Workflow stopped intentionally",
-            description="Error message to raise — supports {{ expressions }} referencing upstream outputs",
+            description="Error message to raise - supports {{ expressions }} referencing upstream outputs",
             json_schema_extra={"widget": "textarea", "rows": 3},
         )
         error_type: str = Field(

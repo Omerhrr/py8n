@@ -1,4 +1,4 @@
-"""Credential vault API — Fernet-encrypted at rest, secrets never returned.
+"""Credential vault API - Fernet-encrypted at rest, secrets never returned.
 
 Endpoints
 ---------
@@ -9,7 +9,7 @@ POST   /credentials/{id}/test  live per-type probe (connect / auth / HTTP call)
 GET    /credentials/{id}/usage workflows whose graphs reference the credential
 DELETE /credentials/{id}       409 while referenced unless ?force=true
 
-Every write commits explicitly before returning — FastAPI yield-dependency
+Every write commits explicitly before returning - FastAPI yield-dependency
 teardown commits run AFTER the response is sent, so immediate follow-up
 reads on the live server would otherwise race (v4 lesson).
 """
@@ -59,7 +59,7 @@ def _out(cred: Credential, data: dict) -> CredentialOut:
 
 
 def _detail(cred: Credential, data: dict) -> CredentialDetail:
-    """Edit-time view — non-secret fields visible, secrets blanked."""
+    """Edit-time view - non-secret fields visible, secrets blanked."""
     secrets = SECRET_FIELDS.get(cred.type, set())
     visible = {k: ("" if k in secrets else v) for k, v in data.items()}
     return CredentialDetail(
@@ -90,7 +90,7 @@ async def list_credentials(db: AsyncSession = Depends(get_db)):
 
 @router.get("/{credential_id}", response_model=CredentialDetail)
 async def get_credential(credential_id: str, db: AsyncSession = Depends(get_db)):
-    """Edit-time view: non-secret fields visible, secrets blanked — the client
+    """Edit-time view: non-secret fields visible, secrets blanked - the client
     re-sends untouched secrets as ``__keep__`` and the vault substitutes them."""
     cred = await db.get(Credential, credential_id)
     if cred is None:
@@ -103,7 +103,7 @@ async def update_credential(
     credential_id: str, body: CredentialUpdate, db: AsyncSession = Depends(get_db)
 ):
     """Rename and/or replace the secret payload. The payload is re-encrypted
-    wholesale — the client sends the full field set (secrets are never
+    wholesale - the client sends the full field set (secrets are never
     echoed back, so partial merges are impossible by design)."""
     cred = await db.get(Credential, credential_id)
     if cred is None:
@@ -160,10 +160,10 @@ async def test_credential(
 
 
 # ----------------------------------------------------------------------
-# usage scan — find workflows whose graph references the credential
+# usage scan - find workflows whose graph references the credential
 # ----------------------------------------------------------------------
 def _find_cred_nodes(graph: dict, credential_id: str) -> list[str]:
-    """Node ids whose config references the credential id — scans parameters
+    """Node ids whose config references the credential id - scans parameters
     (credential_id widget params) and settings, any exact string match."""
     hits: list[str] = []
     for node in graph.get("nodes", []):

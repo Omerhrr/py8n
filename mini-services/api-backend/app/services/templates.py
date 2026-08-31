@@ -1,4 +1,4 @@
-"""Curated workflow templates — one-click starting points for new users.
+"""Curated workflow templates - one-click starting points for new users.
 
 Every template graph is validated with the same ``validate_graph_document``
 gate as user workflows, so a template can never ship a broken graph. Keep
@@ -17,7 +17,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "description": "Turn a topic into publish-ready marketing copy with a free LLM.",
         "category": "AI",
         "icon": "brain",
-        "docs": "Press Run and edit the topic in the Manual Trigger. Uses the built-in LLM bridge — no API key needed.",
+        "docs": "Press Run and edit the topic in the Manual Trigger. Uses the built-in LLM bridge - no API key needed.",
         "graph": {
             "nodes": [
                 {"id": "topic", "type": "manual_trigger", "name": "Topic", "position": {"x": 0, "y": 0},
@@ -118,7 +118,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "description": "Hit an HTTP endpoint every 15 minutes and flag slow responses.",
         "category": "Ops",
         "icon": "globe",
-        "docs": "Enable the workflow (Triggers toggle) to arm the schedule. Uses Py8n's own health endpoint as a placeholder — swap the URL to anything.",
+        "docs": "Enable the workflow (Triggers toggle) to arm the schedule. Uses Py8n's own health endpoint as a placeholder - swap the URL to anything.",
         "graph": {
             "nodes": [
                 {"id": "tick", "type": "schedule_trigger", "name": "Every 15 min", "position": {"x": 0, "y": 0},
@@ -146,7 +146,7 @@ TEMPLATES: list[dict[str, Any]] = [
                 {"id": "hook", "type": "webhook_trigger", "name": "Incident", "position": {"x": 0, "y": 0},
                  "parameters": {"response_mode": "immediately"}},
                 {"id": "fmt", "type": "set_variable", "name": "Format", "position": {"x": 220, "y": 0},
-                 "parameters": {"assignments": {"text": "Incident: {{ nodes.hook.output.body.title | default('Untitled') }} — severity {{ nodes.hook.output.body.severity | default('n/a') }}"}, "keep_input": False}},
+                 "parameters": {"assignments": {"text": "Incident: {{ nodes.hook.output.body.title | default('Untitled') }} - severity {{ nodes.hook.output.body.severity | default('n/a') }}"}, "keep_input": False}},
                 {"id": "alert", "type": "slack_message", "name": "Slack Alert", "position": {"x": 440, "y": 0},
                  "parameters": {"text": "{{ nodes.fmt.output.text }}", "dry_run": True}},
             ],
@@ -162,7 +162,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "description": "Canonical data pipeline: explode a list, keep what matters, roll it up.",
         "category": "Data",
         "icon": "sigma",
-        "docs": "Pure data-shaping demo — runs instantly, no external calls.",
+        "docs": "Pure data-shaping demo - runs instantly, no external calls.",
         "graph": {
             "nodes": [
                 {"id": "in", "type": "manual_trigger", "name": "Orders", "position": {"x": 0, "y": 0},
@@ -209,7 +209,7 @@ TEMPLATES: list[dict[str, Any]] = [
         },
     },
     # ------------------------------------------------------------------
-    # v33 — readymade automations showcasing the v19-v32 stack
+    # v33 - readymade automations showcasing the v19-v32 stack
     # ------------------------------------------------------------------
     {
         "id": "invoice-to-books",
@@ -219,7 +219,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "file-search",
         "badge": "Doc AI",
         "tags": ["invoice", "ocr", "pdf", "document", "extract", "dataset", "accounting"],
-        "docs": "Run with a real file: edit the Manual Trigger's invoice_path (server-side path to a PDF/image/Word/Excel/CSV). The Extract node reads it (OCR for scans), emits the best table as items, and Dataset Write appends every row to 'Invoice Ledger' — instantly SQL-queryable and dashboard-ready.",
+        "docs": "Run with a real file: edit the Manual Trigger's invoice_path (server-side path to a PDF/image/Word/Excel/CSV). The Extract node reads it (OCR for scans), emits the best table as items, and Dataset Write appends every row to 'Invoice Ledger' - instantly SQL-queryable and dashboard-ready.",
         "graph": {
             "nodes": [
                 {"id": "in", "type": "manual_trigger", "name": "Invoice Path", "position": {"x": 0, "y": 0},
@@ -244,7 +244,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "activity",
         "badge": "Dataset",
         "tags": ["uptime", "monitoring", "schedule", "health", "history", "sql"],
-        "docs": "Enable the workflow (Triggers toggle) to arm the schedule — every 5 minutes it pings the URL, records status + latency, and appends to the 'Uptime Log' dataset. Point Dataset Write at any dataset to chart it in a Dashboard or build an App on top. The default URL is Py8n's own health endpoint.",
+        "docs": "Enable the workflow (Triggers toggle) to arm the schedule - every 5 minutes it pings the URL, records status + latency, and appends to the 'Uptime Log' dataset. Point Dataset Write at any dataset to chart it in a Dashboard or build an App on top. The default URL is Py8n's own health endpoint.",
         "graph": {
             "nodes": [
                 {"id": "tick", "type": "schedule_trigger", "name": "Every 5 min", "position": {"x": 0, "y": 0},
@@ -275,7 +275,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "bot",
         "badge": "Agent",
         "tags": ["agent", "tools", "research", "llm", "knowledge", "http"],
-        "docs": "Press Run and edit the question in the Manual Trigger. The agent loops: it can call the knowledge tool (company facts — edit them on the node) and hit api.github.com over HTTP, then answers. Uses the built-in LLM bridge — no API key needed. Swap the HTTP tool's allowed domains to whatever you trust.",
+        "docs": "Press Run and edit the question in the Manual Trigger. The agent loops: it can call the knowledge tool (company facts - edit them on the node) and hit api.github.com over HTTP, then answers. Uses the built-in LLM bridge - no API key needed. Swap the HTTP tool's allowed domains to whatever you trust.",
         "graph": {
             "nodes": [
                 {"id": "q", "type": "manual_trigger", "name": "Question", "position": {"x": 0, "y": 0},
@@ -309,7 +309,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "reply",
         "badge": "v21",
         "tags": ["webhook", "respond", "api", "approval", "expense", "routing"],
-        "docs": "POST {\"expense\": {\"id\": \"E-1\", \"amount\": 45}} to the workflow's webhook URL. response_mode=respond_node means the Respond nodes craft the actual HTTP reply: amounts over 1000 answer 202 {needs_review} inline, everything else 200 {approved}. No polling needed — the caller gets the verdict in the same request.",
+        "docs": "POST {\"expense\": {\"id\": \"E-1\", \"amount\": 45}} to the workflow's webhook URL. response_mode=respond_node means the Respond nodes craft the actual HTTP reply: amounts over 1000 answer 202 {needs_review} inline, everything else 200 {approved}. No polling needed - the caller gets the verdict in the same request.",
         "graph": {
             "nodes": [
                 {"id": "hook", "type": "webhook_trigger", "name": "Expense Intake", "position": {"x": 0, "y": 0},
@@ -340,7 +340,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "siren",
         "badge": "Resilience",
         "tags": ["error", "alert", "resilience", "failure", "slack", "handler"],
-        "docs": "Set this workflow as the Error workflow of any other workflow (workflow settings → Error workflow). When that workflow fails, this one starts with the structured error payload {workflow_name, error, failed_nodes} — it formats a summary and previews a Slack alert (dry_run=true; attach a credential and set dry_run=false to post for real).",
+        "docs": "Set this workflow as the Error workflow of any other workflow (workflow settings → Error workflow). When that workflow fails, this one starts with the structured error payload {workflow_name, error, failed_nodes} - it formats a summary and previews a Slack alert (dry_run=true; attach a credential and set dry_run=false to post for real).",
         "graph": {
             "nodes": [
                 {"id": "err", "type": "error_trigger", "name": "On Failure", "position": {"x": 0, "y": 0},
@@ -351,7 +351,7 @@ TEMPLATES: list[dict[str, Any]] = [
                      "error": "{{ nodes.err.output.error | truncate(300) }}"},
                      "keep_input": False}},
                 {"id": "alert", "type": "slack_message", "name": "Slack Alert", "position": {"x": 440, "y": 0},
-                 "parameters": {"text": "{{ nodes.fmt.output.title }} — {{ nodes.fmt.output.error }}", "dry_run": True}},
+                 "parameters": {"text": "{{ nodes.fmt.output.title }} - {{ nodes.fmt.output.error }}", "dry_run": True}},
             ],
             "edges": [
                 {"id": "e1", "source": "err", "target": "fmt"},
@@ -444,7 +444,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "inbox",
         "badge": "Full-stack",
         "tags": ["webhook", "leads", "crm", "dataset", "api", "capture", "form"],
-        "docs": "POST {\"name\": \"Ada\", \"email\": \"ada@x.io\", \"company\": \"X Ltd\"} to the workflow's webhook URL — the lead lands in the 'Leads' dataset and the caller immediately gets 201 {ok, lead}. Build an App or Dashboard on the Leads dataset to work the pipeline. Data-to-application in one template.",
+        "docs": "POST {\"name\": \"Ada\", \"email\": \"ada@x.io\", \"company\": \"X Ltd\"} to the workflow's webhook URL - the lead lands in the 'Leads' dataset and the caller immediately gets 201 {ok, lead}. Build an App or Dashboard on the Leads dataset to work the pipeline. Data-to-application in one template.",
         "graph": {
             "nodes": [
                 {"id": "hook", "type": "webhook_trigger", "name": "Lead Intake", "position": {"x": 0, "y": 0},
@@ -470,7 +470,7 @@ TEMPLATES: list[dict[str, Any]] = [
         },
     },
     {
-        # v34 — showcases the dataset + code tool kinds on the AI Agent
+        # v34 - showcases the dataset + code tool kinds on the AI Agent
         "id": "data-analyst",
         "name": "SQL Data Analyst Agent",
         "description": "An AI agent that interrogates your datasets with read-only SQL, computes in sandboxed Python, and answers in plain language.",
@@ -478,7 +478,7 @@ TEMPLATES: list[dict[str, Any]] = [
         "icon": "bot",
         "badge": "Agent",
         "tags": ["agent", "tools", "dataset", "sql", "duckdb", "code", "analyst"],
-        "docs": "Create (or upload) a dataset first — e.g. 'Sales' — then press Run and edit the question in the Manual Trigger. The agent writes its own SELECT against your datasets (DuckDB syntax, tables are dataset names), can double-check arithmetic in a sandboxed Python tool, and answers with the numbers. Strictly read-only: one SELECT statement per call.",
+        "docs": "Create (or upload) a dataset first - e.g. 'Sales' - then press Run and edit the question in the Manual Trigger. The agent writes its own SELECT against your datasets (DuckDB syntax, tables are dataset names), can double-check arithmetic in a sandboxed Python tool, and answers with the numbers. Strictly read-only: one SELECT statement per call.",
         "graph": {
             "nodes": [
                 {"id": "q", "type": "manual_trigger", "name": "Question", "position": {"x": 0, "y": 0},
@@ -492,7 +492,7 @@ TEMPLATES: list[dict[str, Any]] = [
                      "temperature": 0.2,
                      "tools": [
                          {"kind": "dataset", "name": "sql_query",
-                          "description": "Run ONE read-only SELECT (DuckDB syntax) over all datasets — every dataset is a view named after it, e.g. Sales. Arguments: {\"sql\": \"SELECT ...\"}",
+                          "description": "Run ONE read-only SELECT (DuckDB syntax) over all datasets - every dataset is a view named after it, e.g. Sales. Arguments: {\"sql\": \"SELECT ...\"}",
                           "max_rows": 25},
                          {"kind": "code", "name": "python_compute",
                           "description": "Sandboxed Python for exact arithmetic/formatting. Set `result`; arguments: {\"code\": \"result = 2 + 2\"}"},
@@ -510,7 +510,7 @@ def get_template(template_id: str) -> dict[str, Any] | None:
     return next((t for t in TEMPLATES if t["id"] == template_id), None)
 
 
-# v33 — per-category accent colors for the gallery cards (single source of truth)
+# v33 - per-category accent colors for the gallery cards (single source of truth)
 CATEGORY_ACCENT: dict[str, str] = {
     "AI": "#a78bfa",
     "Data": "#38bdf8",

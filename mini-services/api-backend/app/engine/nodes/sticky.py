@@ -1,4 +1,4 @@
-"""Sticky Note — canvas annotation node (v19).
+"""Sticky Note - canvas annotation node (v19).
 
 Rendered as a colored sticky on the canvas and persisted inside the graph
 (like n8n notes), but it is NOT part of the execution vocabulary: it is
@@ -19,7 +19,7 @@ from .base import BaseNode, NodeResult
 class StickyNoteNode(BaseNode):
     type = "sticky_note"
     name = "Sticky Note"
-    description = "Canvas annotation — never executes; documents your workflow."
+    description = "Canvas annotation - never executes; documents your workflow."
     category = "actions"
     icon = "sticky-note"
     color = "#fbbf24"
@@ -37,5 +37,5 @@ class StickyNoteNode(BaseNode):
         )
 
     async def execute(self, context: ExecutionContext) -> NodeResult:
-        # Annotation only — pass the input through untouched.
+        # Annotation only - pass the input through untouched.
         return self._single(context.current_input)

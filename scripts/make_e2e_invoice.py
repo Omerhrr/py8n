@@ -36,7 +36,7 @@ tbl.setStyle(
         ]
     )
 )
-story.append(Paragraph("ACME Consulting — Invoice INV-2026-0417", title))
+story.append(Paragraph("ACME Consulting - Invoice INV-2026-0417", title))
 story.append(Paragraph("Client: Globex Ltd. · Issued: 2026-08-30 · Terms: Net 30", meta))
 story.append(Spacer(1, 14))
 story.append(tbl)

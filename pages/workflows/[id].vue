@@ -36,7 +36,7 @@ const selectedNodeId = ref<string | null>(null)
 const selectedEdgeId = ref<string | null>(null)
 const drawerOpen = ref(true)
 const copied = ref(false)
-// v25: floating editor chat — shown when the canvas contains a Chat Trigger
+// v25: floating editor chat - shown when the canvas contains a Chat Trigger
 const chatOpen = ref(false)
 const hasChatTrigger = computed(() =>
   vfNodes.value.some((n: any) => n?.data?.spec?.type === 'chat_trigger'),
@@ -60,7 +60,7 @@ let pasteSeq = 0
 let commitTimer: ReturnType<typeof setTimeout> | null = null
 
 // Vue Flow's v-model write-back is deferred (addNodes/addEdges land in
-// vfNodes on the next tick), so commits must be deferred + coalesced —
+// vfNodes on the next tick), so commits must be deferred + coalesced -
 // a synchronous read right after addNodes() still sees the old graph.
 function historyCommit() {
   if (commitTimer) clearTimeout(commitTimer)
@@ -72,7 +72,7 @@ function historyCommit() {
 
 function undoGraph() {
   if (commitTimer) {
-    // A mutation is still uncommitted — undoing means reverting it, so
+    // A mutation is still uncommitted - undoing means reverting it, so
     // drop the pending commit and schedule a no-op-safe re-commit.
     clearTimeout(commitTimer)
     commitTimer = null
@@ -181,7 +181,7 @@ function specToVfNode(spec: NodeSpec): Node {
   }
 }
 
-// v21: branch connection labels — IF true/false, Switch rule N / fallback.
+// v21: branch connection labels - IF true/false, Switch rule N / fallback.
 // Labels are DERIVED from sourceHandle on every canvas build, never persisted
 // (canvasToGraph only saves sourceHandle), so imports/pastes stay clean.
 function branchEdgeExtras(handle?: string | null) {
@@ -271,7 +271,7 @@ const schedulePill = computed(() => {
   const info = store.scheduleInfo
   if (!info || !info.schedules.length) return null
   const first = info.schedules[0]
-  if (first.error) return { text: `schedule broken — ${first.error}`, tone: 'error' as const, title: first.error }
+  if (first.error) return { text: `schedule broken - ${first.error}`, tone: 'error' as const, title: first.error }
   if (info.is_active && info.next_run_at) {
     return {
       text: `${first.summary} · next ${relTime(info.next_run_at)}`,
@@ -360,12 +360,12 @@ const selectedDefinition = computed(() =>
   selectedNodeSpec.value ? store.definitionFor(selectedNodeSpec.value.type) || STICKY_DEF : null,
 )
 
-// v19: sticky notes are hidden from /node-definitions — the page supplies
+// v19: sticky notes are hidden from /node-definitions - the page supplies
 // a local definition so the ConfigPanel can render their fields.
 const STICKY_DEF = {
   type: 'sticky_note',
   name: 'Sticky Note',
-  description: 'Canvas annotation — never executes; documents your workflow.',
+  description: 'Canvas annotation - never executes; documents your workflow.',
   category: 'actions',
   icon: 'sticky-note',
   color: '#fbbf24',
@@ -528,7 +528,7 @@ function updatePinned(value: any) {
 }
 
 // ------------------------------------------------------------------
-// v17 test step + "use last run output" — the panel calls these so the
+// v17 test step + "use last run output" - the panel calls these so the
 // canvas is auto-saved first (the backend test endpoint reads the saved graph)
 // ------------------------------------------------------------------
 async function runTestStep(nodeId: string, items: any) {
@@ -549,7 +549,7 @@ async function loadLastOutput(nodeId: string) {
 
 
 // ------------------------------------------------------------------
-// Tags editor (v12) — instant-save popover in the header
+// Tags editor (v12) - instant-save popover in the header
 // ------------------------------------------------------------------
 const showTags = ref(false)
 const tagInput = ref('')
@@ -597,7 +597,7 @@ async function persistTags(tags: string[]) {
 }
 
 // ------------------------------------------------------------------
-// Version history (v13) — bounded snapshot list + one-click restore
+// Version history (v13) - bounded snapshot list + one-click restore
 // ------------------------------------------------------------------
 const showHistory = ref(false)
 const restoring = ref<number | null>(null)
@@ -612,14 +612,14 @@ async function openHistory() {
 }
 
 function fmtVersionTime(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleString(undefined, {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
 }
 
 async function doRestore(version: number) {
-  if (!confirm(`Restore version ${version}? The current canvas is replaced — the restore itself is saved as a new version, so this can be undone.`)) return
+  if (!confirm(`Restore version ${version}? The current canvas is replaced - the restore itself is saved as a new version, so this can be undone.`)) return
   restoring.value = version
   try {
     await store.restoreVersion(version)
@@ -629,7 +629,7 @@ async function doRestore(version: number) {
     fitView({ padding: 0.25, maxZoom: 1.2 })
     history.reset(canvasToGraph()) // v18: fresh undo history after restore
     store.markDirty()
-    toast(`Restored version ${version} — saved as a new version`, 'success')
+    toast(`Restored version ${version} - saved as a new version`, 'success')
   } catch (e: any) {
     toast(e?.data?.detail || e?.message || 'Restore failed', 'error')
   } finally {
@@ -773,7 +773,7 @@ function onDrop(event: DragEvent) {
 }
 
 // ------------------------------------------------------------------
-// v19: sticky notes — toolbar-added annotations (hidden from the palette)
+// v19: sticky notes - toolbar-added annotations (hidden from the palette)
 // ------------------------------------------------------------------
 let noteSeq = 0
 function addStickyNote() {
@@ -802,7 +802,7 @@ async function runWorkflow() {
     await store.runWorkflow()
     drawerOpen.value = true
   } catch (e: any) {
-    toast(e?.data?.detail || 'Run failed — does the workflow have a trigger?', 'error')
+    toast(e?.data?.detail || 'Run failed - does the workflow have a trigger?', 'error')
   }
 }
 
@@ -856,7 +856,7 @@ async function exportWorkflow() {
 async function duplicateWorkflow() {
   try {
     const copy = await api.post(`/workflows/${workflowId.value}/duplicate`)
-    toast('Duplicated — opening copy…', 'success')
+    toast('Duplicated - opening copy…', 'success')
     await navigateTo(`/workflows/${copy.id}`)
   } catch {
     toast('Duplicate failed', 'error')
@@ -929,7 +929,7 @@ const runningCount = computed(
               </button>
             </span>
           </div>
-          <p v-else class="mb-2 text-[11px] text-zinc-600">No tags yet — add one below.</p>
+          <p v-else class="mb-2 text-[11px] text-zinc-600">No tags yet - add one below.</p>
           <div class="relative">
             <input
               v-model="tagInput"
@@ -1002,7 +1002,7 @@ const runningCount = computed(
         <!-- version history (v13) -->
         <button
           class="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
-          title="Version history — restore any previous save"
+          title="Version history - restore any previous save"
           @click="openHistory"
         >
           <History class="h-3.5 w-3.5" /> <span class="hidden md:inline">History</span>
@@ -1011,7 +1011,7 @@ const runningCount = computed(
         <!-- v20: workflow settings -->
         <button
           class="rounded-lg border border-zinc-800 p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
-          title="Workflow settings — description & data retention"
+          title="Workflow settings - description & data retention"
           @click="openSettings"
         >
           <Settings2 class="h-3.5 w-3.5" />
@@ -1030,7 +1030,7 @@ const runningCount = computed(
           :class="store.workflow?.is_active
             ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-400'
             : 'border-zinc-700 text-zinc-500 hover:text-zinc-300'"
-          :title="store.workflow?.is_active ? 'Triggers active — click to pause' : 'Click to activate triggers'"
+          :title="store.workflow?.is_active ? 'Triggers active - click to pause' : 'Click to activate triggers'"
           @click="toggleActive"
         >
           <Link2 class="h-3.5 w-3.5" />
@@ -1140,7 +1140,7 @@ const runningCount = computed(
           class="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full border border-zinc-700 bg-zinc-900/95 px-3 py-1.5 text-[11px] text-zinc-300 shadow-xl"
         >
           <Trash2 class="h-3 w-3 text-rose-400" />
-          Connection selected — press Delete to remove
+          Connection selected - press Delete to remove
           <button class="font-semibold text-rose-400 hover:text-rose-300" @click="deleteSelectedEdge">Remove</button>
         </div>
 
@@ -1157,7 +1157,7 @@ const runningCount = computed(
         <!-- v19: sticky note toolbar button -->
         <button
           class="absolute left-3 top-3 z-10 flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-300 transition hover:bg-amber-500/20"
-          title="Add a sticky note (annotation — never executes)"
+          title="Add a sticky note (annotation - never executes)"
           @click="addStickyNote"
         >
           <StickyNote class="h-3.5 w-3.5" /> Sticky
@@ -1168,7 +1168,7 @@ const runningCount = computed(
           v-if="hasChatTrigger"
           class="absolute bottom-3 right-3 z-10 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-600 text-white shadow-lg shadow-emerald-950/60 transition hover:bg-emerald-500 hover:shadow-emerald-900/60 active:scale-95"
           :class="chatOpen && 'ring-2 ring-emerald-400/60 ring-offset-2 ring-offset-zinc-950'"
-          title="Open chat — talk to this workflow (requires activation)"
+          title="Open chat - talk to this workflow (requires activation)"
           @click="chatOpen = !chatOpen"
         >
           <MessageCircle class="h-5 w-5" />
@@ -1235,7 +1235,7 @@ const runningCount = computed(
           >
             <option value="inherit">Inherit global policy{{ globalRetentionDays != null ? ` (keep ${globalRetentionDays === 0 ? 'forever' : globalRetentionDays + ' days'})` : '' }}</option>
             <option value="keep">Keep forever (never purge)</option>
-            <option value="days">Custom — purge after N days</option>
+            <option value="days">Custom - purge after N days</option>
           </select>
           <div v-if="settingsDraft!.retentionMode === 'days'" class="mb-2 flex items-center gap-2">
             <input
@@ -1336,7 +1336,7 @@ const runningCount = computed(
             <Loader2 class="mr-2 h-4 w-4 animate-spin" /> Loading…
           </div>
           <div v-else-if="store.versions.versions.length === 0" class="py-10 text-center text-sm text-zinc-500">
-            No versions yet — they're created on every save.
+            No versions yet - they're created on every save.
           </div>
           <div v-else class="space-y-1.5">
             <div
@@ -1378,7 +1378,7 @@ const runningCount = computed(
 
         <p class="border-t border-zinc-800 px-5 py-3 text-[10px] leading-relaxed text-zinc-600">
           Snapshots are taken on create and every content save (graph, name, description).
-          Restoring never destroys history — it lands as a new version on top.
+          Restoring never destroys history - it lands as a new version on top.
         </p>
       </div>
     </div>

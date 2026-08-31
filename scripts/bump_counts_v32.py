@@ -10,7 +10,7 @@ ROOT = pathlib.Path("/home/z/my-project")
 
 TARGETS = [
     # (relative path, old, new)
-    ("mini-services/api-backend/tests/test_v10_features.py", None, None),  # probe only — v10 asserts via websocket, checked below
+    ("mini-services/api-backend/tests/test_v10_features.py", None, None),  # probe only - v10 asserts via websocket, checked below
     ("mini-services/api-backend/tests/test_v22_features.py", "assert len(defs) == 36", "assert len(defs) == 37"),
     ("mini-services/api-backend/tests/test_v24_features.py", "assert len(defs) == 36, f\"expected 36 node types, got {len(defs)}\"", "assert len(defs) == 37, f\"expected 37 node types, got {len(defs)}\""),
     ("mini-services/api-backend/tests/test_v25_features.py", "assert len(types) == 36, f\"expected 36 visible types, got {len(types)}\"", "assert len(types) == 37, f\"expected 37 visible types, got {len(types)}\""),
@@ -35,7 +35,7 @@ for rel, old, new in TARGETS:
         print(f"SKIP (already bumped): {rel}")
         continue
     if old not in text:
-        raise SystemExit(f"PATCH FAILED — old text not found in {rel}:\n  {old}")
+        raise SystemExit(f"PATCH FAILED - old text not found in {rel}:\n  {old}")
     p.write_text(text.replace(old, new, 1))
     changed += 1
     print(f"patched: {rel}")
@@ -52,4 +52,4 @@ res = subprocess.run(
     capture_output=True, text=True,
 )
 print("remaining 36-assertions:\n" + (res.stdout or "(none)"))
-print(f"done — {changed} files patched")
+print(f"done - {changed} files patched")

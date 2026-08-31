@@ -1,4 +1,4 @@
-"""Execution service — runs the GraphRunner and persists ExecutionLogs."""
+"""Execution service - runs the GraphRunner and persists ExecutionLogs."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ _background_tasks: set = set()
 # Cooperative cancellation: execution_id -> Event the runner checks between nodes.
 _cancel_flags: dict[str, Any] = {}
 # Hard cancellation: execution_id -> asyncio.Task (task.cancel() aborts at the
-# next await point, e.g. a long delay node — no waiting for it to finish).
+# next await point, e.g. a long delay node - no waiting for it to finish).
 _running_tasks: dict[str, Any] = {}
 
 
@@ -46,7 +46,7 @@ async def execute_workflow(
 
     graph = validate_graph_document(workflow.graph or {"nodes": [], "edges": []})
     if not graph.trigger_nodes():
-        raise ValueError("Workflow has no trigger node — add a trigger to run it")
+        raise ValueError("Workflow has no trigger node - add a trigger to run it")
 
     bus = get_event_bus()
     if not log_created:
@@ -76,7 +76,7 @@ async def execute_workflow(
         max_output_capture=settings.max_output_capture,
         execution_id=execution_id,
         cancel_event=cancel_event,
-        # v17: only manual runs honor pinned node data — webhook / schedule /
+        # v17: only manual runs honor pinned node data - webhook / schedule /
         # error dispatches always execute for real.
         honor_pinned=(trigger_type == "manual"),
         respond_channel=respond_channel,
@@ -176,7 +176,7 @@ async def resume_workflow(execution_id: str, token: str, payload: Any = None) ->
 
     Validates the token, rebuilds a GraphRunner from the persisted state and
     finishes the run in a background task (the execution row is updated in
-    place — same execution id, n8n-style continuation).
+    place - same execution id, n8n-style continuation).
     """
     import json as _json
 
@@ -355,7 +355,7 @@ async def cancel_execution(execution_id: str) -> dict:
             if log is None:
                 raise LookupError(f"Execution {execution_id} not found")
             raise ValueError(
-                f"Execution {execution_id} is not running (status={log.status}) — nothing to cancel"
+                f"Execution {execution_id} is not running (status={log.status}) - nothing to cancel"
             )
     if task is not None:
         task.cancel()

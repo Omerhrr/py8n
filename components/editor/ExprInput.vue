@@ -50,7 +50,7 @@ const FILTERS: Suggestion[] = [
   { text: 'join(", ")', hint: 'join list into string', group: 'Filter' },
   { text: 'tojson', hint: 'serialize to JSON', group: 'Filter' },
   { text: 'fromjson', hint: 'parse JSON string', group: 'Filter' },
-  { text: 'default("—")', hint: 'fallback when undefined', group: 'Filter' },
+  { text: 'default("-")', hint: 'fallback when undefined', group: 'Filter' },
   { text: 'replace("a", "b")', hint: 'substring replace', group: 'Filter' },
   { text: 'round(2)', hint: 'round number', group: 'Filter' },
   { text: 'int', hint: 'cast to int', group: 'Filter' },
@@ -152,7 +152,7 @@ function onKeydown(e: KeyboardEvent) {
       <span
         class="flex select-none items-center border-r border-zinc-800 px-2 font-mono text-[10px] font-bold"
         :class="isExpression ? 'bg-orange-500/15 text-orange-300' : 'bg-zinc-950 text-zinc-600'"
-        title="Supports Jinja2 expressions — type {{"
+        title="Supports Jinja2 expressions - type {{"
         >fx</span
       >
       <input

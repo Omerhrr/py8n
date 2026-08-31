@@ -1,11 +1,11 @@
-"""V28 feature tests: Data Science Workbench — python_transform, chart, model_train.
+"""V28 feature tests: Data Science Workbench - python_transform, chart, model_train.
 
 * python_transform: real pandas/numpy over the input items as `df`; whitelisted
   imports (pandas/numpy/sklearn + stdlib math/statistics/datetime/random/...);
   stdout captured as `logs`; executor timeout.
-* chart: matplotlib (Agg) PNG saved as an ARTIFACT — GET /artifacts/{id}/content
+* chart: matplotlib (Agg) PNG saved as an ARTIFACT - GET /artifacts/{id}/content
   serves the bytes the executions drawer renders inline.
-* model_train: curated sklearn models — regression/classification metrics,
+* model_train: curated sklearn models - regression/classification metrics,
   prediction sample, pickled model artifact; honest guards (min rows, target
   column, numeric features).
 

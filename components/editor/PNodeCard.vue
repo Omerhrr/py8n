@@ -71,7 +71,7 @@ function sourceTop(index: number, total: number): string {
       isDisabled ? 'opacity-50 saturate-50 border-dashed' : '',
     ]"
     :style="{ borderTopColor: isDisabled ? '#a16207' : def?.color }"
-    :title="isDisabled ? 'Disabled — input passes through at run time' : undefined"
+    :title="isDisabled ? 'Disabled - input passes through at run time' : undefined"
   >
     <!-- target handles (inputs) -->
     <Handle
@@ -101,7 +101,7 @@ function sourceTop(index: number, total: number): string {
         <Pin
           v-if="isPinned"
           class="h-3.5 w-3.5 text-amber-400"
-          title="Pinned — manual runs &amp; test steps return this data without executing"
+          title="Pinned - manual runs &amp; test steps return this data without executing"
         />
         <Ban v-if="isDisabled" class="h-3.5 w-3.5 text-amber-500" title="Disabled" />
         <Zap v-if="status === 'running'" class="h-3.5 w-3.5 animate-pulse text-amber-400" />

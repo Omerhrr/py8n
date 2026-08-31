@@ -128,7 +128,7 @@ class SwitchNode(BaseNode):
         field: str = Field(default="", description="Dot-path to switch on (empty = whole payload)")
         rules: list[str] = Field(
             default_factory=lambda: ["", "", ""],
-            description="Exact string match per rule output — JSON-encodes non-strings before comparing",
+            description="Exact string match per rule output - JSON-encodes non-strings before comparing",
             json_schema_extra={"widget": "code", "rows": 5, "language": "json", "hint": '["urgent", "normal", "low"]'},
         )
         use_fallback: bool = Field(default=True, description="Route non-matching payloads down the fallback handle")
@@ -346,7 +346,7 @@ class RemoveDuplicatesNode(BaseNode):
 
     type = "remove_duplicates"
     name = "Remove Duplicates"
-    description = "Removes repeated items from the array — compares by a field (dot-path, empty = whole item). Keeps the first occurrence."
+    description = "Removes repeated items from the array - compares by a field (dot-path, empty = whole item). Keeps the first occurrence."
     category = "logic"
     icon = "eraser"
     color = "#a78bfa"
@@ -373,7 +373,7 @@ class CompareDatasetsNode(BaseNode):
 
     Each input arrives on its own targetHandle ("main" = Input A,
     "secondary" = Input B). Every A item is paired with the FIRST B item
-    sharing its key; results are routed to three output handles —
+    sharing its key; results are routed to three output handles -
     ``matched`` ({a, b} pairs), ``a_only`` and ``b_only``. B items whose key
     was already paired once (duplicates) are counted, never silently lost.
     """
@@ -409,7 +409,7 @@ class CompareDatasetsNode(BaseNode):
         b_payload = handles.get("secondary")
         if "secondary" not in handles:
             # No edge on the secondary handle: either only Input A is wired,
-            # or both edges landed on one handle — arrival (edge) order then
+            # or both edges landed on one handle - arrival (edge) order then
             # decides: first active payload = A, second = B.
             vals = list(context.current_inputs.values())
             a_payload = vals[0] if vals else None
@@ -443,7 +443,7 @@ class CompareDatasetsNode(BaseNode):
         b_only = [item for item in b_items if self._key(item, p.field_b) not in a_keys]
 
         # Empty buckets emit None so their outgoing edges deactivate and
-        # downstream nodes are skipped — action branches fire only when
+        # downstream nodes are skipped - action branches fire only when
         # there is something to act on (matches IF-branch semantics).
         outputs = {
             "matched": matched or None,
@@ -460,7 +460,7 @@ class CompareDatasetsNode(BaseNode):
 
 
 class SummarizeNode(BaseNode):
-    """v24: group-by aggregation — one output item per group.
+    """v24: group-by aggregation - one output item per group.
 
     ``group_by`` lists dot-path fields; every distinct combination forms a
     group. ``aggregates`` compute count/sum/avg/min/max over a field per
@@ -482,7 +482,7 @@ class SummarizeNode(BaseNode):
         )
         aggregates: list[dict] = Field(
             default_factory=list,
-            description='Aggregations per group, e.g. [{"field": "amount", "op": "sum"}] — op: count|sum|avg|min|max (field optional for count)',
+            description='Aggregations per group, e.g. [{"field": "amount", "op": "sum"}] - op: count|sum|avg|min|max (field optional for count)',
             json_schema_extra={"widget": "code", "rows": 5, "language": "json", "hint": '[{"field": "amount", "op": "sum"}]'},
         )
 
@@ -573,7 +573,7 @@ class CSVNode(BaseNode):
         )
         content: str = Field(
             default="",
-            description="CSV text to parse (parse mode) — supports {{ expressions }}",
+            description="CSV text to parse (parse mode) - supports {{ expressions }}",
             json_schema_extra={"widget": "textarea", "rows": 5, "hint": "name,amount\nAlice,120\nBob,90"},
         )
         delimiter: str = Field(default=",", description="Single delimiter character (e.g. , ; \\t)")

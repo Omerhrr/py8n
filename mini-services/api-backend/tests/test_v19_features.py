@@ -2,7 +2,7 @@
 
 Agent tests mock the LLM transport (``AgentNode._chat``) so the wire protocol,
 tool dispatch (knowledge + real sub-workflow runs), iteration cap and plain
-prose fallback are all deterministic — no bridge dependency.
+prose fallback are all deterministic - no bridge dependency.
 
 Retention tests exercise the policy API against the real SQLite dev DB:
 age-based purge is scoped safely by backdating ONLY executions created here;
@@ -87,7 +87,7 @@ class _ScriptedChat:
     """Replaces AgentNode._chat with a scripted reply sequence.
 
     Must be a plain async FUNCTION (descriptor) so the node instance binds
-    correctly — assigning a callable object would skip self-binding.
+    correctly - assigning a callable object would skip self-binding.
     """
 
     def __init__(self, replies: list[str]):

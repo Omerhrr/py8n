@@ -148,7 +148,7 @@ async function saveForm() {
   formSaving.value = true
   try {
     if (editing.value) {
-      // Untouched secret fields are sent as __keep__ — the vault substitutes
+      // Untouched secret fields are sent as __keep__ - the vault substitutes
       // the stored value without ever exposing it.
       const data: Record<string, any> = {}
       for (const f of typeMeta(formType.value).fields) {
@@ -186,14 +186,14 @@ async function runTest(cred: Credential) {
 }
 
 async function refreshUsage() {
-  // Collect first, assign once — avoids intermediate reactive churn and
+  // Collect first, assign once - avoids intermediate reactive churn and
   // survives credentials deleted mid-flight (their fetch is caught below).
   const entries: Record<string, CredentialUsage> = {}
   await Promise.all(
     store.credentials.map(async (c) => {
       try {
         entries[c.id] = await api.get<CredentialUsage>(`/credentials/${c.id}/usage`)
-      } catch { /* deleted mid-flight — ignore */ }
+      } catch { /* deleted mid-flight - ignore */ }
     })
   )
   usage.value = entries
@@ -249,7 +249,7 @@ onMounted(async () => {
           </div>
           <div>
             <h1 class="text-lg font-bold tracking-tight">Credentials</h1>
-            <p class="-mt-0.5 text-[11px] text-zinc-500">Fernet-encrypted vault — secrets never leave the server</p>
+            <p class="-mt-0.5 text-[11px] text-zinc-500">Fernet-encrypted vault - secrets never leave the server</p>
           </div>
         </div>
         <button
@@ -285,7 +285,7 @@ onMounted(async () => {
               <component :is="typeMeta(t).icon" class="h-3 w-3" />
               {{ typeMeta(t).label }} <span class="tabular-nums opacity-70">{{ n }}</span>
             </button>
-            <span v-if="!byType.length" class="text-xs text-zinc-600">—</span>
+            <span v-if="!byType.length" class="text-xs text-zinc-600">-</span>
           </div>
         </div>
       </section>
@@ -306,7 +306,7 @@ onMounted(async () => {
           {{ credentials.length ? 'No credentials match this filter' : 'No credentials yet' }}
         </p>
         <p class="mx-auto mt-1 max-w-sm text-xs text-zinc-600">
-          Credentials store API keys, tokens and mail accounts — encrypted at rest and referenced from node parameters.
+          Credentials store API keys, tokens and mail accounts - encrypted at rest and referenced from node parameters.
         </p>
         <button
           class="mt-4 inline-flex items-center gap-1.5 rounded-xl bg-orange-500 px-3.5 py-2 text-sm font-semibold text-white shadow-lg shadow-orange-500/20 transition hover:bg-orange-400"
@@ -409,7 +409,7 @@ onMounted(async () => {
               <Globe class="h-4 w-4 text-orange-400" />
               {{ editing ? 'Edit credential' : 'New credential' }}
             </h2>
-            <p class="mt-0.5 text-[11px] text-zinc-500">Encrypted at rest (Fernet) — secrets are never returned by the API</p>
+            <p class="mt-0.5 text-[11px] text-zinc-500">Encrypted at rest (Fernet) - secrets are never returned by the API</p>
           </div>
 
           <div class="space-y-3.5 px-5 py-4">

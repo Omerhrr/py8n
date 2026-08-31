@@ -1,6 +1,6 @@
-"""Agent inventory endpoint (v34) — powers the /agents console.
+"""Agent inventory endpoint (v34) - powers the /agents console.
 
-GET /api/v1/agents — every workflow that contains an ai_agent node, with a
+GET /api/v1/agents - every workflow that contains an ai_agent node, with a
 summary of the tools each agent can call (name + kind), its memory mode and
 chat/webhook reachability. Read-only convenience view; the heavy lifting
 stays in /workflows + /chat.

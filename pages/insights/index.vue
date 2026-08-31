@@ -126,7 +126,7 @@ const gridLines = computed(() => {
 
 // ---- formatting
 function fmtMs(ms: number | undefined) {
-  if (!ms) return '—'
+  if (!ms) return '-'
   if (ms < 1000) return `${ms}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)}s`
   const m = Math.floor(ms / 60_000)
@@ -268,7 +268,7 @@ function prettyType(t: string) {
                 v-for="b in data.timeline"
                 :key="b.date"
                 class="group relative flex h-full flex-1 flex-col justify-end"
-                :title="`${b.date} — ${b.total} run(s): ${b.success} success, ${b.error} error, ${b.waiting} waiting, ${b.cancelled} cancelled`"
+                :title="`${b.date} - ${b.total} run(s): ${b.success} success, ${b.error} error, ${b.waiting} waiting, ${b.cancelled} cancelled`"
               >
                 <div
                   v-for="seg in segments(b)"
@@ -431,7 +431,7 @@ function prettyType(t: string) {
                 max="100000"
                 class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60"
               />
-              <p class="mt-1 text-[10px] text-zinc-600">0 = unlimited — newest records survive</p>
+              <p class="mt-1 text-[10px] text-zinc-600">0 = unlimited - newest records survive</p>
             </div>
             <div class="flex flex-col justify-between gap-2">
               <div class="flex gap-2">
@@ -452,7 +452,7 @@ function prettyType(t: string) {
               </div>
               <p class="text-[10px] leading-snug text-zinc-600">
                 <template v-if="retention.last_purge_at">
-                  Last purge {{ new Date(retention.last_purge_at).toLocaleString() }} —
+                  Last purge {{ new Date(retention.last_purge_at).toLocaleString() }} -
                   {{ retention.last_purge_deleted }} record{{ retention.last_purge_deleted === 1 ? '' : 's' }} removed
                 </template>
                 <template v-else>No purge has run yet</template>

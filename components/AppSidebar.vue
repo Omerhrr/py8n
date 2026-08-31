@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  Zap, LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
+  LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot,
 } from 'lucide-vue-next'
@@ -65,9 +65,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         :class="collapsed && 'justify-center'"
         title="Py8n home"
       >
-        <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-orange-500 to-rose-500 shadow-lg shadow-orange-500/20">
-          <Zap class="h-4 w-4 text-white" />
-        </span>
+        <Py8nLogo :size="32" />
         <span class="min-w-0" :class="collapsed && 'lg:hidden'">
           <span class="block text-sm font-bold leading-tight tracking-tight">Py8n</span>
           <span class="block truncate text-[10px] leading-tight text-zinc-500">Workflow automation</span>
@@ -103,7 +101,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </button>
     </div>
 
-    <!-- expand toggle — lives at the TOP of the sidebar in collapsed mode -->
+    <!-- expand toggle - lives at the TOP of the sidebar in collapsed mode -->
     <div v-if="collapsed" class="hidden justify-center pb-1 lg:flex">
       <button
         class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200"
@@ -164,7 +162,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.34 · 37 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.35 · 37 node types</span>
       </div>
     </div>
   </aside>

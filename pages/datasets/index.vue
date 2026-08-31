@@ -87,7 +87,7 @@ async function doUpload() {
   uploading.value = true
   error.value = null
   try {
-    // multipart: let the browser set the content-type boundary — bypass the
+    // multipart: let the browser set the content-type boundary - bypass the
     // json content-type that useApi.request injects
     const config = useRuntimeConfig()
     const mode = (config.public.gatewayMode as string) || 'gateway'
@@ -148,7 +148,7 @@ async function remove(d: DatasetMeta) {
 }
 
 function fmtDate(iso: string | null) {
-  if (!iso) return '—'
+  if (!iso) return '-'
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 </script>
@@ -162,7 +162,7 @@ function fmtDate(iso: string | null) {
         </span>
         <div class="min-w-0 flex-1">
           <h1 class="truncate text-base font-bold leading-tight">Datasets</h1>
-          <p class="text-xs text-zinc-500">First-class tabular data — upload Excel/CSV, query with SQL, feed workflows</p>
+          <p class="text-xs text-zinc-500">First-class tabular data - upload Excel/CSV, query with SQL, feed workflows</p>
         </div>
         <button
           class="hidden items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 sm:flex"
@@ -207,7 +207,7 @@ function fmtDate(iso: string | null) {
           <Database class="h-6 w-6 text-zinc-600" />
         </span>
         <p class="mt-4 text-sm font-medium text-zinc-300">No datasets yet</p>
-        <p class="mt-1 text-xs text-zinc-500">Upload an Excel workbook or CSV, or create one from JSON — then read, write and query it from any workflow.</p>
+        <p class="mt-1 text-xs text-zinc-500">Upload an Excel workbook or CSV, or create one from JSON - then read, write and query it from any workflow.</p>
         <button class="mt-4 inline-flex items-center gap-1.5 rounded-lg bg-sky-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-400" @click="showUpload = true">
           <Upload class="h-3.5 w-3.5" /> Upload data
         </button>

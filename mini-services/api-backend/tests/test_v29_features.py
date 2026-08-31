@@ -1,4 +1,4 @@
-"""V29 feature tests: App Builder — Excel → App flagship.
+"""V29 feature tests: App Builder - Excel → App flagship.
 
 * App CRUD with slug resolution (id OR ci name; unique slugify with -2/-3).
 * One-click generation from a dataset: stat cards (count + numeric means),
@@ -131,7 +131,7 @@ def test_v29_generate_and_runtime():
             assert comps[3]["columns"] == ["name", "email", "plan", "ltv", "active"]
             assert comps[4]["fields"] == ["name", "email", "plan", "ltv", "active"]
 
-            # runtime by slug — stats + chart verified by hand
+            # runtime by slug - stats + chart verified by hand
             r = await c.get(f"/apps/{app_row['slug']}/runtime")
             assert r.status_code == 200, r.text
             body = r.json()
@@ -300,7 +300,7 @@ def test_v29_config_validation():
 def test_v29_blank_first_and_publish_guards():
     async def _go():
         async with _client() as c:
-            # blank-first with an explicit (broken) config — allowed pre-bind,
+            # blank-first with an explicit (broken) config - allowed pre-bind,
             # validation only runs against a BOUND dataset's schema
             broken = {"components": [{"id": "b", "type": "stat", "agg": "avg"}]}
             r = await c.post("/apps", json={"name": "v29 Blank First", "config": broken})
@@ -333,7 +333,7 @@ def test_v29_blank_first_and_publish_guards():
             r = await c.patch(f"/apps/{row['id']}", json={"config": {"components": []}})
             assert r.status_code == 409 and "Unpublish" in r.json()["detail"]
 
-            # unbind with "" is refused?? — no: unbind is a PATCH, allowed while published,
+            # unbind with "" is refused?? - no: unbind is a PATCH, allowed while published,
             # but publishing gates live at publish-time; runtime still works off the binding
             r = await c.post(f"/apps/{row['id']}/unpublish")
             assert r.status_code == 200 and r.json()["status"] == "draft"

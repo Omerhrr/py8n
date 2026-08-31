@@ -1,11 +1,11 @@
 """V33 feature tests: the Readymade Automations gallery.
 
-The gallery (GET /templates) ships 16 curated blueprints — the 8 originals
+The gallery (GET /templates) ships 16 curated blueprints - the 8 originals
 plus 8 v33 automations showcasing the v19-v32 stack (Document AI → dataset,
 uptime sentinel, tool-calling agent, respond-to-webhook API, error handler,
 memory chatbot, cross-dataset SQL join, lead capture). Every graph must
 validate against the engine; installing one creates a real (inactive)
-workflow — optionally renamed — and the SQL-join template must actually
+workflow - optionally renamed - and the SQL-join template must actually
 RUN offline and produce joined rows in DuckDB.
 
 Same harness as v4-v32: httpx ASGITransport in-process, per-test asyncio.run,

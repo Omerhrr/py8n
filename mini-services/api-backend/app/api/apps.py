@@ -1,4 +1,4 @@
-"""Apps API (v29) — the Excel → App builder flagship.
+"""Apps API (v29) - the Excel → App builder flagship.
 
 Admin endpoints (resolve by id OR case-insensitive name)
 --------------------------------------------------------
@@ -21,7 +21,7 @@ DELETE /apps/{slug}/records/{index}      delete a record
 GET    /apps/{slug}/form                 standalone form descriptor (v30)
 POST   /apps/{slug}/form-submit          anonymous form submission (v30)
 
-Rules management (v30) — the config lock does NOT apply: rules are
+Rules management (v30) - the config lock does NOT apply: rules are
 governance, editable on live apps without touching the layout
 ------------------------------------------------------------------------------
 GET    /apps/{ref}/rules                 rules + the known ops/actions/events
@@ -283,7 +283,7 @@ async def get_rules(app_ref: str, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{app_ref}/rules")
 async def put_rules(app_ref: str, body: RulesPut, db: AsyncSession = Depends(get_db)):
-    """Replace all rules — allowed on PUBLISHED apps too (layout stays locked)."""
+    """Replace all rules - allowed on PUBLISHED apps too (layout stays locked)."""
     row = await _get_or_404(db, app_ref)
     dataset = await _dataset_for(db, row)
     if dataset is None:
@@ -301,7 +301,7 @@ async def put_rules(app_ref: str, body: RulesPut, db: AsyncSession = Depends(get
 
 @router.post("/{app_ref}/rules/test")
 async def test_rules(app_ref: str, body: RulesTestIn, db: AsyncSession = Depends(get_db)):
-    """Dry-run a sample record — which rules fire, what they would do."""
+    """Dry-run a sample record - which rules fire, what they would do."""
     row = await _get_or_404(db, app_ref)
     dataset = await _dataset_for(db, row)
     if dataset is None:
@@ -336,7 +336,7 @@ async def form_descriptor(slug: str, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{slug}/form-submit", status_code=201)
 async def form_submit(slug: str, body: AppRecordIn, db: AsyncSession = Depends(get_db)):
-    """Anonymous single-form submission — same pipeline as records POST."""
+    """Anonymous single-form submission - same pipeline as records POST."""
     row = await _runtime_or_404(db, slug)
     if _form_comp(row) is None:
         raise HTTPException(status_code=409, detail="App has no form component")

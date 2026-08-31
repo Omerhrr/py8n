@@ -53,11 +53,11 @@ class NodeSpec(BaseModel):
     # passed through untouched so downstream nodes keep working.
     disabled: bool = Field(default=False, description="Skip execution, pass input through")
     # v17 n8n-style pinned output: when honored (manual runs + test step) the
-    # node returns this data WITHOUT executing — mock data for building.
+    # node returns this data WITHOUT executing - mock data for building.
     # Webhook/schedule/error runs always execute for real. None = not pinned.
     pinned_data: Any = Field(
         default=None,
-        description="Pinned output — returned instead of executing on manual runs and test steps",
+        description="Pinned output - returned instead of executing on manual runs and test steps",
     )
 
     @property

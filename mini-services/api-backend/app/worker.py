@@ -60,7 +60,7 @@ def execute_workflow_task(self, workflow_id: str, trigger_type: str, trigger_pay
 
     from .executor import execute_workflow
 
-    # Fresh event loop per task — the async engine + aiosqlite/asyncpg live here.
+    # Fresh event loop per task - the async engine + aiosqlite/asyncpg live here.
     result = asyncio.run(
         execute_workflow(
             workflow_id,

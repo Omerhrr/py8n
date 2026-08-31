@@ -12,7 +12,7 @@ mkdir -p data
 
 # Self-heal: if core deps are missing (sandbox venv resets), reinstall quietly.
 if ! "$PY" -c "import fastapi, sqlalchemy, aiosqlite, apscheduler, cryptography, httpx, jinja2" >/dev/null 2>&1; then
-  echo "[py8n-backend] missing deps detected — installing requirements..."
+  echo "[py8n-backend] missing deps detected - installing requirements..."
   "$PY" -m pip install -q -r requirements.txt || echo "[py8n-backend] WARNING: pip install failed, continuing"
 fi
 

@@ -1,6 +1,6 @@
 """V11 feature tests: aggregated execution insights.
 
-Covers: GET /insights — summary counts + success-rate semantics (only
+Covers: GET /insights - summary counts + success-rate semantics (only
 finished runs count), zero-filled per-day timeline, per-workflow scoping
 (workflow_id), top-workflow leaderboard, node-type aggregation from
 persisted node_runs, trigger breakdown, and window validation.

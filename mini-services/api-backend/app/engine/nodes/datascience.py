@@ -1,12 +1,12 @@
-"""Data-science nodes (v28) — Python transforms, charts, ML training.
+"""Data-science nodes (v28) - Python transforms, charts, ML training.
 
-* ``python_transform`` — real pandas/numpy against the incoming items as a
+* ``python_transform`` - real pandas/numpy against the incoming items as a
   DataFrame (``df``); set ``result`` to a DataFrame / list / dict. Imports
   are whitelisted (pandas, numpy, sklearn + a few stdlib modules); stdout is
   captured and surfaced as ``logs``.
-* ``chart`` — no-code matplotlib chart over the input items, saved as a PNG
+* ``chart`` - no-code matplotlib chart over the input items, saved as a PNG
   artifact and rendered inline in the executions drawer.
-* ``model_train`` — trains a curated sklearn model on the input items,
+* ``model_train`` - trains a curated sklearn model on the input items,
   evaluates on a held-out split, pickles the model as an artifact, and
   returns metrics + a prediction sample.
 
@@ -44,7 +44,7 @@ ALLOWED_IMPORTS = {
     "collections": __import__("collections"),
 }
 _IMPORT_ERROR = (
-    "import of {name!r} is not allowed in python_transform — "
+    "import of {name!r} is not allowed in python_transform - "
     "allowed: pandas, numpy, sklearn, math, statistics, datetime, random, itertools, collections"
 )
 
@@ -79,7 +79,7 @@ def _jsonable_out(obj: Any) -> list[dict]:
         return [obj]
     if isinstance(obj, list):
         return obj
-    raise NodeExecutionError(f"result must be a DataFrame, list or dict — got {type(obj).__name__}")
+    raise NodeExecutionError(f"result must be a DataFrame, list or dict - got {type(obj).__name__}")
 
 
 def _input_df(context: ExecutionContext) -> pd.DataFrame:
@@ -94,7 +94,7 @@ class PythonTransformNode(BaseNode):
 
     type = "python_transform"
     name = "Python Transform"
-    description = "Data-frame code: the input items arrive as `df` (pandas) — set `result` to a DataFrame/list/dict. pd, np and sklearn are preloaded."
+    description = "Data-frame code: the input items arrive as `df` (pandas) - set `result` to a DataFrame/list/dict. pd, np and sklearn are preloaded."
     category = "actions"
     icon = "file-code"
     color = "#2dd4bf"
@@ -102,7 +102,7 @@ class PythonTransformNode(BaseNode):
     class ParamsModel(BaseModel):
         code: str = Field(
             default="result = df",
-            description="Python code with `df` (pandas DataFrame) in scope — set `result`",
+            description="Python code with `df` (pandas DataFrame) in scope - set `result`",
             json_schema_extra={"widget": "code", "rows": 12, "language": "python",
                                "hint": "result = df[df.ltv > 100]"},
         )
@@ -159,7 +159,7 @@ def _require_columns(df: pd.DataFrame, wanted: list[str]) -> None:
     missing = [c for c in wanted if c not in df.columns]
     if missing:
         raise NodeExecutionError(
-            f"column(s) {missing} not found — available: {[str(c) for c in df.columns]}"
+            f"column(s) {missing} not found - available: {[str(c) for c in df.columns]}"
         )
 
 
@@ -184,7 +184,7 @@ class ChartNode(BaseNode):
 
     type = "chart"
     name = "Chart"
-    description = "Plots the input items (bar / line / scatter / hist / pie) and saves a PNG artifact — rendered inline in the execution drawer."
+    description = "Plots the input items (bar / line / scatter / hist / pie) and saves a PNG artifact - rendered inline in the execution drawer."
     category = "actions"
     icon = "bar-chart-3"
     color = "#fb923c"
@@ -208,7 +208,7 @@ class ChartNode(BaseNode):
         p = self.params  # type: ChartNode.ParamsModel
         df = _input_df(context)
         if df.empty:
-            raise NodeExecutionError("Chart needs input items — connect a source (dataset_read, sql_query, …)")
+            raise NodeExecutionError("Chart needs input items - connect a source (dataset_read, sql_query, …)")
 
         ys = [s.strip() for s in (p.y or "").split(",") if s.strip()]
         if not ys:
@@ -280,7 +280,7 @@ class ModelTrainNode(BaseNode):
 
     type = "model_train"
     name = "Model Train"
-    description = "Trains an sklearn model (random forest / logistic regression / linear regression) on the input items — returns metrics, a prediction sample and a pickled model artifact."
+    description = "Trains an sklearn model (random forest / logistic regression / linear regression) on the input items - returns metrics, a prediction sample and a pickled model artifact."
     category = "ai"
     icon = "network"
     color = "#818cf8"
@@ -310,7 +310,7 @@ class ModelTrainNode(BaseNode):
         if len(df) < 10:
             raise NodeExecutionError(f"Model training needs at least 10 rows (got {len(df)})")
         if p.target not in df.columns:
-            raise NodeExecutionError(f"Target column {p.target!r} not found — available: {[str(c) for c in df.columns]}")
+            raise NodeExecutionError(f"Target column {p.target!r} not found - available: {[str(c) for c in df.columns]}")
 
         if p.features.strip():
             feats = [f.strip() for f in p.features.split(",") if f.strip()]
@@ -318,11 +318,11 @@ class ModelTrainNode(BaseNode):
         else:
             feats = [c for c in df.select_dtypes(include=["number", "bool"]).columns if c != p.target]
         if not feats:
-            raise NodeExecutionError("No numeric feature columns available — pass `features` or add numeric columns")
+            raise NodeExecutionError("No numeric feature columns available - pass `features` or add numeric columns")
 
         data = df[feats + [p.target]].dropna()
         if len(data) < 10:
-            raise NodeExecutionError(f"Only {len(data)} complete rows after dropping NaNs — need 10+")
+            raise NodeExecutionError(f"Only {len(data)} complete rows after dropping NaNs - need 10+")
 
         is_classifier = p.model in ("random_forest_classifier", "logistic_regression")
         y_raw = data[p.target]

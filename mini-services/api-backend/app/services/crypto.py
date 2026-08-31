@@ -45,7 +45,7 @@ def decrypt_payload(token: str) -> dict:
 
 
 def mask_hint(data: dict) -> str:
-    """Human-safe hint, e.g. 'sk-...abcd' — never the secret itself."""
+    """Human-safe hint, e.g. 'sk-...abcd' - never the secret itself."""
     for key in ("api_key", "value", "token"):
         v = data.get(key)
         if isinstance(v, str) and v:

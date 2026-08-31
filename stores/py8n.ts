@@ -1,4 +1,4 @@
-// Py8n global editor store — definitions, credentials, execution progress.
+// Py8n global editor store - definitions, credentials, execution progress.
 // The canvas graph itself lives in the editor page (Vue Flow owns positions);
 // this store holds everything shared across components.
 import { defineStore } from 'pinia'
@@ -163,14 +163,14 @@ export const usePy8nStore = defineStore('py8n', () => {
 
   async function setErrorWorkflow(handlerId: string | null) {
     if (!workflow.value) return
-    // "" clears the binding, null/str binds — server validates existence + self-bind
+    // "" clears the binding, null/str binds - server validates existence + self-bind
     workflow.value = await api.put<Workflow>(`/workflows/${workflow.value.id}`, {
       error_workflow_id: handlerId ?? '',
     })
   }
 
   // ------------------------------------------------------------------
-  // Tags (v12) — server normalizes (trim/lower/dedupe, max 10×32)
+  // Tags (v12) - server normalizes (trim/lower/dedupe, max 10×32)
   // ------------------------------------------------------------------
   async function setTags(tags: string[]) {
     if (!workflow.value) return
@@ -403,7 +403,7 @@ export const usePy8nStore = defineStore('py8n', () => {
   }
 
   // ------------------------------------------------------------------
-  // Environment variables (v15) — {{ env.KEY }} in any template field
+  // Environment variables (v15) - {{ env.KEY }} in any template field
   // ------------------------------------------------------------------
   const envVars = ref<EnvVariable[]>([])
   const envVarsLoaded = ref(false)
@@ -448,7 +448,7 @@ export const usePy8nStore = defineStore('py8n', () => {
   }
 
   // ------------------------------------------------------------------
-  // v17 test step — run ONE node in isolation, result returned inline.
+  // v17 test step - run ONE node in isolation, result returned inline.
   // Nothing is persisted server-side (no execution log).
   // ------------------------------------------------------------------
   async function testNodeStep(workflowId: string, nodeId: string, items: any) {

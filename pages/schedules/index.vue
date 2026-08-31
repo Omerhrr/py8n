@@ -95,7 +95,7 @@ onBeforeUnmount(() => {
               <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
               <span class="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
             </span>
-            Live — {{ stats.active }} active
+            Live - {{ stats.active }} active
           </span>
           <button
             class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white"
@@ -205,7 +205,7 @@ onBeforeUnmount(() => {
 
               <div v-else-if="entry.is_active && entry.next_runs.length" class="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px]">
                 <span class="text-emerald-400" :title="fmtDate(entry.next_runs[0])">
-                  Next {{ relTime(entry.next_runs[0]) }} — {{ fmtDate(entry.next_runs[0]) }}
+                  Next {{ relTime(entry.next_runs[0]) }} - {{ fmtDate(entry.next_runs[0]) }}
                 </span>
                 <span
                   v-for="run in entry.next_runs.slice(1, 4)"
@@ -217,7 +217,7 @@ onBeforeUnmount(() => {
                 </span>
               </div>
               <p v-else class="mt-2 text-xs text-zinc-600">
-                No upcoming runs — activate the workflow to enable this schedule.
+                No upcoming runs - activate the workflow to enable this schedule.
               </p>
             </div>
 

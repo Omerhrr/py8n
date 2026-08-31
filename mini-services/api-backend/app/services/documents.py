@@ -1,4 +1,4 @@
-"""Document extraction (v32) — documents in, structured data out.
+"""Document extraction (v32) - documents in, structured data out.
 
 The ingestion half of "Document AI": turn PDFs, scans, Office files and
 plain text into (a) full text and (b) TABLES that can become datasets.
@@ -6,15 +6,15 @@ Extracted tables flow into the v27 dataset store, so anything a document
 contains becomes SQL-queryable, app-buildable and dashboard-able.
 
 Engines (all local, no external calls):
-  pdf   — pdfplumber: text per page + ruled table detection (lattice)
-  ocr   — pytesseract over images (png/jpg/bmp/tiff/webp)
-  docx  — python-docx: paragraphs + tables
-  xlsx  — openpyxl: one table per sheet (sheets act as "pages")
-  csv/tsv / json / txt/md — decode + parse
+  pdf   - pdfplumber: text per page + ruled table detection (lattice)
+  ocr   - pytesseract over images (png/jpg/bmp/tiff/webp)
+  docx  - python-docx: paragraphs + tables
+  xlsx  - openpyxl: one table per sheet (sheets act as "pages")
+  csv/tsv / json / txt/md - decode + parse
 
 Every table row is a list of cleaned string cells (``_clean_cell``); the
 API layer turns the BEST table into dataset rows via ``table_to_items``.
-Anything unsupported raises ValueError with an end-user message — the API
+Anything unsupported raises ValueError with an end-user message - the API
 maps that to 400/415 and the engine node surfaces it as a run error.
 """
 
@@ -72,7 +72,7 @@ def _extract_pdf(content: bytes) -> dict:
             pages += 1
             try:
                 page_text = page.extract_text() or ""
-            except Exception:  # noqa: BLE001 — a broken page must not kill the doc
+            except Exception:  # noqa: BLE001 - a broken page must not kill the doc
                 page_text = ""
             if page_text:
                 text_parts.append(page_text)
@@ -243,7 +243,7 @@ def extract_document(filename: str, content: bytes) -> dict:
     ext = os.path.splitext((filename or "").lower())[1]
     if ext not in SUPPORTED_EXTS:
         raise ValueError(
-            f"Unsupported document type {ext or '(none)'} — supported: {', '.join(SUPPORTED_EXTS)}"
+            f"Unsupported document type {ext or '(none)'} - supported: {', '.join(SUPPORTED_EXTS)}"
         )
     if not content:
         raise ValueError("The document is empty")

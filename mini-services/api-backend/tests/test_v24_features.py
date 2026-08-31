@@ -1,7 +1,7 @@
 """V24 feature tests: Compare Datasets, Summarize, CSV.
 
 Compare Datasets is the platform's first multi-INPUT node (Input A on the
-"main" targetHandle, Input B on "secondary" — the runner now exposes
+"main" targetHandle, Input B on "secondary" - the runner now exposes
 targetHandle-keyed payloads via context.current_input_handles) and routes
 reconciliation results to matched / a_only / b_only output handles.
 Summarize adds group-by aggregation; CSV parses/serializes CSV text.

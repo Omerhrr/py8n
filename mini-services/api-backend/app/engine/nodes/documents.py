@@ -1,8 +1,8 @@
-"""Document nodes (v32) — pull documents into the flow as text + items.
+"""Document nodes (v32) - pull documents into the flow as text + items.
 
 ``document_extract`` reads a document from a server path or a URL, runs the
 same extraction engines as the Documents API (pdfplumber / OCR / docx /
-xlsx / csv / json — see app/services/documents.py) and emits the text plus,
+xlsx / csv / json - see app/services/documents.py) and emits the text plus,
 when ``include_items`` is on, the best table as flow items so downstream
 nodes (filter, python_transform, dataset_write, chart…) can work with the
 document's rows immediately.
@@ -26,7 +26,7 @@ class DocumentExtractNode(BaseNode):
     name = "Document Extract"
     description = (
         "Reads a PDF / image (OCR) / Word / Excel / CSV / JSON document and outputs its "
-        "text plus the best table as items — documents in, data out."
+        "text plus the best table as items - documents in, data out."
     )
     category = "actions"
     icon = "file-text"
@@ -56,7 +56,7 @@ class DocumentExtractNode(BaseNode):
             try:
                 resp = httpx.get(url, timeout=30.0, follow_redirects=True)
                 resp.raise_for_status()
-            except Exception as exc:  # noqa: BLE001 — network failures surface as run errors
+            except Exception as exc:  # noqa: BLE001 - network failures surface as run errors
                 raise NodeExecutionError(f"Could not fetch {url!r}: {exc}") from exc
             raw = resp.content
             filename = os.path.basename(url.split("?", 1)[0].rstrip("/")) or "document"

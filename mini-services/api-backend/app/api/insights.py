@@ -1,12 +1,12 @@
-"""Aggregated execution insights — platform-level analytics for operators.
+"""Aggregated execution insights - platform-level analytics for operators.
 
 Single read-only endpoint that rolls the execution log up into:
 
-* ``summary``           — status counts, success rate, avg duration
-* ``timeline``          — per-day buckets (zero-filled) for the window
-* ``top_workflows``     — leaderboard by run count (with error + duration)
-* ``node_stats``        — per-node-type aggregates from persisted node runs
-* ``trigger_breakdown`` — manual / webhook / schedule / error split
+* ``summary``           - status counts, success rate, avg duration
+* ``timeline``          - per-day buckets (zero-filled) for the window
+* ``top_workflows``     - leaderboard by run count (with error + duration)
+* ``node_stats``        - per-node-type aggregates from persisted node runs
+* ``trigger_breakdown`` - manual / webhook / schedule / error split
 
 All queries are read-only; aggregation happens in SQL where trivial and in
 Python for the JSON ``node_runs`` column (SQLite has no JSON aggregation and
@@ -63,7 +63,7 @@ async def get_insights(
         "waiting": by_status.get("waiting", 0),
         "cancelled": by_status.get("cancelled", 0),
         "running": by_status.get("running", 0),
-        # Success rate over *finished* runs — pending/waiting/running runs
+        # Success rate over *finished* runs - pending/waiting/running runs
         # would only dilute the signal operators care about.
         "success_rate": _pct(by_status.get("success", 0),
                              by_status.get("success", 0) + by_status.get("error", 0)),

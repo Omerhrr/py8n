@@ -1,8 +1,8 @@
-"""AI Agent node — LLM with an iterative tool-calling loop (v19, deepened v34).
+"""AI Agent node - LLM with an iterative tool-calling loop (v19, deepened v34).
 
 The flagship agentic node: the model receives a tool catalogue and may call
 tools over multiple rounds before producing its final answer. Tool calls use
-a strict JSON wire protocol (works with ANY OpenAI-compatible chat model —
+a strict JSON wire protocol (works with ANY OpenAI-compatible chat model -
 no native function-calling support required):
 
     {"tool": "<tool_name>", "arguments": {...}}   -> run tool, feed result back
@@ -10,17 +10,17 @@ no native function-calling support required):
 
 Built-in tool kinds
 -------------------
-* workflow  — run another Py8n workflow (args become the trigger payload);
+* workflow  - run another Py8n workflow (args become the trigger payload);
               reuses the same nested GraphRunner machinery as the
               Execute Workflow node (depth-limited).
-* http      — perform an HTTP request; method/url/headers/body come from the
+* http      - perform an HTTP request; method/url/headers/body come from the
               model, guarded by an optional domain allow-list.
-* knowledge — return a static knowledge snippet stored on the node.
-* dataset   — (v34) run READ-ONLY SQL (SELECT/WITH, single statement) over
-              the stored datasets via DuckDB — every dataset is a view named
+* knowledge - return a static knowledge snippet stored on the node.
+* dataset   - (v34) run READ-ONLY SQL (SELECT/WITH, single statement) over
+              the stored datasets via DuckDB - every dataset is a view named
               after it. The agent can actually interrogate your data.
-* code      — (v34) run a sandboxed Python snippet (same restricted runtime
-              as the Code node) and hand the model back `result` + stdout —
+* code      - (v34) run a sandboxed Python snippet (same restricted runtime
+              as the Code node) and hand the model back `result` + stdout -
               lets the agent compute, format and do arithmetic reliably.
 """
 
@@ -42,16 +42,16 @@ MAX_TOOL_RESULT_CHARS = 4000
 class ToolSpec(BaseModel):
     kind: Literal["workflow", "http", "knowledge", "dataset", "code"] = "knowledge"
     name: str = Field(default="", description="Tool name the model will call (snake_case)")
-    description: str = Field(default="", description="What the tool does — helps the model choose")
+    description: str = Field(default="", description="What the tool does - helps the model choose")
     # workflow tool
     workflow_id: str | None = Field(default=None, json_schema_extra={"widget": "workflow"})
     # http tool
     allowed_domains: list[str] = Field(default_factory=list, description="Empty = any domain")
     # knowledge tool
     content: str | None = Field(default=None, json_schema_extra={"widget": "textarea", "rows": 4})
-    # v34 dataset tool — cap on rows handed back to the model
+    # v34 dataset tool - cap on rows handed back to the model
     max_rows: int = Field(default=25, ge=1, le=200, description="dataset tool: max rows returned to the model")
-    # v34 code tool — executor timeout
+    # v34 code tool - executor timeout
     timeout_seconds: float = Field(default=10, ge=1, le=60, description="code tool: sandbox timeout in seconds")
 
 
@@ -77,13 +77,13 @@ class AgentNode(BaseNode):
         )
         user_message: str = Field(
             default="Task: {{ input | tojson }}",
-            description="User message — supports {{ expressions }}",
+            description="User message - supports {{ expressions }}",
             json_schema_extra={"widget": "textarea", "rows": 5},
         )
         max_iterations: int = Field(default=5, ge=1, le=10)
         temperature: float = Field(default=0.4, ge=0, le=2)
         credential_id: str | None = Field(default=None)
-        # v23: session memory — persisted per session_key, injected as prior turns
+        # v23: session memory - persisted per session_key, injected as prior turns
         memory: str = Field(
             default="none",
             description="none = stateless (fresh each run); buffer = remembers prior turns for the same session key",
@@ -91,7 +91,7 @@ class AgentNode(BaseNode):
         )
         session_key: str = Field(
             default="default",
-            description="Conversation key — same key = same memory. Supports {{ expressions }}, e.g. 'support-{{ input.customer_id }}'",
+            description="Conversation key - same key = same memory. Supports {{ expressions }}, e.g. 'support-{{ input.customer_id }}'",
         )
         max_history_turns: int = Field(
             default=5, ge=1, le=50, description="How many recent user/assistant turn pairs the agent remembers"
@@ -181,7 +181,7 @@ class AgentNode(BaseNode):
         return text[:MAX_TOOL_RESULT_CHARS]
 
     # ------------------------------------------------------------------
-    # v34 tool kinds — dataset (read-only SQL) and code (sandboxed Python)
+    # v34 tool kinds - dataset (read-only SQL) and code (sandboxed Python)
     # ------------------------------------------------------------------
     @staticmethod
     def _guard_readonly_sql(sql: str) -> str:
@@ -237,7 +237,7 @@ class AgentNode(BaseNode):
         def _exec() -> tuple[str, Any]:
             buf = io.StringIO()
 
-            def _print(*a, **k):  # SAFE_BUILTINS no-ops print — shadow it with a capture
+            def _print(*a, **k):  # SAFE_BUILTINS no-ops print - shadow it with a capture
                 buf.write(str(k.get("sep", " ")).join(str(x) for x in a) + str(k.get("end", "\n")))
 
             user_globals: dict[str, Any] = {"__builtins__": dict(SAFE_BUILTINS), "result": None, "print": _print}
@@ -251,7 +251,7 @@ class AgentNode(BaseNode):
             stdout, result = await _asyncio.wait_for(loop.run_in_executor(None, _exec), timeout=tool.timeout_seconds)
         except _asyncio.TimeoutError as exc:
             raise NodeExecutionError(f"code tool timed out after {tool.timeout_seconds}s") from exc
-        except Exception as exc:  # noqa: BLE001 — surface sandbox errors to the model
+        except Exception as exc:  # noqa: BLE001 - surface sandbox errors to the model
             raise NodeExecutionError(f"code error: {type(exc).__name__}: {exc}") from exc
         return {"result": result, "stdout": stdout.strip()}
 
@@ -346,7 +346,7 @@ class AgentNode(BaseNode):
         }
         protocol = (
             "You operate in a tool loop. Reply with EXACTLY one JSON object and nothing else.\n"
-            'To call a tool: {"tool": "<name>", "arguments": {...}} — allowed names + argument schemas:\n'
+            'To call a tool: {"tool": "<name>", "arguments": {...}} - allowed names + argument schemas:\n'
             f"{json.dumps(catalogue, ensure_ascii=False)}\n"
             'After each tool call you receive "TOOL RESULT <name>: <json>".\n'
             'When you can answer without more tools, reply {"answer": "<final answer>"}.'
@@ -356,7 +356,7 @@ class AgentNode(BaseNode):
             {"role": "user", "content": str(p.user_message)},
         ]
 
-        # v23: session memory — prior turns for this key sit between the
+        # v23: session memory - prior turns for this key sit between the
         # system message and the current user message.
         memory_used = 0
         memory_key = (p.session_key or "default").strip()
@@ -375,7 +375,7 @@ class AgentNode(BaseNode):
             content = await self._chat(messages, p.temperature)
             directive = self._parse_reply(content)
             # normalize the directive: some models nest the tool call as
-            # {"tool": {"name": ..., "arguments": {...}}} — accept both shapes
+            # {"tool": {"name": ..., "arguments": {...}}} - accept both shapes
             tool_name = directive.get("tool")
             tool_args = directive.get("arguments")
             if isinstance(tool_name, dict):

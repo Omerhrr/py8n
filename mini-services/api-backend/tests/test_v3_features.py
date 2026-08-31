@@ -171,7 +171,7 @@ def test_email_dry_run_preview():
              "parameters": {
                  "to": "ada@example.com, bob@example.com",
                  "subject": "Order confirmed",
-                 "body": "Thanks {{ nodes.t.output.payload.customer }} — total {{ nodes.t.output.payload.total }} EUR",
+                 "body": "Thanks {{ nodes.t.output.payload.customer }} - total {{ nodes.t.output.payload.total }} EUR",
                  "dry_run": True,
              }},
         ],

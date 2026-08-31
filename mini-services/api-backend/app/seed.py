@@ -43,7 +43,7 @@ def _quickstart() -> Workflow:
         ],
     }
     return Workflow(
-        name="Hello Py8n — Quickstart",
+        name="Hello Py8n - Quickstart",
         description="Manual trigger → Python code → IF branch demo. Press Run and watch the true/false branches light up.",
         graph=graph,
         is_active=True,
@@ -68,7 +68,7 @@ def _ai_writer() -> Workflow:
         "edges": [_edge("e1", "start", "llm"), _edge("e2", "llm", "format")],
     }
     return Workflow(
-        name="AI Writer — free LLM demo",
+        name="AI Writer - free LLM demo",
         description="Manual trigger → LLM Chat (built-in free bridge) → Set. No API keys needed.",
         graph=graph,
         is_active=True,
@@ -114,7 +114,7 @@ def _api_ping() -> Workflow:
         "edges": [_edge("e1", "start", "http"), _edge("e2", "http", "report")],
     }
     return Workflow(
-        name="HTTP Request — self ping",
+        name="HTTP Request - self ping",
         description="Manual trigger → HTTP Request node hitting the Py8n health endpoint → Set. Demonstrates the HTTP action node.",
         graph=graph,
         is_active=True,
@@ -156,7 +156,7 @@ def _batch_digest() -> Workflow:
         ],
     }
     return Workflow(
-        name="Batch Orders Digest — loop demo",
+        name="Batch Orders Digest - loop demo",
         description="Manual trigger → Loop Over Items (batches of 2) → per-batch revenue via Python → Aggregate over done results. Watch the body re-run per batch.",
         graph=graph,
         is_active=True,

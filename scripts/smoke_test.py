@@ -64,7 +64,7 @@ def main() -> None:
     by_name = {f["name"]: f["id"] for f in flows}
 
     print("== run Quickstart (IF branch + code node) ==")
-    wf_id = by_name["Hello Py8n — Quickstart"]
+    wf_id = by_name["Hello Py8n - Quickstart"]
     status, acc = req("POST", f"/workflows/{wf_id}/run", {"payload": {"name": "Grace", "score": 99}})
     assert status == 200, acc
     exec_id = acc["execution_id"]
@@ -99,7 +99,7 @@ def main() -> None:
     assert len(flat_successful_nodes(events)) >= 3, events  # trigger + enrich + win
 
     print("== AI Writer workflow (LLM bridge) ==")
-    ai_id = by_name["AI Writer — free LLM demo"]
+    ai_id = by_name["AI Writer - free LLM demo"]
     status, acc = req("POST", f"/workflows/{ai_id}/run", {})
     ai_exec = acc["execution_id"]
     for _ in range(80):
@@ -231,8 +231,8 @@ def main() -> None:
 
     # ------------------------------------------------------------------ v3
     print("== v3 loop: seeded Batch Orders Digest (loop → code per batch → aggregate) ==")
-    assert "Batch Orders Digest — loop demo" in by_name, "seed top-up missing"
-    digest_id = by_name["Batch Orders Digest — loop demo"]
+    assert "Batch Orders Digest - loop demo" in by_name, "seed top-up missing"
+    digest_id = by_name["Batch Orders Digest - loop demo"]
     status, acc = req("POST", f"/workflows/{digest_id}/run", {})
     exec_id = acc["execution_id"]
     for _ in range(40):
@@ -276,7 +276,7 @@ def main() -> None:
              "parameters": {"payload": {"customer": "Ada", "total": 42}}},
             {"id": "mail", "type": "email_send", "name": "Confirm email", "position": {"x": 200, "y": 0},
              "parameters": {"to": "ada@example.com", "subject": "Order confirmed",
-                            "body": "Thanks {{ nodes.t.output.payload.customer }} — total {{ nodes.t.output.payload.total }} EUR",
+                            "body": "Thanks {{ nodes.t.output.payload.customer }} - total {{ nodes.t.output.payload.total }} EUR",
                             "dry_run": True}},
             {"id": "alert", "type": "slack_message", "name": "Slack alert", "position": {"x": 400, "y": 0},
              "parameters": {"webhook_url": "https://hooks.slack.com/services/T000/B000/XXXX",
@@ -404,7 +404,7 @@ def main() -> None:
         assert status == 404, status
         status, _ = req("POST", f"/executions/{wexec}/resume", {"token": "wrong-token"})
         assert status == 403, status
-        print("404 unknown id / 403 wrong token — OK")
+        print("404 unknown id / 403 wrong token - OK")
 
         status, rr = req("POST", f"/executions/{wexec}/resume", {"token": token, "payload": {"approved": True}})
         assert status == 202, (status, rr)
@@ -424,7 +424,7 @@ def main() -> None:
         # token invalidated after resume
         status, _ = req("POST", f"/executions/{wexec}/resume", {"token": token})
         assert status == 409, status
-        print("token invalidated after resume (409) — OK")
+        print("token invalidated after resume (409) - OK")
     finally:
         req("DELETE", f"/workflows/{wfw['id']}")
 
@@ -499,7 +499,7 @@ def main() -> None:
         assert status == 200 and deact["is_active"] is False and deact["next_run_at"] is None, deact
     finally:
         req("DELETE", f"/workflows/{swf['id']}")
-    print("activate/deactivate roundtrip + global view + cron guard — OK")
+    print("activate/deactivate roundtrip + global view + cron guard - OK")
 
     # ------------------------------------------------------------- v8 wave
     print("== v8 run control: disabled nodes -> cancel -> error workflows ==")
@@ -678,7 +678,7 @@ def main() -> None:
         assert status == 204
         status, gone = req("GET", f"/credentials/{cid}")
         assert status == 404
-        print("protected delete (409) + force delete — OK")
+        print("protected delete (409) + force delete - OK")
     finally:
         req("DELETE", f"/workflows/{uwf['id']}")
         req("DELETE", f"/credentials/{cid}?force=true")
@@ -796,7 +796,7 @@ def main() -> None:
         # clear via []
         status, upd = req("PUT", f"/workflows/{twf['id']}", {"tags": []})
         assert status == 200 and upd["tags"] == [], upd
-        print("tags normalize + tri-state + filter/search + summary + duplicate — OK")
+        print("tags normalize + tri-state + filter/search + summary + duplicate - OK")
     finally:
         req("DELETE", f"/workflows/{twf['id']}")
 
@@ -916,7 +916,7 @@ def main() -> None:
         assert out["result"]["plain"] == "plain-15", out
         assert out["result"]["tok"] == "tok-15-secret", out  # secrets resolve in-engine
         assert "env" not in (detail.get("context_snapshot") or {}), "env must never dump to logs"
-        print(f"run OK in {detail['duration_ms']}ms — plain + secret resolved via {{ env.* }}")
+        print(f"run OK in {detail['duration_ms']}ms - plain + secret resolved via {{ env.* }}")
 
         # unmask flip reveals the kept value; then cleanup vars
         status, tok_id = None, secret["id"]
@@ -932,7 +932,7 @@ def main() -> None:
     print("v15 env vars OK")
 
     # ------------------------------------------------------------- v16 wave
-    # Folders: hierarchical grouping — CRUD, workflow assignment, filters.
+    # Folders: hierarchical grouping - CRUD, workflow assignment, filters.
     print("== v16 folders: CRUD -> assignment -> filters -> cascade-to-root ==")
     uniq16 = uuid.uuid4().hex[:8]
     status, health = req("GET", "/health")
@@ -1045,7 +1045,7 @@ def main() -> None:
         assert run_c["duration_ms"] == 0, run_c
         print("manual run honors pin OK")
 
-        # production path: webhook fire ignores the pin — real execution
+        # production path: webhook fire ignores the pin - real execution
         _set_pin({"result": {"doubled": 100}})
         assert req("POST", f"/workflows/{wf17['id']}/activate")[0] == 200
         status, hook17 = req("POST", f"/webhooks/{wf17['id']}", {"n": 7})
@@ -1228,7 +1228,7 @@ def main() -> None:
         status, body = req("POST", f"/webhooks/{wf21['id']}", {"ticket": "T-777", "level": "urgent"})
         assert status == 202, (status, body)
         assert body == {"ticket": "T-777", "level": "urgent", "accepted": True}, body
-        # flow kept running after the respond — downstream node executed
+        # flow kept running after the respond - downstream node executed
         status, execs = req("GET", f"/executions?workflow_id={wf21['id']}&limit=5")
         wh_execs = [e for e in execs if e["trigger_type"] == "webhook"]
         assert len(wh_execs) == 1, execs
@@ -1428,7 +1428,7 @@ def main() -> None:
         assert out1["memory_turns_loaded"] == 0 and out1["memory_key"] == mem_key, out1
         print("memory run 1: stored, nothing loaded OK ->", str(out1["answer"])[:60])
 
-        # run 2 on a NEW execution asks about the color — agent must recall via injected history
+        # run 2 on a NEW execution asks about the color - agent must recall via injected history
         status, r2res = req("POST", f"/workflows/{wfm['id']}/run", {"payload": {}})
         exec2 = r2res["execution_id"]
         d2 = None
@@ -1673,7 +1673,7 @@ def main() -> None:
     print("v26 chat progress stream OK")
 
     # ---------------------------------------------------------------
-    # v27: dataset engine — upload, SQL join, workflow read/write/sql
+    # v27: dataset engine - upload, SQL join, workflow read/write/sql
     # ---------------------------------------------------------------
     print("\n== v27: dataset engine ==")
     status, defs27 = req("GET", "/node-definitions")
@@ -1786,7 +1786,7 @@ def main() -> None:
     print("v27 dataset engine OK")
 
     # ---------------------------------------------------------------
-    # v28: data-science workbench — python_transform, chart, model_train
+    # v28: data-science workbench - python_transform, chart, model_train
     # ---------------------------------------------------------------
     print("\n== v28: data-science workbench ==")
     status, defs28 = req("GET", "/node-definitions")
@@ -1875,7 +1875,7 @@ def main() -> None:
     print("v28 data-science workbench OK")
 
     # ---------------------------------------------------------------
-    # v29: app builder — Excel → App (generate, publish, runtime, records)
+    # v29: app builder - Excel → App (generate, publish, runtime, records)
     # ---------------------------------------------------------------
     print("\n== v29: app builder (Excel -> App) ==")
     status, health29 = req("GET", "/health")
@@ -1942,7 +1942,7 @@ def main() -> None:
     print("v29 app builder OK")
 
     # ---------------------------------------------------------------
-    # v30: forms & business rules — block/warn/set, field options, /form
+    # v30: forms & business rules - block/warn/set, field options, /form
     # ---------------------------------------------------------------
     print("\n== v30: forms & business rules ==")
     status, health30 = req("GET", "/health")
@@ -1976,7 +1976,7 @@ def main() -> None:
          "action": "block", "message": "LTV above 15000 needs sign-off"},
         {"id": "r_warn", "name": "Big deal", "event": "always",
          "when": {"all": [{"field": "ltv", "op": "gte", "value": 9000}]},
-         "action": "warn", "message": "Big deal — call the customer"},
+         "action": "warn", "message": "Big deal - call the customer"},
         {"id": "r_set", "name": "Commission", "event": "create",
          "when": {"all": [{"field": "plan", "op": "eq", "value": "pro"}]},
          "action": "set", "field": "commission", "formula": "ltv * 0.1"},
@@ -1989,12 +1989,12 @@ def main() -> None:
         status, pub30 = req("POST", f"/apps/{app30['id']}/publish")
         assert status == 200 and pub30["status"] == "published", pub30
 
-        # block fires on create — record rejected, nothing written
+        # block fires on create - record rejected, nothing written
         status, err = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Zed", "plan": "starter", "ltv": 20000}})
         assert status == 400 and "15000" in err["detail"], err
         # warn surfaces in the response; default fills the absent plan
         status, rec = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Yara", "ltv": 9500}})
-        assert status == 201 and rec["warnings"] == ["Big deal — call the customer"], rec
+        assert status == 201 and rec["warnings"] == ["Big deal - call the customer"], rec
         assert req("GET", f"/apps/{app30['slug']}/records?offset=6&limit=1")[1]["rows"][0]["plan"] == "starter"
         # set computes commission via formula (int cast on the column)
         status, _ = req("POST", f"/apps/{app30['slug']}/records", {"record": {"name": "Xavi", "plan": "pro", "ltv": 2000}})
@@ -2036,7 +2036,7 @@ def main() -> None:
     print("v30 forms & business rules OK")
 
     # ---------------------------------------------------------------
-    # v31: dashboards — multi-dataset boards, preview + runtime, tolerant compute
+    # v31: dashboards - multi-dataset boards, preview + runtime, tolerant compute
     # ---------------------------------------------------------------
     print("\n== v31: dashboards ==")
     status, health31 = req("GET", "/health")
@@ -2061,7 +2061,7 @@ def main() -> None:
     status, ds31b = req("POST", "/datasets", {"name": f"smoke31 billing {tag31}", "rows": rows31b})
     assert status == 201, ds31b
     try:
-        # generated board from TWO datasets — per-component dataset binding
+        # generated board from TWO datasets - per-component dataset binding
         status, dash31 = req("POST", "/dashboards", {"name": f"smoke31 wall {tag31}", "dataset_ids": [ds31a["id"], ds31b["id"]]})
         assert status == 201, dash31
         comps31 = dash31["config"]["components"]
@@ -2120,7 +2120,7 @@ def main() -> None:
     print("v31 dashboards OK")
 
     # ------------------------------------------------------------------
-    # v32: document AI — engines probe, PDF extract (text + ruled table),
+    # v32: document AI - engines probe, PDF extract (text + ruled table),
     # to-dataset with numeric coercion + live SQL, real tesseract OCR pass
     print("\n== v32: document AI ==")
     tag32 = uuid.uuid4().hex[:8]
@@ -2278,6 +2278,46 @@ def main() -> None:
         if wf34:
             req("DELETE", f"/workflows/{wf34['id']}")
     print("v34 agent tool-calling deepening OK")
+
+    # ------------------------------------------------------------- v35: brand + polish
+    status, health35 = req("GET", "/health")
+    ver35 = tuple(int(x) for x in health35.get("version", "0").split(".")[:2])
+    assert status == 200 and ver35 >= (1, 35), health35
+
+    # dash hygiene: product source carries zero em/en dashes
+    import os as _os35
+    from pathlib import Path as _Path35
+
+    _root = _Path35(__file__).resolve().parents[1]
+    _em, _en = "\u2014", "\u2013"
+    _targets = [
+        "mini-services/api-backend/app", "mini-services/api-backend/tests",
+        "pages", "components", "composables", "layouts", "stores", "types",
+    ]
+    _exts = {".py", ".ts", ".vue", ".md", ".json", ".yml", ".css", ".html"}
+    _offenders = []
+    for _t in _targets:
+        _p = _root / _t
+        if _p.is_file():
+            _files = [_p]
+        else:
+            _files = [q / f for q, _d, fs in _p.walk() for f in fs if (q / f).suffix in _exts]
+        for _fp in _files:
+            try:
+                _txt = _Path35(_fp).read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            if _em in _txt or _en in _txt:
+                _offenders.append(str(_fp))
+    assert not _offenders, f"em/en dashes remain in {_offenders[:5]}"
+
+    # brand assets: standalone logo + component, both carrying the mark
+    _logo = (_root / "public" / "logo.svg").read_text(encoding="utf-8")
+    assert "<title>Py8n</title>" in _logo and "py8n-tile" in _logo, "public/logo.svg lacks the Py8n mark"
+    _comp = (_root / "components" / "Py8nLogo.vue").read_text(encoding="utf-8")
+    assert 'viewBox="0 0 64 64"' in _comp and "#FCD34D" in _comp, "Py8nLogo.vue lacks the mark"
+    print("dash hygiene + brand assets OK (logo.svg + Py8nLogo.vue verified)")
+    print("v35 brand and polish OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")

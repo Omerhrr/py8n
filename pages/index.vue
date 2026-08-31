@@ -97,7 +97,7 @@ async function onImportFile(event: Event) {
     const wf = await api.post<Workflow>('/workflows/import', { data: doc })
     navigateTo(`/workflows/${wf.id}`)
   } catch (e: any) {
-    alert(e?.data?.detail || e?.message || 'Import failed — is this a Py8n export file?')
+    alert(e?.data?.detail || e?.message || 'Import failed - is this a Py8n export file?')
   } finally {
     importing.value = false
   }
@@ -149,7 +149,7 @@ const allTags = computed(() => {
 
 const filteredWorkflows = computed(() => {
   let list = workflows.value
-  // v16: folder scope — a folder chip includes its descendant folders
+  // v16: folder scope - a folder chip includes its descendant folders
   if (activeFolder.value === 'none') {
     list = list.filter((w) => !w.folder_id)
   } else if (activeFolder.value) {
@@ -305,7 +305,7 @@ async function removeFolder(f: Folder) {
   try {
     await api.del(`/folders/${f.id}`)
   } catch (e: any) {
-    alert(e?.data?.detail || e?.message || 'Delete failed — subfolders must be moved first')
+    alert(e?.data?.detail || e?.message || 'Delete failed - subfolders must be moved first')
     return
   }
   folders.value = folders.value.filter((x) => x.id !== f.id)
@@ -342,7 +342,7 @@ onMounted(() => {
 
 // sidebar / palette "New workflow" lands on /?new=1 → open the create dialog.
 // A watch (not just onMounted) covers the case where the dashboard is ALREADY
-// the current page — a query-only change re-runs this without a remount.
+// the current page - a query-only change re-runs this without a remount.
 watch(
   () => route.query.new,
   (v) => {
@@ -411,7 +411,7 @@ watch(
             </h2>
             <p class="mt-2 text-sm leading-relaxed text-zinc-400">
               Drag nodes onto the canvas, wire them up, and Py8n executes the graph
-              topologically with a Jinja2-templated context — webhook, schedule and AI triggers included.
+              topologically with a Jinja2-templated context - webhook, schedule and AI triggers included.
             </p>
           </div>
           <div class="grid grid-cols-3 gap-3 sm:gap-4">
@@ -560,7 +560,7 @@ watch(
 
         <div v-else-if="workflows.length === 0" class="rounded-2xl border border-dashed border-zinc-800 p-12 text-center">
           <Sparkles class="mx-auto mb-3 h-8 w-8 text-zinc-600" />
-          <p class="text-zinc-400">No workflows yet — create your first one.</p>
+          <p class="text-zinc-400">No workflows yet - create your first one.</p>
         </div>
 
         <div v-else-if="filteredWorkflows.length === 0" class="rounded-2xl border border-dashed border-zinc-800 p-12 text-center">
@@ -587,7 +587,7 @@ watch(
                 :class="wf.is_active
                   ? 'bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25'
                   : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'"
-                :title="wf.is_active ? 'Active — triggers enabled' : 'Inactive — click to activate'"
+                :title="wf.is_active ? 'Active - triggers enabled' : 'Inactive - click to activate'"
                 @click.stop="toggleActive(wf)"
               >
                 {{ wf.is_active ? 'Active' : 'Paused' }}
@@ -686,7 +686,7 @@ watch(
                       <span class="truncate">{{ folderPath(f.id) }}</span>
                       <Check v-if="wf.folder_id === f.id" class="h-3 w-3 shrink-0" />
                     </button>
-                    <p v-if="!folders.length" class="px-3 py-2 text-xs text-zinc-600">No folders yet — create one from the bar above.</p>
+                    <p v-if="!folders.length" class="px-3 py-2 text-xs text-zinc-600">No folders yet - create one from the bar above.</p>
                   </div>
                 </div>
                 <button
@@ -733,7 +733,7 @@ watch(
                   {{ workflows.find(w => w.id === run.workflow_id)?.name || run.workflow_id.slice(0, 8) }}
                 </td>
                 <td class="px-4 py-2.5 text-xs capitalize text-zinc-500">{{ run.trigger_type }}</td>
-                <td class="px-4 py-2.5 text-xs text-zinc-500">{{ run.duration_ms != null ? run.duration_ms + ' ms' : '—' }}</td>
+                <td class="px-4 py-2.5 text-xs text-zinc-500">{{ run.duration_ms != null ? run.duration_ms + ' ms' : '-' }}</td>
                 <td class="px-4 py-2.5 text-right text-xs text-zinc-600">{{ fmtDate(run.started_at || '') }}</td>
               </tr>
             </tbody>

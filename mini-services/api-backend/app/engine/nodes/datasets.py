@@ -1,4 +1,4 @@
-"""Dataset nodes (v27) — read / write stored datasets and run SQL over them.
+"""Dataset nodes (v27) - read / write stored datasets and run SQL over them.
 
 These nodes make the dataset store (app/services/datasets.py) part of the
 engine: workflows can pull rows from a dataset, push their items into one,
@@ -72,7 +72,7 @@ class DatasetWriteNode(BaseNode):
 
     type = "dataset_write"
     name = "Dataset Write"
-    description = "Writes the incoming items into a dataset — appends by default, or replaces all rows."
+    description = "Writes the incoming items into a dataset - appends by default, or replaces all rows."
     category = "actions"
     icon = "hard-drive-download"
     color = "#a3e635"
@@ -93,7 +93,7 @@ class DatasetWriteNode(BaseNode):
         items = _items(_working_data(context.current_input))
         rows = [r for r in items if isinstance(r, dict)]
         if len(rows) < len(items):
-            raise NodeExecutionError(f"Dataset Write needs object items — {len(items) - len(rows)} non-object item(s) dropped would lose data; shape upstream instead")
+            raise NodeExecutionError(f"Dataset Write needs object items - {len(items) - len(rows)} non-object item(s) dropped would lose data; shape upstream instead")
         if not p.dataset or not p.dataset.strip():
             raise NodeExecutionError("A target dataset name is required")
 
@@ -132,7 +132,7 @@ class SqlQueryNode(BaseNode):
 
     type = "sql_query"
     name = "SQL Query"
-    description = "Runs SQL over all datasets with DuckDB — each dataset is a view named after it (lowercased)."
+    description = "Runs SQL over all datasets with DuckDB - each dataset is a view named after it (lowercased)."
     category = "actions"
     icon = "table-2"
     color = "#c084fc"
@@ -140,7 +140,7 @@ class SqlQueryNode(BaseNode):
     class ParamsModel(BaseModel):
         sql: str = Field(
             default="",
-            description="DuckDB SQL — datasets appear as views, e.g. SELECT * FROM customers",
+            description="DuckDB SQL - datasets appear as views, e.g. SELECT * FROM customers",
             json_schema_extra={"widget": "code", "rows": 6, "language": "sql", "hint": "SELECT name, count(*) FROM customers GROUP BY name"},
         )
 

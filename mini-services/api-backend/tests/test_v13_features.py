@@ -3,7 +3,7 @@
 Covers: automatic v1 snapshot on create, new version per content change
 (graph / name), NO version for organizational changes (tags / error
 binding), version detail retrieval, restore semantics (content rolled back,
-restore lands as a NEW version — nothing destroyed), 404 guards, and the
+restore lands as a NEW version - nothing destroyed), 404 guards, and the
 20-snapshot retention cap with pruning.
 
 Runs the FastAPI app in-process via httpx ASGITransport against the dev

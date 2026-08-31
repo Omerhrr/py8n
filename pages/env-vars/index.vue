@@ -9,7 +9,7 @@ import type { EnvVariable } from '~/types/node'
 
 const store = usePy8nStore()
 
-// rendered via a script constant — raw braces inside template interpolations
+// rendered via a script constant - raw braces inside template interpolations
 // confuse the Vue parser (it closes at the first `}}`)
 const ENV_SNIPPET = '{{ env.KEY }}'
 
@@ -125,7 +125,7 @@ function fmtDate(iso: string) {
           </span>
           <div class="min-w-0">
             <h1 class="text-lg font-bold tracking-tight">Variables</h1>
-            <p class="-mt-0.5 text-[11px] text-zinc-500">Global values — use <code class="rounded bg-zinc-800 px-1 font-mono text-[10px] text-sky-300">{{ ENV_SNIPPET }}</code> in any node field</p>
+            <p class="-mt-0.5 text-[11px] text-zinc-500">Global values - use <code class="rounded bg-zinc-800 px-1 font-mono text-[10px] text-sky-300">{{ ENV_SNIPPET }}</code> in any node field</p>
           </div>
         </div>
         <button
@@ -179,7 +179,7 @@ function fmtDate(iso: string) {
         <template v-else>
           <p class="text-zinc-400">No variables yet.</p>
           <p class="mx-auto mt-2 max-w-md text-xs leading-relaxed text-zinc-600">
-            Store API base URLs, feature flags, or tokens once — then reference them from every
+            Store API base URLs, feature flags, or tokens once - then reference them from every
             workflow with <code class="rounded bg-zinc-800 px-1 font-mono">{{ ENV_SNIPPET }}</code>.
             Secret values are encrypted at rest and never echoed back.
           </p>
@@ -262,7 +262,7 @@ function fmtDate(iso: string) {
           :disabled="!!editing"
           @keyup.enter="save"
         />
-        <p v-if="!editing" class="mb-3 text-[10px] text-zinc-600">Letters, digits, underscores — used exactly as typed in templates.</p>
+        <p v-if="!editing" class="mb-3 text-[10px] text-zinc-600">Letters, digits, underscores - used exactly as typed in templates.</p>
         <div v-else class="mb-3" />
 
         <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500">Value</label>
@@ -274,7 +274,7 @@ function fmtDate(iso: string) {
           :autocomplete="formSecret ? 'off' : 'on'"
           @keyup.enter="save"
         />
-        <p v-if="editing && formSecret" class="mb-3 text-[10px] text-zinc-600">Secrets are write-only — the stored value is never sent back to the browser.</p>
+        <p v-if="editing && formSecret" class="mb-3 text-[10px] text-zinc-600">Secrets are write-only - the stored value is never sent back to the browser.</p>
         <div v-else class="mb-3" />
 
         <label class="mb-1 block text-xs font-medium uppercase tracking-wide text-zinc-500">Description</label>

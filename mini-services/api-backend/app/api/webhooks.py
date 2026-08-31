@@ -1,6 +1,6 @@
 """Public webhook catcher (Phase 4).
 
-POST/GET /api/v1/webhooks/{workflow_id} — validates the workflow has an active
+POST/GET /api/v1/webhooks/{workflow_id} - validates the workflow has an active
 webhook_trigger node, injects the request envelope into the execution context
 and dispatches asynchronously (or awaits the last node when configured).
 """
@@ -56,7 +56,7 @@ async def _load_webhook_workflow(workflow_id: str, db: AsyncSession) -> Workflow
     if wf is None:
         raise HTTPException(status_code=404, detail="Unknown webhook (workflow not found)")
     if not wf.is_active:
-        raise HTTPException(status_code=409, detail="Workflow is inactive — activate it to enable its webhook")
+        raise HTTPException(status_code=409, detail="Workflow is inactive - activate it to enable its webhook")
     if not wf.webhook_nodes():
         raise HTTPException(status_code=409, detail="Workflow has no Webhook Trigger node")
     return wf
@@ -147,7 +147,7 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
         )
 
         if waiter in done:
-            # Custom answer — the flow (if still running) continues in background.
+            # Custom answer - the flow (if still running) continues in background.
             if responder.content_type == "application/json":
                 return JSONResponse(content=responder.body, status_code=responder.status)
             return PlainTextResponse(
@@ -168,7 +168,7 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
             )
         raise HTTPException(
             status_code=504,
-            detail=f"Timed out after {settings.webhook_wait_seconds}s waiting for a Respond to Webhook node — the workflow keeps running in the background",
+            detail=f"Timed out after {settings.webhook_wait_seconds}s waiting for a Respond to Webhook node - the workflow keeps running in the background",
         )
 
     if response_mode == "last_node":

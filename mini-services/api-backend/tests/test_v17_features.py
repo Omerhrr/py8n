@@ -176,7 +176,7 @@ def test_pin_semantics_manual_vs_production_and_test_step():
             res = await client.post(f"/workflows/{wf['id']}/nodes/s/test", json={})
             assert res.status_code == 200, res.text
             body = res.json()
-            # set node references nodes.c.output — absent in isolation
+            # set node references nodes.c.output - absent in isolation
             assert body["ok"] is False and "Unresolved variable" in (body["error"] or ""), body
 
             # 404 guards
@@ -201,7 +201,7 @@ def test_pin_semantics_manual_vs_production_and_test_step():
             assert saved["pinned_data"] is None, saved
 
             # test step now REALLY executes with the ad-hoc input
-            # (items = direct node input — same shape as a trigger's output)
+            # (items = direct node input - same shape as a trigger's output)
             res = await client.post(f"/workflows/{wf['id']}/nodes/c/test", json={"items": {"payload": {"n": 21}}})
             assert res.status_code == 200, res.text
             body = res.json()

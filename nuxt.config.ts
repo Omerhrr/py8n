@@ -1,7 +1,13 @@
-// Py8n — Nuxt 3 frontend configuration
+// Py8n - Nuxt 3 frontend configuration
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-01',
-  ssr: false, // editor SPA — no SEO needs, avoids canvas hydration issues
+  ssr: false, // editor SPA - no SEO needs, avoids canvas hydration issues
+  app: {
+    head: {
+      title: 'Py8n',
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
+    },
+  },
   devtools: { enabled: false },
   modules: ['@nuxtjs/tailwindcss', '@pinia/nuxt'],
   css: [
@@ -26,7 +32,7 @@ export default defineNuxtConfig({
   vite: {
     server: {
       // The preview gateway forwards arbitrary external hostnames (DNS-rebinding
-      // guard would block them). Sandbox/dev only — production builds are unaffected.
+      // guard would block them). Sandbox/dev only - production builds are unaffected.
       allowedHosts: true,
     },
   },

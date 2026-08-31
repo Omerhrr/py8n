@@ -95,14 +95,14 @@ class WorkflowListItem(BaseModel):
 
 
 class FolderCreate(BaseModel):
-    """v16 — new folder; parent_id nests it (max depth enforced server-side)."""
+    """v16 - new folder; parent_id nests it (max depth enforced server-side)."""
 
     name: str = Field(min_length=1, max_length=120)
     parent_id: str | None = Field(default=None, max_length=36)
 
 
 class FolderUpdate(BaseModel):
-    """v16 — rename and/or re-parent. parent_id tri-state like WorkflowUpdate:
+    """v16 - rename and/or re-parent. parent_id tri-state like WorkflowUpdate:
     omitted = untouched, "" = move to root, str = move under that folder."""
 
     name: str | None = Field(default=None, min_length=1, max_length=120)
@@ -159,7 +159,7 @@ class NodeTestRequest(BaseModel):
 
     items: Any = Field(
         default=None,
-        description="Input data for the node — exposed as {{ input }} / input_data. None = no input.",
+        description="Input data for the node - exposed as {{ input }} / input_data. None = no input.",
     )
 
 
@@ -177,7 +177,7 @@ class RunAccepted(BaseModel):
 class CredentialCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     type: str = Field(default="generic", description="header_auth | openai_compatible | generic")
-    data: dict = Field(default_factory=dict, description="Secret payload — encrypted at rest, never returned")
+    data: dict = Field(default_factory=dict, description="Secret payload - encrypted at rest, never returned")
 
 
 class CredentialOut(BaseModel):
@@ -199,7 +199,7 @@ class CredentialDetail(CredentialOut):
 
 
 class CredentialUpdate(BaseModel):
-    """PATCH payload — name and/or full replacement data (secrets are never
+    """PATCH payload - name and/or full replacement data (secrets are never
     echoed back, so the client re-sends the complete field set)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
@@ -265,7 +265,7 @@ class EnvVariableOut(BaseModel):
 
     id: str
     key: str
-    value: str | None = Field(default=None, description="Plaintext value — null for secrets")
+    value: str | None = Field(default=None, description="Plaintext value - null for secrets")
     is_secret: bool
     description: str = ""
     updated_at: datetime
@@ -286,7 +286,7 @@ class EnvVariableUpdate(BaseModel):
 
 # ------------------------------------------------------------------ v27 datasets
 class DatasetOut(BaseModel):
-    """Metadata view (never carries rows — fetch /rows for data)."""
+    """Metadata view (never carries rows - fetch /rows for data)."""
 
     id: str
     name: str

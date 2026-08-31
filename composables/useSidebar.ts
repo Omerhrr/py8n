@@ -1,4 +1,4 @@
-// App-shell sidebar state — shared by the layout, the sidebar and any page.
+// App-shell sidebar state - shared by the layout, the sidebar and any page.
 // The collapsed preference persists across reloads via localStorage.
 const COLLAPSE_KEY = 'py8n.sidebar.collapsed'
 
@@ -21,7 +21,7 @@ export function useSidebar() {
       try {
         localStorage.setItem(COLLAPSE_KEY, next ? '1' : '0')
       } catch {
-        /* storage unavailable — session-only */
+        /* storage unavailable - session-only */
       }
     }
   }

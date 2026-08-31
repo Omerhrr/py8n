@@ -1,4 +1,4 @@
-"""Workflow versioning helpers (v13) — snapshot + retention.
+"""Workflow versioning helpers (v13) - snapshot + retention.
 
 The ``WorkflowVersion`` model lives in ``models.py`` next to the other ORM
 models; this module owns the write path: monotonic per-workflow version

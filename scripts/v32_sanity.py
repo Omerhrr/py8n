@@ -1,4 +1,4 @@
-"""v32 sanity — verify extraction engines work end-to-end BEFORE writing tests.
+"""v32 sanity - verify extraction engines work end-to-end BEFORE writing tests.
 
 Generates: (1) reportlab PDF with a ruled table, (2) PIL image with text.
 Verifies: pdfplumber text+table extraction, tesseract OCR, csv/json/xlsx paths.
@@ -20,7 +20,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 buf = io.BytesIO()
 story = [
-    Paragraph("ACME Consulting — Invoice INV-2026-004", getSampleStyleSheet()["Title"]),
+    Paragraph("ACME Consulting - Invoice INV-2026-004", getSampleStyleSheet()["Title"]),
     Paragraph("Client: Globex Ltd. Terms: Net 30", getSampleStyleSheet()["Normal"]),
 ]
 cell_rows = [
@@ -90,12 +90,12 @@ print("XLSX:", r5["engine"], "pages", r5["pages"], r5["tables"][0]["n_rows"], "r
 # 5) guards
 try:
     doc_svc.extract_document("virus.exe", b"MZ...")
-    print("GUARD: FAIL — .exe accepted")
+    print("GUARD: FAIL - .exe accepted")
 except ValueError as e:
     print("GUARD ok:", str(e)[:60])
 try:
     doc_svc.extract_document("note.pdf", b"")
-    print("GUARD: FAIL — empty accepted")
+    print("GUARD: FAIL - empty accepted")
 except ValueError as e:
     print("GUARD ok:", str(e)[:60])
 

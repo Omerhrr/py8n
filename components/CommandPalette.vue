@@ -2,7 +2,7 @@
 import {
   Search, CornerDownLeft, LayoutDashboard, Activity, BarChart3, CalendarClock,
   Sparkles, KeyRound, Plus, PanelLeftClose, PanelLeftOpen, Command as CommandIcon,
-  Workflow as WorkflowIcon, Zap, X, Variable, Database, Image as ImageIcon, LayoutGrid, Gauge, FileText, Bot,
+  Workflow as WorkflowIcon, X, Variable, Database, Image as ImageIcon, LayoutGrid, Gauge, FileText, Bot,
 } from 'lucide-vue-next'
 import { usePalette } from '~/composables/usePalette'
 import { useSidebar } from '~/composables/useSidebar'
@@ -307,7 +307,7 @@ const modKey = computed(() => (isMac ? '⌘' : 'Ctrl'))
               <span><kbd class="rounded border border-zinc-700 bg-zinc-950 px-1 py-0.5 font-sans">esc</kbd> close</span>
             </span>
             <span class="flex items-center gap-1 text-zinc-600">
-              <Zap class="h-3 w-3 text-orange-500/60" /> Py8n
+              <Py8nLogo :size="14" /> Py8n
             </span>
           </div>
         </div>

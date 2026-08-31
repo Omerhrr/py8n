@@ -1,4 +1,4 @@
-"""Environment variables service (v15) — the engine-side loader.
+"""Environment variables service (v15) - the engine-side loader.
 
 Every workflow run loads the full variable map ONCE and hands it to the
 Jinja context as ``env`` (``{{ env.APP_NAME }}``). Values are decrypted
@@ -28,6 +28,6 @@ async def load_env_map() -> dict[str, str]:
         try:
             env[row.key] = decrypt_value(row.value_encrypted)
         except ValueError:
-            logger.warning("env variable %r failed to decrypt — substituting empty string", row.key)
+            logger.warning("env variable %r failed to decrypt - substituting empty string", row.key)
             env[row.key] = ""
     return env

@@ -1,4 +1,4 @@
-"""Wait for Resume node — human-in-the-loop pause point.
+"""Wait for Resume node - human-in-the-loop pause point.
 
 When the runner reaches this node the whole execution *suspends*: the run
 state (node outputs + active edges) is persisted with the execution log and
@@ -52,7 +52,7 @@ class WaitForResumeNode(BaseNode):
 
     async def execute(self, context: ExecutionContext) -> NodeResult:  # pragma: no cover
         raise NodeExecutionError(
-            "Wait for Resume must be suspended by the runner — this node cannot execute inline"
+            "Wait for Resume must be suspended by the runner - this node cannot execute inline"
         )
 
     @staticmethod

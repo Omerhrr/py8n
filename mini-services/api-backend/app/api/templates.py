@@ -1,4 +1,4 @@
-"""Workflow templates — curated one-click starting points."""
+"""Workflow templates - curated one-click starting points."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ async def get_template_detail(template_id: str):
 
 
 class UseBody(BaseModel):
-    """Optional body for POST /templates/{id}/use — lets the user name the copy."""
+    """Optional body for POST /templates/{id}/use - lets the user name the copy."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
 
@@ -57,7 +57,7 @@ async def use_template(template_id: str, body: UseBody | None = None, db: AsyncS
     db.add(wf)
     await db.flush()
     await db.refresh(wf)
-    await snapshot_workflow_version(db, wf)  # v1 — the instantiated state
+    await snapshot_workflow_version(db, wf)  # v1 - the instantiated state
     await db.commit()  # commit before responding (teardown-commit race guard)
     await resync_workflow_jobs(wf.id)
     return wf

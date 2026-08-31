@@ -37,7 +37,7 @@ class DictKeyFirstSandbox(SandboxedEnvironment):
     """Sandboxed env where dict **key** access wins over same-named methods.
 
     Automation data is dict-shaped and the ``items`` convention is everywhere
-    (``{{ input.items }}``, ``{{ nodes.lp.output.done.items }}``) — Jinja's
+    (``{{ input.items }}``, ``{{ nodes.lp.output.done.items }}``) - Jinja's
     default ``getattr`` would return the *method* ``dict.items`` for those
     names and blow up with "builtin_function_or_method is not iterable".
     Keys take precedence; methods still resolve when no key matches (so
@@ -120,6 +120,6 @@ def _evaluate_expression(expression: str, ctx: dict[str, Any]) -> Any:
         raise TemplateResolutionError(f"Bad expression '{{{{ {expr} }}}}': {exc}") from exc
     if isinstance(result, Undefined):
         raise TemplateResolutionError(
-            f"Unresolved variable '{{{{ {expr} }}}}' — not found in execution context"
+            f"Unresolved variable '{{{{ {expr} }}}}' - not found in execution context"
         )
     return result

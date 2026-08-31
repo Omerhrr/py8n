@@ -1,6 +1,6 @@
-"""Public chat endpoint (v25) — conversational workflows.
+"""Public chat endpoint (v25) - conversational workflows.
 
-POST /api/v1/chat/{workflow_id} — validates the workflow has an active
+POST /api/v1/chat/{workflow_id} - validates the workflow has an active
 chat_trigger node, starts one run per message and replies to the chat client
 either from the last node's output (response_mode=last_node) or from a
 Respond to Webhook node mid-flow (response_mode=respond_node, reusing the v21
@@ -32,7 +32,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class ChatMessage(BaseModel):
     message: str = Field(..., description="The user's chat message")
-    session_id: str = Field(default="default", max_length=255, description="Conversation key — stable per chat window, used for session memory")
+    session_id: str = Field(default="default", max_length=255, description="Conversation key - stable per chat window, used for session memory")
 
 
 def _extract_reply(last_output: Any) -> str:
@@ -61,7 +61,7 @@ async def _load_chat_workflow(workflow_id: str, db: AsyncSession) -> Workflow:
     if wf is None:
         raise HTTPException(status_code=404, detail="Unknown chat (workflow not found)")
     if not wf.is_active:
-        raise HTTPException(status_code=409, detail="Workflow is inactive — activate it to enable its chat")
+        raise HTTPException(status_code=409, detail="Workflow is inactive - activate it to enable its chat")
     if not wf.chat_nodes() and not _agent_nodes(wf):
         raise HTTPException(status_code=409, detail="Workflow has no Chat Trigger or AI Agent node")
     return wf
@@ -80,7 +80,7 @@ def _chat_anchor(wf: Workflow, msg: ChatMessage) -> tuple[dict, dict]:
 
     agent-only workflows (v34): anchor on the manual trigger (or the agent
     itself when there is no manual trigger) and ALSO nest the message under
-    'payload' — that is the key ManualTriggerNode merges over its static
+    'payload' - that is the key ManualTriggerNode merges over its static
     payload, so one workflow can answer both editor Runs and console chats.
     """
     chat_nodes = wf.chat_nodes()
@@ -152,7 +152,7 @@ async def send_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession
             )
         raise HTTPException(
             status_code=504,
-            detail=f"Timed out after {settings.webhook_wait_seconds}s waiting for a Respond to Webhook node — the workflow keeps running in the background",
+            detail=f"Timed out after {settings.webhook_wait_seconds}s waiting for a Respond to Webhook node - the workflow keeps running in the background",
         )
 
     # last_node (default): run synchronously (bounded) and reply with the
@@ -189,7 +189,7 @@ async def send_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession
 
 
 # ---------------------------------------------------------------------------
-# v26: SSE progress stream — POST /chat/{id}/stream
+# v26: SSE progress stream - POST /chat/{id}/stream
 # Same validation and run semantics as the plain endpoint, but the client
 # receives live frames while the flow runs:
 #   event: start    data: {execution_id, session_id}
@@ -249,7 +249,7 @@ async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSessi
                 if remaining <= 0:
                     yield _sse_frame("timeout", {"after_seconds": settings.webhook_wait_seconds})
                     return
-                # respond_node mode: the responder's answer races the bus events —
+                # respond_node mode: the responder's answer races the bus events -
                 # first one wins, exactly like the plain endpoint.
                 if waiter is not None:
                     got_responder = asyncio.create_task(waiter.wait())

@@ -1,4 +1,4 @@
-// Central API client — transport-aware.
+// Central API client - transport-aware.
 //
 // gateway mode (sandbox + docker-compose caddy):
 //   requests go to same-origin with ?XTransformPort=8000, Caddy proxies to the
@@ -45,7 +45,7 @@ export function useApi() {
     return `${proto}://${location.hostname}:${apiPort}/ws/executions/${executionId}`
   }
 
-  // URL for raw backend content (artifact images etc.) — gateway param honored.
+  // URL for raw backend content (artifact images etc.) - gateway param honored.
   // Accepts paths with or without the /api/v1 prefix (artifact_url ships WITH it).
   function srcUrl(path: string): string {
     const p = path.startsWith(PREFIX) ? path.slice(PREFIX.length) : path

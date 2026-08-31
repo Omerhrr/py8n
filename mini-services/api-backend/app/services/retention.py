@@ -15,7 +15,7 @@ A single AppSetting row (key = ``execution_retention``) stores the policy:
 * volume-based: per workflow, only the newest ``max_executions_per_workflow``
   finished executions survive.
 
-Explicit commits everywhere — the yield-dependency teardown commit runs after
+Explicit commits everywhere - the yield-dependency teardown commit runs after
 the response is sent, so background/purge writes must commit themselves.
 """
 
@@ -84,7 +84,7 @@ async def set_policy(patch: dict) -> dict:
             session.add(row)
         else:
             row.value = current
-        await session.commit()  # explicit — teardown commit is too late
+        await session.commit()  # explicit - teardown commit is too late
     return current
 
 
@@ -152,7 +152,7 @@ async def purge_execution_data() -> dict:
                     )
                 ).scalars().all()
                 if len(keep_ids) < cap:
-                    continue  # under the cap — nothing to do
+                    continue  # under the cap - nothing to do
                 result = await session.execute(
                     delete(ExecutionLog).where(
                         ExecutionLog.workflow_id == workflow_id,
@@ -171,7 +171,7 @@ async def purge_execution_data() -> dict:
             session.add(row)
         else:
             row.value = bookkeeping
-        await session.commit()  # explicit — purge may run outside a request
+        await session.commit()  # explicit - purge may run outside a request
 
     logger.info(
         "retention purge: %s by age, %s by volume (days=%s cap=%s)",

@@ -1,4 +1,4 @@
-"""BaseNode — every Py8n node derives from this class.
+"""BaseNode - every Py8n node derives from this class.
 
 The contract
 ============

@@ -176,7 +176,7 @@ async function refreshPreview() {
   if (!board.value) return
   previewing.value = true
   try {
-    // save first if dirty — preview runs server-side on the saved config
+    // save first if dirty - preview runs server-side on the saved config
     if (dirty.value) {
       await saveConfig()
       return // saveConfig already refreshes the preview
@@ -256,7 +256,7 @@ const typeColor: Record<string, string> = {
             >{{ board?.status }}</span>
             <span v-if="dirty" class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-400">unsaved</span>
           </div>
-          <p class="truncate text-[11px] text-zinc-500">Dashboards are read-only analytics — components bind to datasets individually</p>
+          <p class="truncate text-[11px] text-zinc-500">Dashboards are read-only analytics - components bind to datasets individually</p>
         </div>
         <button
           class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600"
@@ -424,7 +424,7 @@ const typeColor: Record<string, string> = {
                     @click="c.columns = (c.columns || []).includes(col) ? (c.columns || []).filter((x) => x !== col) : [...(c.columns || []), col]; dirty = true"
                   >{{ col }}</button>
                 </div>
-                <label class="mt-2.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Row limit (1–100)</label>
+                <label class="mt-2.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Row limit (1-100)</label>
                 <input type="number" min="1" max="100" :value="c.limit" class="mt-1 w-24 rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none focus:border-sky-500/60" @change="(e: any) => { c.limit = Math.max(1, Math.min(100, Number(e.target.value) || 8)); dirty = true }" />
               </template>
 
@@ -445,7 +445,7 @@ const typeColor: Record<string, string> = {
           </div>
 
           <p v-if="comps.length === 0" class="rounded-2xl border border-dashed border-zinc-800 px-4 py-8 text-center text-xs text-zinc-600">
-            Empty board — add a stat, chart, table or text component above.
+            Empty board - add a stat, chart, table or text component above.
           </p>
         </div>
 
@@ -470,7 +470,7 @@ const typeColor: Record<string, string> = {
           <DashboardBoard :components="preview" />
         </div>
         <p v-if="preview.length === 0" class="mt-6 rounded-2xl border border-dashed border-zinc-800 px-4 py-10 text-center text-xs text-zinc-600">
-          Nothing to preview yet — add components and save.
+          Nothing to preview yet - add components and save.
         </p>
       </section>
     </div>
