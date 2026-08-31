@@ -491,6 +491,8 @@ async function runTest() {
                     <option value="knowledge">knowledge — static text the agent can quote</option>
                     <option value="workflow">workflow — run a sub-workflow</option>
                     <option value="http">http — model-driven request</option>
+                    <option value="dataset">dataset — read-only SQL over your data</option>
+                    <option value="code">code — sandboxed Python compute</option>
                   </select>
                   <input
                     :value="tool.description"
@@ -524,6 +526,32 @@ async function runTest() {
                     class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs outline-none focus:border-violet-500/60"
                     @input="setTool(ti, { allowed_domains: ($event.target as HTMLInputElement).value.split(',').map(s => s.trim()).filter(Boolean) })"
                   />
+                  <input
+                    v-if="tool.kind === 'dataset'"
+                    :value="tool.max_rows ?? 25"
+                    type="number"
+                    min="1"
+                    max="200"
+                    placeholder="max rows returned to the model (25)"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs outline-none focus:border-violet-500/60"
+                    @change="setTool(ti, { max_rows: Math.max(1, Math.min(200, Number(($event.target as HTMLInputElement).value) || 25)) })"
+                  />
+                  <p v-if="tool.kind === 'dataset'" class="text-[10px] leading-snug text-zinc-600">
+                    The model calls this with {"sql": "SELECT …"} — one read-only statement; every dataset is a view named after it.
+                  </p>
+                  <input
+                    v-if="tool.kind === 'code'"
+                    :value="tool.timeout_seconds ?? 10"
+                    type="number"
+                    min="1"
+                    max="60"
+                    placeholder="sandbox timeout seconds (10)"
+                    class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-xs outline-none focus:border-violet-500/60"
+                    @change="setTool(ti, { timeout_seconds: Math.max(1, Math.min(60, Number(($event.target as HTMLInputElement).value) || 10)) })"
+                  />
+                  <p v-if="tool.kind === 'code'" class="text-[10px] leading-snug text-zinc-600">
+                    The model calls this with {"code": "result = …"} — restricted imports; it gets back result + stdout.
+                  </p>
                 </div>
               </div>
               <button

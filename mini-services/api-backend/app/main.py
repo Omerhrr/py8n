@@ -57,6 +57,7 @@ app.add_middleware(
 )
 
 # ---------------------------------------------------------------- routers
+from .api.agents import router as agents_router  # noqa: E402
 from .api.credentials import router as credentials_router  # noqa: E402
 from .api.apps import router as apps_router  # noqa: E402
 from .api.artifacts import router as artifacts_router  # noqa: E402
@@ -78,6 +79,7 @@ from .api.ws import router as ws_router  # noqa: E402
 
 API = "/api/v1"
 app.include_router(workflows_router, prefix=API)
+app.include_router(agents_router, prefix=API)  # v34
 app.include_router(executions_router, prefix=API)
 app.include_router(schedules_router, prefix=API)
 app.include_router(webhooks_router, prefix=API)

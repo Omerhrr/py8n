@@ -469,6 +469,40 @@ TEMPLATES: list[dict[str, Any]] = [
             ],
         },
     },
+    {
+        # v34 — showcases the dataset + code tool kinds on the AI Agent
+        "id": "data-analyst",
+        "name": "SQL Data Analyst Agent",
+        "description": "An AI agent that interrogates your datasets with read-only SQL, computes in sandboxed Python, and answers in plain language.",
+        "category": "AI",
+        "icon": "bot",
+        "badge": "Agent",
+        "tags": ["agent", "tools", "dataset", "sql", "duckdb", "code", "analyst"],
+        "docs": "Create (or upload) a dataset first — e.g. 'Sales' — then press Run and edit the question in the Manual Trigger. The agent writes its own SELECT against your datasets (DuckDB syntax, tables are dataset names), can double-check arithmetic in a sandboxed Python tool, and answers with the numbers. Strictly read-only: one SELECT statement per call.",
+        "graph": {
+            "nodes": [
+                {"id": "q", "type": "manual_trigger", "name": "Question", "position": {"x": 0, "y": 0},
+                 "parameters": {"payload": {"question": "Which rows have the highest value in the Sales dataset, and what is the total across all rows?"}}},
+                {"id": "agent", "type": "ai_agent", "name": "Analyst", "position": {"x": 220, "y": 0},
+                 "parameters": {
+                     "provider": "sandbox_bridge",
+                     "system_prompt": "You are a rigorous data analyst. Inspect the data with the SQL tool before answering; verify any arithmetic with the Python tool; state which tables you used.",
+                     "user_message": "Datasets are available as SQL views named after them. Question: {{ nodes.q.output.payload.message | default(nodes.q.output.payload.question) }}",
+                     "max_iterations": 6,
+                     "temperature": 0.2,
+                     "tools": [
+                         {"kind": "dataset", "name": "sql_query",
+                          "description": "Run ONE read-only SELECT (DuckDB syntax) over all datasets — every dataset is a view named after it, e.g. Sales. Arguments: {\"sql\": \"SELECT ...\"}",
+                          "max_rows": 25},
+                         {"kind": "code", "name": "python_compute",
+                          "description": "Sandboxed Python for exact arithmetic/formatting. Set `result`; arguments: {\"code\": \"result = 2 + 2\"}"},
+                     ]}},
+            ],
+            "edges": [
+                {"id": "e1", "source": "q", "target": "agent"},
+            ],
+        },
+    },
 ]
 
 

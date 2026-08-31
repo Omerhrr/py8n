@@ -62,22 +62,55 @@ async def _load_chat_workflow(workflow_id: str, db: AsyncSession) -> Workflow:
         raise HTTPException(status_code=404, detail="Unknown chat (workflow not found)")
     if not wf.is_active:
         raise HTTPException(status_code=409, detail="Workflow is inactive — activate it to enable its chat")
-    if not wf.chat_nodes():
-        raise HTTPException(status_code=409, detail="Workflow has no Chat Trigger node")
+    if not wf.chat_nodes() and not _agent_nodes(wf):
+        raise HTTPException(status_code=409, detail="Workflow has no Chat Trigger or AI Agent node")
     return wf
+
+
+def _agent_nodes(wf: Workflow) -> list[dict]:
+    """v34: agent-only workflows (no Chat Trigger) are chat-able too."""
+    return [n for n in (wf.graph or {}).get("nodes", []) if n.get("type") == "ai_agent"]
+
+
+def _chat_anchor(wf: Workflow, msg: ChatMessage) -> tuple[dict, dict]:
+    """Pick the trigger node + payload for a chat run.
+
+    chat_trigger workflows (v25): the chat node anchors and the message sits
+    at the top level of the trigger payload.
+
+    agent-only workflows (v34): anchor on the manual trigger (or the agent
+    itself when there is no manual trigger) and ALSO nest the message under
+    'payload' — that is the key ManualTriggerNode merges over its static
+    payload, so one workflow can answer both editor Runs and console chats.
+    """
+    chat_nodes = wf.chat_nodes()
+    received_at = datetime.now(timezone.utc).isoformat()
+    if chat_nodes:
+        node = chat_nodes[0]
+        payload = {
+            "session_id": msg.session_id,
+            "message": msg.message,
+            "received_at": received_at,
+        }
+        return node, payload
+    agents = _agent_nodes(wf)
+    manual = next((n for n in (wf.graph or {}).get("nodes", []) if n.get("type") == "manual_trigger"), None)
+    node = manual or agents[0]
+    payload = {
+        "session_id": msg.session_id,
+        "message": msg.message,
+        "received_at": received_at,
+        "payload": {"message": msg.message, "session_id": msg.session_id},
+    }
+    return node, payload
 
 
 @router.post("/{workflow_id}", tags=["chat"])
 async def send_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession = Depends(get_db)):
     wf = await _load_chat_workflow(workflow_id, db)
-    node = wf.chat_nodes()[0]
+    node, trigger_payload = _chat_anchor(wf, msg)
     params = node.get("parameters") or {}
     response_mode = params.get("response_mode", "last_node")
-    trigger_payload = {
-        "session_id": msg.session_id,
-        "message": msg.message,
-        "received_at": datetime.now(timezone.utc).isoformat(),
-    }
 
     if response_mode == "respond_node":
         # v21 channel reused: wait for a Respond to Webhook node (or flow end).
@@ -174,14 +207,9 @@ def _sse_frame(event: str, data: dict) -> str:
 async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession = Depends(get_db)):
     # Validate BEFORE establishing the stream so clients get normal JSON errors.
     wf = await _load_chat_workflow(workflow_id, db)
-    node = wf.chat_nodes()[0]
+    node, trigger_payload = _chat_anchor(wf, msg)
     params = node.get("parameters") or {}
     response_mode = params.get("response_mode", "last_node")
-    trigger_payload = {
-        "session_id": msg.session_id,
-        "message": msg.message,
-        "received_at": datetime.now(timezone.utc).isoformat(),
-    }
 
     bus = get_event_bus()
     execution_id = uuid.uuid4().hex

@@ -1,4 +1,4 @@
-"""AI Agent node — LLM with an iterative tool-calling loop (v19).
+"""AI Agent node — LLM with an iterative tool-calling loop (v19, deepened v34).
 
 The flagship agentic node: the model receives a tool catalogue and may call
 tools over multiple rounds before producing its final answer. Tool calls use
@@ -16,6 +16,12 @@ Built-in tool kinds
 * http      — perform an HTTP request; method/url/headers/body come from the
               model, guarded by an optional domain allow-list.
 * knowledge — return a static knowledge snippet stored on the node.
+* dataset   — (v34) run READ-ONLY SQL (SELECT/WITH, single statement) over
+              the stored datasets via DuckDB — every dataset is a view named
+              after it. The agent can actually interrogate your data.
+* code      — (v34) run a sandboxed Python snippet (same restricted runtime
+              as the Code node) and hand the model back `result` + stdout —
+              lets the agent compute, format and do arithmetic reliably.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ MAX_TOOL_RESULT_CHARS = 4000
 
 
 class ToolSpec(BaseModel):
-    kind: Literal["workflow", "http", "knowledge"] = "knowledge"
+    kind: Literal["workflow", "http", "knowledge", "dataset", "code"] = "knowledge"
     name: str = Field(default="", description="Tool name the model will call (snake_case)")
     description: str = Field(default="", description="What the tool does — helps the model choose")
     # workflow tool
@@ -43,6 +49,10 @@ class ToolSpec(BaseModel):
     allowed_domains: list[str] = Field(default_factory=list, description="Empty = any domain")
     # knowledge tool
     content: str | None = Field(default=None, json_schema_extra={"widget": "textarea", "rows": 4})
+    # v34 dataset tool — cap on rows handed back to the model
+    max_rows: int = Field(default=25, ge=1, le=200, description="dataset tool: max rows returned to the model")
+    # v34 code tool — executor timeout
+    timeout_seconds: float = Field(default=10, ge=1, le=60, description="code tool: sandbox timeout in seconds")
 
 
 class AgentNode(BaseNode):
@@ -170,9 +180,88 @@ class AgentNode(BaseNode):
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
         return text[:MAX_TOOL_RESULT_CHARS]
 
+    # ------------------------------------------------------------------
+    # v34 tool kinds — dataset (read-only SQL) and code (sandboxed Python)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _guard_readonly_sql(sql: str) -> str:
+        """Whitelist a single read-only statement; returns the cleaned SQL."""
+        text = (sql or "").strip().rstrip(";").strip()
+        first = text.split(None, 1)[0].lower() if text else ""
+        if first not in ("select", "with"):
+            raise NodeExecutionError(
+                "dataset tool is read-only: only a single SELECT (or WITH ... SELECT) statement is allowed"
+            )
+        if ";" in text:
+            raise NodeExecutionError("dataset tool: multiple SQL statements are not allowed")
+        for banned in ("attach", "install", "load", "copy", "call", "pragma", "export"):
+            if re.search(rf"\b{banned}\b", text.lower()):
+                raise NodeExecutionError(f"dataset tool: {banned.upper()} is not allowed")
+        return text
+
+    async def _run_tool_dataset(self, tool: ToolSpec, args: dict) -> dict:
+        sql = self._guard_readonly_sql(str(args.get("sql", args.get("query", ""))))
+        if not sql:
+            raise NodeExecutionError(f"dataset tool {tool.name!r}: pass {{\"sql\": \"SELECT ...\"}}")
+        from ...db import AsyncSessionLocal
+        from ...services import datasets as ds_svc
+
+        async with AsyncSessionLocal() as session:
+            # run_sql registers every stored dataset as a DuckDB view
+            try:
+                result = await ds_svc.run_sql(session, sql)
+            except ValueError as exc:
+                # binder/parse errors must reach the MODEL as tool feedback
+                # (it can fix the query), not kill the workflow node
+                raise NodeExecutionError(str(exc)) from exc
+        rows = result["rows"][: tool.max_rows]
+        return {
+            "columns": result["columns"],
+            "rows": rows,
+            "row_count": result["row_count"],
+            "returned_rows": len(rows),
+            "duration_ms": result["duration_ms"],
+        }
+
+    async def _run_tool_code(self, tool: ToolSpec, args: dict) -> dict:
+        from .logic import SAFE_BUILTINS, SAFE_MODULES
+
+        code = str(args.get("code", ""))
+        if not code.strip():
+            raise NodeExecutionError(f"code tool {tool.name!r}: pass {{\"code\": \"...\"}}")
+
+        import asyncio as _asyncio
+        import io
+        import contextlib
+
+        def _exec() -> tuple[str, Any]:
+            buf = io.StringIO()
+
+            def _print(*a, **k):  # SAFE_BUILTINS no-ops print — shadow it with a capture
+                buf.write(str(k.get("sep", " ")).join(str(x) for x in a) + str(k.get("end", "\n")))
+
+            user_globals: dict[str, Any] = {"__builtins__": dict(SAFE_BUILTINS), "result": None, "print": _print}
+            user_globals.update(SAFE_MODULES)
+            with contextlib.redirect_stdout(buf):
+                exec(code, user_globals)  # noqa: S102 (sandboxed namespace, self-hosted tool)
+            return buf.getvalue(), user_globals.get("result")
+
+        loop = _asyncio.get_running_loop()
+        try:
+            stdout, result = await _asyncio.wait_for(loop.run_in_executor(None, _exec), timeout=tool.timeout_seconds)
+        except _asyncio.TimeoutError as exc:
+            raise NodeExecutionError(f"code tool timed out after {tool.timeout_seconds}s") from exc
+        except Exception as exc:  # noqa: BLE001 — surface sandbox errors to the model
+            raise NodeExecutionError(f"code error: {type(exc).__name__}: {exc}") from exc
+        return {"result": result, "stdout": stdout.strip()}
+
     async def _run_tool(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> str:
         if tool.kind == "knowledge":
             return self._truncate(tool.content or "")
+        if tool.kind == "dataset":
+            return self._truncate(await self._run_tool_dataset(tool, args))
+        if tool.kind == "code":
+            return self._truncate(await self._run_tool_code(tool, args))
         if tool.kind == "http":
             method = str(args.get("method", "GET")).upper()
             url = str(args.get("url", ""))
@@ -285,9 +374,16 @@ class AgentNode(BaseNode):
             iterations += 1
             content = await self._chat(messages, p.temperature)
             directive = self._parse_reply(content)
-            if "tool" in directive and directive.get("tool") in tools:
-                tool = tools[directive["tool"]]
-                args = directive.get("arguments") or {}
+            # normalize the directive: some models nest the tool call as
+            # {"tool": {"name": ..., "arguments": {...}}} — accept both shapes
+            tool_name = directive.get("tool")
+            tool_args = directive.get("arguments")
+            if isinstance(tool_name, dict):
+                tool_args = tool_name.get("arguments", tool_args)
+                tool_name = tool_name.get("name")
+            if isinstance(tool_name, str) and tool_name in tools:
+                tool = tools[tool_name]
+                args = tool_args or {}
                 if not isinstance(args, dict):
                     args = {"value": args}
                 try:

@@ -2258,6 +2258,27 @@ def main() -> None:
             req("DELETE", f"/datasets/{d}")
     print("v33 readymade automations OK")
 
+    # ------------------------------------------------------------- v34: agent tools
+    status, health34 = req("GET", "/health")
+    ver34 = tuple(int(x) for x in health34.get("version", "0").split(".")[:2])
+    assert status == 200 and ver34 >= (1, 34), health34
+    status, agents0 = req("GET", "/agents")
+    assert status == 200 and isinstance(agents0, list), agents0
+    tag34 = uuid.uuid4().hex[:6]
+    wf34 = None
+    try:
+        status, wf34 = req("POST", "/templates/data-analyst/use", {"name": f"SMOKE34 Analyst {tag34}"})
+        assert status == 201, wf34
+        status, agents = req("GET", "/agents")
+        assert status == 200, agents
+        mine = next((a for a in agents if a["id"] == wf34["id"]), None)
+        assert mine and mine["tool_kinds"] == ["code", "dataset"], mine
+        print(f"GET /agents inventory: {len(agents)} agents; data-analyst ships dataset+code tools OK")
+    finally:
+        if wf34:
+            req("DELETE", f"/workflows/{wf34['id']}")
+    print("v34 agent tool-calling deepening OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")

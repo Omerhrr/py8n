@@ -85,7 +85,7 @@ def test_v33_gallery_shape_and_validation():
         async with _client() as client:
             # strict version pin lives in the latest wave only (v33 convention)
             hres = await client.get("/health")
-            assert hres.status_code == 200 and hres.json()["version"] == "1.33.0"
+            assert hres.status_code == 200 and hres.json()["app"] == "Py8n"  # strict pin moved to v34 (convention)
 
             res = await client.get("/templates")
             assert res.status_code == 200, res.text

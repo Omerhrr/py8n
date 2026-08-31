@@ -2,7 +2,7 @@
 import {
   Search, CornerDownLeft, LayoutDashboard, Activity, BarChart3, CalendarClock,
   Sparkles, KeyRound, Plus, PanelLeftClose, PanelLeftOpen, Command as CommandIcon,
-  Workflow as WorkflowIcon, Zap, X, Variable, Database, Image as ImageIcon, LayoutGrid, Gauge, FileText,
+  Workflow as WorkflowIcon, Zap, X, Variable, Database, Image as ImageIcon, LayoutGrid, Gauge, FileText, Bot,
 } from 'lucide-vue-next'
 import { usePalette } from '~/composables/usePalette'
 import { useSidebar } from '~/composables/useSidebar'
@@ -55,6 +55,7 @@ const navItems = computed<PaletteItem[]>(() => [
   { id: 'nav-insights', group: 'Navigate', label: 'Insights', icon: BarChart3, hint: 'Analytics & trends', keywords: 'stats analytics charts', run: () => go('/insights') },
   { id: 'nav-schedules', group: 'Navigate', label: 'Schedules', icon: CalendarClock, hint: 'Cron & intervals', keywords: 'cron timer triggers', run: () => go('/schedules') },
   { id: 'nav-templates', group: 'Navigate', label: 'Templates', icon: Sparkles, hint: 'Ready-made workflows', keywords: 'gallery presets examples', run: () => go('/templates') },
+  { id: 'nav-agents', group: 'Navigate', label: 'Agents', icon: Bot, hint: 'Agent console & playground', keywords: 'ai agent bot tools playground chat llm assistant', run: () => go('/agents') },
   { id: 'nav-datasets', group: 'Navigate', label: 'Datasets', icon: Database, hint: 'Stored tables & SQL', keywords: 'data excel csv parquet tables sql upload', run: () => go('/datasets') },
   { id: 'nav-documents', group: 'Navigate', label: 'Document AI', icon: FileText, hint: 'Extract text & tables from PDFs and scans', keywords: 'document pdf ocr scan extract invoice text tables word docx', run: () => go('/documents') },
   { id: 'nav-apps', group: 'Navigate', label: 'Apps', icon: LayoutGrid, hint: 'Excel → App builder & published apps', keywords: 'app builder excel crm dashboard form run publish', run: () => go('/apps') },

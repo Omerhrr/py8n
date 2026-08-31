@@ -767,3 +767,32 @@ Work Log:
 
 Stage Summary:
 - Py8n v33: the Readymade Automations gallery is live — 16 validated blueprints (8 new showcasing Document AI → dataset, uptime history, tool-calling agents, respond-to-webhook APIs, error handlers, memory chatbots, cross-dataset SQL joins, lead capture), gallery-grade cards with accent gradients/badges/step chips, custom-name install modal, tags-aware search; 137/137 pytest + full smoke + browser E2E, backend live at 1.33.0; vision remaining: AI agent + tool calling deepening
+
+---
+Task ID: 45 (v34 feature wave — AI Agent tool-calling deepening)
+Agent: main (Super Z)
+Task: Two new agent tool kinds (dataset SQL + sandboxed code), /agents inventory + console, agent-only chat
+
+Work Log:
+- Session start: summary stale AGAIN (12th time — claimed v33 unstarted + push pending); git truth: af19ea9 ALREADY on GitHub (previous session pushed via inline URL, which does not update the local origin/main ref — ls-remote confirmed 3e196fd = remote main) and v33 fully committed; "proceed" therefore = start v34
+- Sandbox reset again between sessions: duckdb gone (reinstalled 1.5.5 via python -m pip), backend down (daemon_backend.py restart), 57 phantom-modified files = pure mode-bit noise (100644→100755); hardened locally with `git config core.fileMode false` — recommended permanent fix for this sandbox
+- PAT provided last session was NEVER used (push was already done) → should still be rotated
+- AGENT NODE (engine/nodes/agent.py): ToolSpec.kind += "dataset" | "code"
+  * dataset tool: ONE read-only SELECT/WITH over ALL datasets (DuckDB views named after each dataset); _guard_readonly_sql whitelists the first word, rejects multi-statement (;) and banned keywords (ATTACH/INSTALL/LOAD/COPY/CALL/PRAGMA/EXPORT); max_rows cap (default 25) on rows fed back to the model
+  * code tool: same restricted runtime as Code node (SAFE_BUILTINS/SAFE_MODULES via executor+timeout); returns {result, stdout} — print() SHADOWED with a buffer-writer because SAFE_BUILTINS no-ops it; sandbox exceptions surface as tool errors
+  * GOTCHA (live-found): run_sql raises plain ValueError (Binder Error on wrong column guesses) which escaped the NodeExecutionError-only catch and killed the node → now wrapped so SQL errors become TOOL FEEDBACK the model can fix (it retried and succeeded live)
+  * GOTCHA #2 (live-found): model emitted NESTED directive {"tool": {"name": ..., "arguments": {...}}} → `directive.get("tool") in tools` raised TypeError (unhashable dict) → normalize both shapes + isinstance guard
+- CHAT FOR AGENT-ONLY WORKFLOWS (api/chat.py): _load_chat_workflow accepts chat_trigger OR ai_agent; new _chat_anchor() picks the manual trigger as anchor and nests {message, session_id} under "payload" (the key ManualTriggerNode merges) so ONE workflow serves editor Runs AND console chats; applied to both the plain + SSE endpoints
+  * TEMPLATE GOTCHA: strict-undefined Jinja makes `X or Y` RAISE when X's key is missing (editor Run would break) — the correct optional-key idiom is `{{ X | default(Y) }}`; verified via resolve_value both modes
+- API: GET /api/v1/agents (api/agents.py) — inventory of agent workflows {tools, tool_kinds, memory_sessions, active, node_count}; registered in main.py; is_active NOT active (model column gotcha, one-line fix)
+- GALLERY: 17th template "data-analyst" (AI/Agent badge) — manual_trigger + ai_agent(dataset tool sql_query + code tool python_compute), docs say create a dataset first; user_message uses the default()-fallback to answer both editor runs and console messages
+- FRONTEND: pages/agents/index.vue — Agent Console: left agent list (tool-kind color chips, memory badge, active dot, editor link), right playground chat (session key input, Enter-to-send, assistant bubbles + TRACE · N ITERATIONS chips ok=green/err=red, expandable args/result JSON, best-effort trace via GET /executions/{id} → last ai_agent node run); ConfigPanel tools editor += dataset (max_rows) + code (timeout) kinds with wire-protocol hints; sidebar nav "Agents" (Bot icon) + CommandPalette entry; footer v1.34 · 37 node types
+- Version 1.34.0; strict health pin moved to test_v34 (v33 relaxed to app=="Py8n", convention held)
+- Tests test_v34_features.py (6): health pin 1.34.0; dataset tool answers from SQL (created dataset, scripted chat: GROUP BY query → EMEA 180/APAC 80); read-only guard (DELETE + multi-statement both error, run survives); code tool sandbox roundtrip (nested-directive first call, result 42 + stdout "computing", ZeroDivisionError as tool error); /agents inventory + data-analyst template + custom-name install; agent-only workflow chat-able (200 reply via scripted chat, plain workflow still 409). Suite 143/143
+- Smoke v34 section: GET /agents list + install data-analyst (custom name) → inventory shows tool_kinds [code, dataset] → cleanup. Full smoke ALL PASS v27→v34
+- E2E (agent-browser, real LLM bridge): /agents console renders 2 agent cards + sidebar entry; seeded live demo (Sales dataset 4 rows + installed SQL Data Analyst + Support Chatbot, activated); REAL console chat "How many rows…" → correct "4 rows in total" + TRACE · 2 ITERATIONS with sql_query chip, expanded args show model's `SELECT COUNT(*) AS total_rows FROM sales` (view-name lowercase mapping correct); gallery 17 cards incl. SQL Data Analyst; editor tools editor select = knowledge,workflow,http,dataset,code + both hints. 409 gotcha fixed mid-E2E (agent-only chat), 500 gotcha fixed mid-E2E (nested directive)
+- Screenshots: download/e2e-v34-{agents-chat,gallery,tools-editor}.png
+- Demo artifacts kept LIVE (unlike post-rollback loss): Sales dataset + both agent workflows for the console demo
+
+Stage Summary:
+- Py8n v34: the agent is now a first-class citizen — it can query YOUR datasets with governed read-only SQL, compute in sandboxed Python, survive hostile/malformed model output, and every agent workflow is chat-able from the new Agent Console (/agents) with per-answer tool traces; GET /agents inventory API; 143/143 pytest + full smoke + real-LLM browser E2E, backend live at 1.34.0; 12-vision scorecard: all twelve capabilities shipped — next candidate: polish/depth waves (e.g. agent streaming in console, dataset tool row previews in trace, or a new pillar)

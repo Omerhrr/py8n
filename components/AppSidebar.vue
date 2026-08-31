@@ -2,7 +2,7 @@
 import {
   Zap, LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
-  LayoutGrid, Gauge, FileText,
+  LayoutGrid, Gauge, FileText, Bot,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -17,6 +17,7 @@ const nav = [
   { to: '/insights', label: 'Insights', icon: BarChart3, match: ['/insights'] },
   { to: '/schedules', label: 'Schedules', icon: CalendarClock, match: ['/schedules'] },
   { to: '/templates', label: 'Templates', icon: Sparkles, match: ['/templates'] },
+  { to: '/agents', label: 'Agents', icon: Bot, match: ['/agents'] },
   { to: '/datasets', label: 'Datasets', icon: Database, match: ['/datasets'] },
   { to: '/documents', label: 'Documents', icon: FileText, match: ['/documents'] },
   { to: '/apps', label: 'Apps', icon: LayoutGrid, match: ['/apps'] },
@@ -163,7 +164,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.33 · 37 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.34 · 37 node types</span>
       </div>
     </div>
   </aside>
