@@ -723,3 +723,23 @@ Work Log:
 
 Stage Summary:
 - Py8n v32: Document AI is live — any PDF, scan (OCR), Word file, workbook, CSV/JSON lands as text plus real tables; the best table becomes a first-class dataset with proper numeric dtypes, instantly SQL-queryable / app-buildable / dashboard-able, and the document_extract node brings the same engines into any workflow (path or URL); all local (pdfplumber + tesseract + python-docx + openpyxl), no external calls; 133/133 pytest + live smoke (incl. real OCR) + browser verified end-to-end from invoice PDF to SQL total; backend live at 1.32.0 — vision items remaining: readymade automations/gallery (v33 candidate), AI agent + tool calling deepening
+
+---
+Task ID: 43 (incident recovery — sandbox rollback; sidebar UX port)
+Agent: main (Super Z)
+Task: "we've worked on v27, 28, 29, 30, 31 already before, what i dont seem to see them no more, maybe you should check our commit history"
+
+Work Log:
+- USER REPORT: v27–v31 missing. FORENSICS: local git log showed only 5 commits (5c8c60e v1.17.0 → af6b75d v18 → 4b1e6ce gitignore → 80e7ae1 v19 → d5d42db "v20: Document AI"), backend 1.20.0; git fetch revealed origin/main intact at 344eb6a v32 with the FULL 17-commit history (v20 context menus → v21 respond-to-webhook → v22 error trigger → v23 memory/auth → v24 compare → v25 chat trigger → v26 SSE streaming → v27 datasets → v28 data science → v29 apps → v30 forms/rules → v31 dashboards → v32 document AI) plus the full worklog (Tasks 31–42) — NOTHING was lost, everything safe on GitHub
+- ROOT CAUSE: sandbox container rolled back to a pre-v20 snapshot (same class of incident as the documented container rebuild at the v20-start wave); the local lineage had REDONE document AI in parallel as "v20" (d5d42db, pytesseract stack) working blind from a stale session summary — divergent history, never pushed. NOTE: remote v19 is c5e2691 vs local 80e7ae1 — same content, different hash (recommit)
+- RECOVERY: branch backup/local-docai-v20 kept locally as insurance → verified working tree had ZERO content diffs vs d5d42db (only file-mode noise, 0 insertions/deletions) → git reset --hard origin/main → local main = v32
+- RE-DEPS: venv had been rebuilt for the v20-era only — duckdb MISSING (installed 1.5.5); pdfplumber/python-docx/sklearn/matplotlib/etc. all present
+- scripts/daemon_backend.py (double-fork daemonizer, survives tool-call teardown) restored from the backup branch — the v32 lineage had no equivalent; old pid-944 uvicorn (serving 1.20.0 from pre-reset code) killed first
+- Backend restarted → health 1.32.0 → pytest 133/133 PASS (restart-first pattern held: init_db created the v21–v32 tables on the fresh-seeded v20-era DB) → full smoke ALL SECTIONS PASS v27→v32 (incl. live tesseract OCR + extracted-rows SQL)
+- SIDEBAR UX PORT (the only unique work in the lost lineage, user ask from same wave): components/AppSidebar.vue — nav `sidebar-scroll mt-1 min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-3` + thin dark scrollbar (webkit + firefox); collapsed-mode expand row (PanelLeftOpen) at the TOP under the logo; footer expand buttons (both states) removed; `v1.32 · 37 node types` footer label kept
+- E2E (browser, 1280x640): nav scrollable (client 436 vs scroll 488, scrollTop 0→52); collapse button at top y=14; collapsed expand button at top y=112, footer clean, width 68→240 round-trip; /datasets renders restored v27 feature (cards, schema, row counts); zero page errors
+- NOTE: live demo artifacts of the v20–v32 sessions (datasets/apps/dashboards created at runtime) were wiped with the old container DB — code, tests and reproducible smoke are all intact; re-create demos in-app as needed
+- Screenshots: download/e2e-v33-{sidebar-scrolled,sidebar-collapsed,final}.png
+
+Stage Summary:
+- History fully restored: local main = origin/main = 344eb6a (v32) — v27 dataset engine, v28 data-science workbench, v29 app builder, v30 forms & rules, v31 dashboards, v32 document AI all back; 133/133 pytest + full smoke green on live 1.32.0; sidebar nav scrolls and collapse/expand toggles live at the TOP (user ask); incident documented; backup/local-docai-v20 kept locally

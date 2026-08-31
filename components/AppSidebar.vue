@@ -102,8 +102,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </button>
     </div>
 
-    <!-- nav -->
-    <nav class="mt-1 flex-1 space-y-1 px-3 pb-3">
+    <!-- expand toggle — lives at the TOP of the sidebar in collapsed mode -->
+    <div v-if="collapsed" class="hidden justify-center pb-1 lg:flex">
+      <button
+        class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-900 hover:text-zinc-200"
+        title="Expand sidebar (Ctrl+B)"
+        @click="toggle()"
+      >
+        <PanelLeftOpen class="h-4 w-4" />
+      </button>
+    </div>
+
+    <!-- nav (scrolls when it outgrows the viewport) -->
+    <nav class="sidebar-scroll mt-1 min-h-0 flex-1 space-y-1 overflow-y-auto px-3 pb-3">
       <NuxtLink
         v-for="item in nav"
         :key="item.to"
@@ -153,23 +164,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
         <span class="truncate" :class="collapsed && 'lg:hidden'">v1.32 · 37 node types</span>
-        <button
-          v-if="!collapsed"
-          class="rounded-lg p-1 text-zinc-600 transition hover:bg-zinc-900 hover:text-zinc-300 max-lg:hidden"
-          title="Expand sidebar (Ctrl+B)"
-          @click="toggle()"
-        >
-          <PanelLeftOpen class="h-3.5 w-3.5" />
-        </button>
       </div>
-      <button
-        v-if="collapsed"
-        class="mt-1 hidden w-full justify-center rounded-lg p-1 text-zinc-600 transition hover:bg-zinc-900 hover:text-zinc-300 lg:flex"
-        title="Expand sidebar (Ctrl+B)"
-        @click="toggle()"
-      >
-        <PanelLeftOpen class="h-3.5 w-3.5" />
-      </button>
     </div>
   </aside>
 
@@ -193,5 +188,24 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+/* slim dark scrollbar for the nav rail */
+.sidebar-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(63 63 70 / 0.6) transparent;
+}
+.sidebar-scroll::-webkit-scrollbar {
+  width: 6px;
+}
+.sidebar-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb {
+  background: rgb(63 63 70 / 0.6);
+  border-radius: 3px;
+}
+.sidebar-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgb(82 82 91 / 0.8);
 }
 </style>
