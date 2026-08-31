@@ -139,6 +139,9 @@ export interface WorkflowTemplate {
   category: string
   icon: string
   docs: string
+  badge?: string | null
+  tags?: string[]
+  accent?: string
   node_count: number
   node_types: string[]
 }

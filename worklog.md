@@ -743,3 +743,27 @@ Work Log:
 
 Stage Summary:
 - History fully restored: local main = origin/main = 344eb6a (v32) — v27 dataset engine, v28 data-science workbench, v29 app builder, v30 forms & rules, v31 dashboards, v32 document AI all back; 133/133 pytest + full smoke green on live 1.32.0; sidebar nav scrolls and collapse/expand toggles live at the TOP (user ask); incident documented; backup/local-docai-v20 kept locally
+
+---
+Task ID: 44 (v33 feature wave — Readymade Automations Gallery)
+Agent: main (Super Z)
+Task: "here: ghp_... and proceed" — push pending v32.1 recovery commit, then next wave in sequence (readymade automations/gallery per vision)
+
+Work Log:
+- PUSHED pending af19ea9 (v32.1 recovery + sidebar UX) with the user's fresh PAT (one-time push URL, never persisted; remote advised to rotate)
+- BASE RECON: a v14-era templates feature already existed (8 hand-written graphs, GET /templates + POST /{id}/use → inactive workflow; /templates page with search + category chips) — but it predated the entire v19-v32 stack
+- 8 NEW GALLERY AUTOMATIONS (zero new node types — built purely from the existing 37): invoice-to-books (Document AI: manual → document_extract[path] → dataset_write "Invoice Ledger"), uptime-sentinel (schedule → http health → set_variable sample → dataset_write "Uptime Log" append), research-agent (ai_agent with knowledge+http(api.github.com) tools), custom-webhook-reply (webhook respond_node → if amount>1000 → respond 202 / respond 200), error-responder (error_trigger → format → slack dry_run), support-chatbot (chat_trigger → ai_agent memory=buffer + FAQ knowledge tool), csv-join-report (manual payload → 2× set_variable → 2× dataset_write replace → sql_query JOIN), lead-capture-api (webhook → normalize → dataset_write "Leads" → respond 201)
+- GALLERY METADATA: badge + tags per template; CATEGORY_ACCENT map (AI violet / Data sky / Integrations emerald / Control amber / Ops rose / Document AI orange) single source of truth in template_summary (additive + backward compatible)
+- API: POST /templates/{id}/use now takes optional {name} body (UseBody, min_length 1) — custom-named installs, defaults to template name
+- TEMPLATE ENGINE GOTCHA (found by the run-test, cost one debug cycle): the code node wraps user `result` as {"result": ...} — so `result = {'items': [...]}` reaches dataset_write as ONE row with a 'result' column, NOT as items. Correct pattern for row emission: set_variable assignments with a single-expression `{{ expr }}` (resolve_value preserves native types) mapping a payload list onto `items` (or document_extract/http outputs which already carry `items`/`status` at root). Both affected templates reworked to set_variable shapes
+- ENGINE GOTCHA #2: execution success status string is "success" (not "finished")
+- Frontend: /templates redesigned into a gallery — accent-gradient icon tiles, badge chips, node-type chips (first 4 + "+N"), install MODAL (name input defaulting to template name, docs, numbered step list, Install → POST use {name} → editor); search now matches tags; Esc/backdrop close; types/node.ts WorkflowTemplate +badge/tags/accent
+- Version 1.33.0; sidebar footer v1.33 · 37 node types; pytest convention held: strict health pin moved to test_v33 (1.33.0), v32 test relaxed to app=="Py8n", smoke v32 gate relaxed to >= (1,32)
+- Tests test_v33_features.py (4): gallery shape (16 unique, metadata, node types ∈ registry, graphs validate), showcase presence (badges, flagship node types, agent tool kinds [knowledge, http]), install custom/default names + 404, AND the SQL-join automation installed + RUN offline end-to-end (execution success, SQL rows [Acme 340.0, Globex 80.5, Initech 45.25], both datasets materialized). Suite 137/137
+- Smoke v33 section: gallery ≥16 + 8 ids + badges/accents; install csv-join-report with custom name → run → Acme 340.0 → datasets present → cleanup. Full smoke ALL PASS v27→v33 (v19 agent-run flake once on a loaded box — clean on retry, known LLM-latency family)
+- E2E: gallery renders 16 cards + 8 badges + 7 category chips; Data filter 16→3→16; install modal (default name, 6 step chips); REAL Playwright click on Install → navigated to editor, canvas renders node count (3 for ai-writer card). GOTCHA: synthetic JS .click() ran the handler (workflow created) but navigateTo silently no-op'd — trusted Playwright click navigates fine; also `find text "Data" click` misfired onto the Datasets nav link (use exact-text JS chip clicks for filters)
+- Demo artifacts: E2E-installed workflows deleted (204×2); demo datasets from failed test runs cleaned; smoke cleans its own
+- Screenshots: download/e2e-v33-{gallery,sidebar-scrolled(43),editor-installed,gallery-final}.png
+
+Stage Summary:
+- Py8n v33: the Readymade Automations gallery is live — 16 validated blueprints (8 new showcasing Document AI → dataset, uptime history, tool-calling agents, respond-to-webhook APIs, error handlers, memory chatbots, cross-dataset SQL joins, lead capture), gallery-grade cards with accent gradients/badges/step chips, custom-name install modal, tags-aware search; 137/137 pytest + full smoke + browser E2E, backend live at 1.33.0; vision remaining: AI agent + tool calling deepening

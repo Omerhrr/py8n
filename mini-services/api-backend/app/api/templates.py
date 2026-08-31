@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
@@ -29,19 +30,26 @@ async def get_template_detail(template_id: str):
     return {**template_summary(t), "graph": t["graph"]}
 
 
+class UseBody(BaseModel):
+    """Optional body for POST /templates/{id}/use — lets the user name the copy."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 @router.post("/{template_id}/use", response_model=WorkflowOut, status_code=201)
-async def use_template(template_id: str, db: AsyncSession = Depends(get_db)):
-    """Instantiate a template as a real (inactive) workflow."""
+async def use_template(template_id: str, body: UseBody | None = None, db: AsyncSession = Depends(get_db)):
+    """Instantiate a template as a real (inactive) workflow, optionally renamed."""
     t = get_template(template_id)
     if t is None:
         raise HTTPException(status_code=404, detail="Template not found")
+    custom_name = (body.name.strip() if body and body.name and body.name.strip() else None) or t["name"]
     try:
         graph = validate_graph_document(t["graph"]).model_dump()
     except (GraphValidationError, ValueError) as exc:
         raise HTTPException(status_code=500, detail=f"Template graph invalid: {exc}") from exc
 
     wf = Workflow(
-        name=t["name"],
+        name=custom_name,
         description=t["description"],
         graph=graph,
         is_active=False,

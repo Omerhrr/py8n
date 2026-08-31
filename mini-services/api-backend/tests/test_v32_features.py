@@ -163,9 +163,9 @@ def test_v32_engines_and_text_formats():
         async with _client() as client:
             res = await client.get("/documents/engines")
             assert res.status_code == 200
-            # strict pin lives in the latest wave only (v32 convention)
+            # strict pin lives in the latest wave only (v33 convention)
             hres = await client.get("/health")
-            assert hres.status_code == 200 and hres.json()["version"] == "1.32.0"
+            assert hres.status_code == 200 and hres.json()["app"] == "Py8n"
             cap = res.json()
             assert cap["ocr"]["available"] is True and cap["ocr"]["version"]
             assert ".pdf" in cap["formats"] and ".png" in cap["formats"]

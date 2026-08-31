@@ -2127,7 +2127,7 @@ def main() -> None:
     ds32 = None
     try:
         status, health32 = req("GET", "/health")
-        assert status == 200 and health32["version"] == "1.32.0", health32  # strict pin: latest wave only
+        assert status == 200 and tuple(int(x) for x in health32["version"].split(".")[:2]) >= (1, 32), health32
         status, eng = req("GET", "/documents/engines")
         assert status == 200 and eng["ocr"]["available"] is True, eng
 
@@ -2208,6 +2208,55 @@ def main() -> None:
         if ds32:
             req("DELETE", f"/datasets/{ds32}")
     print("v32 document AI OK")
+
+    # ------------------------------------------------------------- v33: gallery
+    status, health33 = req("GET", "/health")
+    ver33 = tuple(int(x) for x in health33.get("version", "0").split(".")[:2])
+    assert status == 200 and ver33 >= (1, 33), health33
+    status, gallery = req("GET", "/templates")
+    assert status == 200 and len(gallery) >= 16, f"gallery too small: {len(gallery)}"
+    by_id33 = {t["id"]: t for t in gallery}
+    for tid in ("invoice-to-books", "uptime-sentinel", "research-agent",
+                "custom-webhook-reply", "error-responder", "support-chatbot",
+                "csv-join-report", "lead-capture-api"):
+        assert tid in by_id33, f"missing v33 template {tid}"
+        assert by_id33[tid]["badge"] and by_id33[tid]["accent"], tid
+    print(f"gallery: {len(gallery)} templates, 8 v33 automations with badges + accents OK")
+
+    tag33 = uuid.uuid4().hex[:6]
+    wf33: dict | None = None
+    ds33: list[str] = []
+    try:
+        # install the offline-runnable SQL-join automation with a custom name
+        status, wf33 = req("POST", "/templates/csv-join-report/use", {"name": f"SMOKE33 Join {tag33}"})
+        assert status == 201, wf33
+        assert wf33["name"] == f"SMOKE33 Join {tag33}" and wf33["is_active"] is False
+        status, run33 = req("POST", f"/workflows/{wf33['id']}/run", {"payload": {}})
+        assert status in (200, 202), run33
+        exec33 = run33["execution_id"] if isinstance(run33, dict) else run33
+        rows33 = None
+        for _ in range(120):
+            status, ex33 = req("GET", f"/executions/{exec33}")
+            assert status == 200, ex33
+            if ex33.get("status") != "running":
+                assert ex33["status"] == "success", ex33.get("error")
+                sql_run = next(n for n in ex33["node_runs"] if n["node_type"] == "sql_query")
+                rows33 = sql_run["output"]["items"]
+                break
+            time.sleep(0.05)
+        assert rows33 and rows33[0]["name"] == "Acme Corp" and rows33[0]["total"] == 340.0, rows33
+        print(f"installed + ran SQL-join automation offline (Acme 340.0) OK")
+        status, dss = req("GET", "/datasets")
+        for d in dss:
+            if d["name"] in ("demo_orders", "demo_customers"):
+                ds33.append(d["id"])
+        assert len(ds33) == 2, dss
+    finally:
+        if wf33:
+            req("DELETE", f"/workflows/{wf33['id']}")
+        for d in ds33:
+            req("DELETE", f"/datasets/{d}")
+    print("v33 readymade automations OK")
 
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
