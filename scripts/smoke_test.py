@@ -27,7 +27,7 @@ def req(method: str, path: str, body: dict | None = None, headers: dict | None =
         return e.code, json.loads(e.read().decode() or "{}")
 
 
-def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 3) -> list:
+def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 4, backoff: int = 60) -> list:
     """POST /chat/{id}/stream and return the parsed SSE frames.
 
     Retries with a backoff when the upstream LLM gateway rate-limits (its 429
@@ -41,7 +41,7 @@ def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 3
                     raw = "".join(chunk.decode() for chunk in r.iter_bytes())
         except Exception as exc:  # noqa: BLE001 - transport level, retryable
             last_exc = exc
-            time.sleep(45)
+            time.sleep(backoff)
             continue
         frames = []
         for block in raw.split("\n\n"):
@@ -53,11 +53,13 @@ def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 3
                     data_line = line[6:]
             if ev_name and data_line:
                 frames.append((ev_name, json.loads(data_line)))
-        if frames and frames[-1][0] == "error":
+        if frames and frames[-1][0] in ("error", "timeout"):
             blob = json.dumps(frames[-1][1])
-            if any(marker in blob for marker in ("429", "502", "Too many requests")):
-                last_exc = RuntimeError(f"LLM gateway rate limited: {blob[:160]}")
-                time.sleep(45)
+            # 429/502 arrive as error frames; a throttled-slow LLM can also run
+            # out of the stream deadline (terminal timeout) - both are retryable
+            if frames[-1][0] == "timeout" or any(m in blob for m in ("429", "502", "Too many requests")):
+                last_exc = RuntimeError(f"LLM gateway throttled: {blob[:160]}")
+                time.sleep(backoff)
                 continue
         return frames
     raise last_exc if last_exc else RuntimeError("SSE chat retries exhausted")
@@ -2600,6 +2602,7 @@ def main() -> None:
     status, act40 = req("POST", f"/workflows/{wf40['id']}/activate")
     assert status == 200, act40
     sid40 = f"smoke40-{tag40}"
+    time.sleep(30)  # the LLM gateway quota refills slowly - breathe before streaming
     frames40 = sse_chat_frames(wf40["id"], f"Query the view named smoke40_stations_{tag40} and reply with the SUM of the power column across all stations. Reply with the number only.", sid40)
     agent40 = [d for e, d in frames40 if e == "agent"]
     phases40 = [d.get("phase") for d in agent40]
@@ -2607,15 +2610,65 @@ def main() -> None:
     tr40 = next(d for d in agent40 if d.get("phase") == "tool_result")
     assert tr40.get("status") == "ok" and tr40.get("data"), tr40
     d40 = tr40["data"]
-    assert d40["columns"] == ["station", "power"], d40
-    assert d40["total_rows"] == 3 and d40["rows_shown"] == 3, d40
-    assert d40["rows"][0] == ["a", "12"], d40
+    # the model picks its own SQL (SELECT * vs SUM) - assert the PREVIEW shape,
+    # not the query shape; exact columns/rows are pinned by the offline test
+    assert isinstance(d40["columns"], list) and d40["columns"], d40
+    assert d40["total_rows"] >= 1 and d40["rows_shown"] >= 1, d40
+    assert d40["rows"] and d40["rows"][0], d40
     done40 = frames40[-1][1]
     assert done40.get("status") == "success", done40
     print(f"agent trace data preview OK ({d40['total_rows']} rows, cols {d40['columns']}, answer: {done40.get('reply', '')[:40]!r})")
     req("DELETE", f"/workflows/{wf40['id']}")
     req("DELETE", f"/datasets/{ds40['id']}")
     print("v40 dataset row previews OK")
+
+    # ------------------------------------------------------------- v41: API keys
+    status, health41 = req("GET", "/health")
+    ver41 = tuple(int(x) for x in health41.get("version", "0").split(".")[:2])
+    assert status == 200 and ver41 >= (1, 41), health41
+    tag41 = uuid.uuid4().hex[:6]
+    email41 = f"smoke41-{tag41}@py8n.test"
+    status, reg41 = req("POST", "/auth/register", {"email": email41, "password": "smoke-key-pw1", "name": "Smoke41"})
+    assert status == 201, reg41
+    tok41 = reg41["token"]
+    status, key41 = req("POST", "/keys", {"name": "smoke-script"}, headers={"Authorization": f"Bearer {tok41}"})
+    assert status == 201 and key41["key"].startswith("py8n_"), key41
+    hdr41 = {"X-API-Key": key41["key"]}
+    status, me41 = req("GET", "/auth/me", headers=hdr41)
+    assert status == 200 and me41["email"] == email41, me41
+    status, kwf41 = req("POST", "/workflows", {"name": f"SMOKE41 Keyed {tag41}", "graph": {"nodes": [], "edges": []}}, headers=hdr41)
+    assert status == 201 and kwf41.get("owner_id"), kwf41
+    status, bad41 = req("GET", "/auth/me", headers={"X-API-Key": "py8n_not-a-real-key"})
+    assert status == 401, bad41
+    status, _ = req("DELETE", f"/keys/{key41['id']}", headers={"Authorization": f"Bearer {tok41}"})
+    assert status == 204, status
+    status, dead41 = req("GET", "/auth/me", headers=hdr41)
+    assert status == 401, dead41
+    status, _ = req("DELETE", f"/workflows/{kwf41['id']}")
+    print("v41 api keys OK (machine auth + owner stamp + revoke)")
+
+    # ------------------------------------------------------------- v42: gallery packs
+    status, health42 = req("GET", "/health")
+    ver42 = tuple(int(x) for x in health42.get("version", "0").split(".")[:2])
+    assert status == 200 and ver42 >= (1, 42), health42
+    status, catalog42 = req("GET", "/templates")
+    assert status == 200 and catalog42, catalog42
+    status, gal42 = req("GET", "/templates/gallery/pack")
+    assert status == 200 and gal42["format"] == "py8n-pack", gal42.get("manifest")
+    m42 = gal42["manifest"]
+    assert m42["source"] == "py8n-gallery" and m42["workflow_count"] == len(catalog42), m42
+    assert set(m42["template_ids"]) == {t["id"] for t in catalog42}, m42
+    status, tpl42 = req("GET", "/templates/data-analyst/pack")
+    assert status == 200 and tpl42["manifest"]["template_ids"] == ["data-analyst"], tpl42.get("manifest")
+    status, ins42 = req("POST", "/packs/inspect", tpl42)
+    assert status == 200 and ins42["workflows"][0]["valid"] is True, ins42
+    status, imp42 = req("POST", "/packs/import", tpl42)
+    assert status == 201 and len(imp42["workflows"]) == 1 and imp42["skipped"] == [], imp42
+    pwf42 = imp42["workflows"][0]
+    status, det42 = req("GET", f"/workflows/{pwf42['id']}")
+    assert status == 200 and det42["is_active"] is False and pwf42["node_count"] >= 2, det42
+    req("DELETE", f"/workflows/{pwf42['id']}")
+    print(f"v42 gallery packs OK (gallery: {m42['workflow_count']} templates, data-analyst pack imported inactive)")
 
     print("\nALL SMOKE TESTS PASSED ✅")
 

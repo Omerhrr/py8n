@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import {
   Sparkles, Search, Loader2, Workflow as WorkflowIcon, X, Check,
   Brain, PauseCircle, Repeat, GitBranch, Globe, Slack, Sigma, Mail,
-  FileSearch, Activity, Bot, Reply, Siren, MessageSquare, Table2, Inbox, LayoutTemplate,
+  FileSearch, Activity, Bot, Reply, Siren, MessageSquare, Table2, Inbox, LayoutTemplate, Download,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 import type { Workflow, WorkflowTemplate } from '~/types/node'
@@ -76,6 +76,38 @@ async function confirmInstall() {
 function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape' && installTarget.value) closeInstall()
 }
+
+// v42: download any template (or the whole gallery) as an importable pack
+function downloadJson(doc: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function slugify(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'template'
+}
+
+async function exportTemplate(tpl: WorkflowTemplate) {
+  const pack = await api.get<Record<string, unknown>>(`/templates/${tpl.id}/pack`)
+  downloadJson(pack, `py8n-${slugify(tpl.name)}.py8n.json`)
+}
+
+const exportingGallery = ref(false)
+
+async function exportGallery() {
+  exportingGallery.value = true
+  try {
+    const pack = await api.get<Record<string, unknown>>('/templates/gallery/pack')
+    downloadJson(pack, 'py8n-gallery.py8n.json')
+  } finally {
+    exportingGallery.value = false
+  }
+}
 onMounted(async () => {
   window.addEventListener('keydown', onKey)
   try {
@@ -105,14 +137,27 @@ watch(installTarget, (t) => {
             <p class="-mt-0.5 text-[11px] text-zinc-500">{{ templates.length }} gallery-tested blueprints - install, tweak, run</p>
           </div>
         </div>
-        <label class="relative">
-          <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
-          <input
-            v-model="search"
-            class="w-56 rounded-xl border border-zinc-800 bg-zinc-900 py-2 pl-9 pr-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-orange-500/60"
-            placeholder="Search gallery…"
-          />
-        </label>
+        <div class="flex items-center gap-2">
+          <label class="relative">
+            <Search class="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+            <input
+              v-model="search"
+              class="w-56 rounded-xl border border-zinc-800 bg-zinc-900 py-2 pl-9 pr-3 text-sm outline-none transition placeholder:text-zinc-600 focus:border-orange-500/60"
+              placeholder="Search gallery…"
+            />
+          </label>
+          <!-- v42: the whole gallery as one importable pack -->
+          <button
+            class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
+            :disabled="exportingGallery"
+            title="Download every gallery automation as one py8n-pack"
+            @click="exportGallery"
+          >
+            <Loader2 v-if="exportingGallery" class="h-4 w-4 animate-spin" />
+            <Download v-else class="h-4 w-4" />
+            <span class="hidden sm:inline">Export gallery</span>
+          </button>
+        </div>
       </div>
     </header>
 
@@ -205,13 +250,22 @@ watch(installTarget, (t) => {
               <span class="inline-flex items-center gap-1.5 text-[11px] text-zinc-600">
                 <WorkflowIcon class="h-3.5 w-3.5" /> {{ tpl.node_count }} steps · validated
               </span>
-              <button
-                class="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:border-orange-500/60 hover:bg-orange-500/10 hover:text-white disabled:opacity-50"
-                @click="openInstall(tpl)"
-              >
-                <Check class="h-3.5 w-3.5" />
-                Install
-              </button>
+              <div class="flex items-center gap-1.5">
+                <button
+                  class="rounded-lg border border-zinc-700 bg-zinc-800 p-1.5 text-zinc-400 transition hover:border-orange-500/60 hover:text-white"
+                  title="Download as importable pack (.py8n.json)"
+                  @click="exportTemplate(tpl)"
+                >
+                  <Download class="h-3.5 w-3.5" />
+                </button>
+                <button
+                  class="inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-1.5 text-xs font-semibold text-zinc-200 transition hover:border-orange-500/60 hover:bg-orange-500/10 hover:text-white disabled:opacity-50"
+                  @click="openInstall(tpl)"
+                >
+                  <Check class="h-3.5 w-3.5" />
+                  Install
+                </button>
+              </div>
             </div>
           </div>
         </article>

@@ -2,8 +2,7 @@
 import {
   LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
-  LayoutGrid, Gauge, FileText, Bot, LogOut,
-} from 'lucide-vue-next'
+  LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare,} from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
 
@@ -36,6 +35,7 @@ const nav = [
   { to: '/artifacts', label: 'Artifacts', icon: ImageIcon, match: ['/artifacts'] },
   { to: '/credentials', label: 'Credentials', icon: KeyRound, match: ['/credentials'] },
   { to: '/env-vars', label: 'Variables', icon: Variable, match: ['/env-vars'] },
+  { to: '/keys', label: 'API keys', icon: KeySquare, match: ['/keys'] },  // v41
 ]
 
 function isActive(item: (typeof nav)[number]) {
@@ -193,7 +193,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.40 · 37 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.42 · 37 node types</span>
       </div>
     </div>
   </aside>

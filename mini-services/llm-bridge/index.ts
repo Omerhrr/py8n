@@ -112,16 +112,28 @@ const server = Bun.serve({
           stream: false,
         };
 
-        const resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(payload),
-        });
-        if (!resp.ok) {
-          const errText = await resp.text();
-          return Response.json({ error: `gateway ${resp.status}: ${errText.slice(0, 200)}` }, { status: 502 });
+        // v41: transient gateway throttling (429) and blips (502/503) are
+        // retried with a short backoff so workflows and smoke runs survive
+        // shared-quota bursts instead of failing mid-run.
+        const RETRYABLE = new Set([429, 502, 503]);
+        const BACKOFF_MS = [4000, 9000, 18000];
+        let resp: Response | null = null;
+        let errText = '';
+        for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+          resp = await fetch(`${cfg.baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload),
+          });
+          if (resp.ok || !RETRYABLE.has(resp.status) || attempt === BACKOFF_MS.length) break;
+          errText = await resp.text();
+          await new Promise((r) => setTimeout(r, BACKOFF_MS[attempt]));
         }
-        const data: any = await resp.json();
+        if (!resp!.ok) {
+          const finalText = errText || (await resp!.text());
+          return Response.json({ error: `gateway ${resp!.status}: ${finalText.slice(0, 200)}` }, { status: 502 });
+        }
+        const data: any = await resp!.json();
         const content =
           data?.choices?.[0]?.message?.content ??
           data?.choices?.[0]?.message?.reasoning_content ??

@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user
+from ..config import settings
 from ..db import get_db
 from ..engine.runner import GraphValidationError, validate_graph_document
 from ..models import Workflow
@@ -21,6 +22,57 @@ router = APIRouter(prefix="/templates", tags=["templates"])
 @router.get("")
 async def list_templates():
     return [template_summary(t) for t in TEMPLATES]
+
+
+# ---------------------------------------------------------------------- v42
+def _gallery_pack(entries: list[dict]) -> dict:
+    """Build a py8n-pack document from template entries (v42).
+
+    One workflow per template (installed inactive on import, like every
+    pack); template identity rides the manifest so the receiving instance
+    can tell where the pack came from. Note: v33 automations that demo the
+    dataset engine generate their datasets at RUN time (dataset_write
+    nodes), so there is nothing static to bundle here by design.
+    """
+    workflows = []
+    node_types: list[str] = []
+    for t in entries:
+        graph = t["graph"]
+        workflows.append({"name": t["name"], "description": t["description"], "graph": graph})
+        for node in graph.get("nodes", []):
+            nt = (node or {}).get("type")
+            if nt and nt not in node_types:
+                node_types.append(nt)
+    return {
+        "format": "py8n-pack",
+        "pack_version": 1,
+        "py8n_version": settings.version,
+        "manifest": {
+            "workflow_count": len(workflows),
+            "dataset_count": 0,
+            "node_types": node_types,
+            "total_rows": 0,
+            "source": "py8n-gallery",
+            "template_ids": [t["id"] for t in entries],
+        },
+        "workflows": workflows,
+        "datasets": [],
+    }
+
+
+@router.get("/gallery/pack")
+async def gallery_pack():
+    """The whole readymade gallery as one importable pack."""
+    return _gallery_pack(TEMPLATES)
+
+
+@router.get("/{template_id}/pack")
+async def template_pack(template_id: str):
+    """A single gallery template as an importable pack."""
+    t = get_template(template_id)
+    if t is None:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return _gallery_pack([t])
 
 
 @router.get("/{template_id}")
