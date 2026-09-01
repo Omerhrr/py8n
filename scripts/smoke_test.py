@@ -2501,6 +2501,72 @@ def main() -> None:
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")
 
+    # ------------------------------------------------------------- v39: template packs
+    status, health39 = req("GET", "/health")
+    ver39 = tuple(int(x) for x in health39.get("version", "0").split(".")[:2])
+    assert status == 200 and ver39 >= (1, 39), health39
+    tag39 = uuid.uuid4().hex[:6]
+
+    graph39 = _graph_38([
+        {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "c", "type": "code", "name": "Calc", "position": {"x": 120, "y": 0},
+         "parameters": {"code": "result = 7 * 6"}},
+    ])
+    status, wf39 = req("POST", "/workflows", {"name": f"SMOKE39 Packed {tag39}", "graph": graph39})
+    assert status == 201, wf39
+    status, ds39 = req("POST", "/datasets", {"name": f"smoke39 cities {tag39}", "rows": [
+        {"city": "lima", "temp": 19}, {"city": "kyiv", "temp": 9},
+    ]})
+    assert status == 201, ds39
+
+    # export: one pack holding the workflow + the dataset snapshot
+    status, pack39 = req("POST", "/packs/export", {
+        "workflow_ids": [wf39["id"]],
+        "dataset_ids": [ds39["id"]],
+    })
+    assert status == 200, pack39
+    assert pack39["format"] == "py8n-pack" and pack39["manifest"]["workflow_count"] == 1, pack39.get("manifest")
+    assert pack39["manifest"]["dataset_count"] == 1 and pack39["manifest"]["total_rows"] == 2, pack39.get("manifest")
+    assert pack39["datasets"][0]["rows"][0]["city"] == "lima", pack39["datasets"]
+    print(f"pack export OK ({pack39['manifest']['workflow_count']} wf + {pack39['manifest']['dataset_count']} ds, "
+          f"{pack39['manifest']['total_rows']} rows, py8n {pack39['py8n_version']})")
+
+    # inspect + import: the pack comes back as two NEW resources
+    status, ins39 = req("POST", "/packs/inspect", pack39)
+    assert status == 200 and ins39["workflows"][0]["valid"] is True, ins39
+    assert ins39["datasets"][0]["rename_to"] is not None, ins39  # same instance -> colliding name
+    print(f"pack inspect OK (rename preview -> '{ins39['datasets'][0]['rename_to']}')")
+    status, imp39 = req("POST", "/packs/import", pack39)
+    assert status == 201 and len(imp39["workflows"]) == 1 and len(imp39["datasets"]) == 1, imp39
+    assert imp39["skipped"] == [], imp39
+    new_wf39, new_ds39 = imp39["workflows"][0], imp39["datasets"][0]
+    assert new_wf39["node_count"] == 2 and new_ds39["row_count"] == 2, imp39
+    status, rows39 = req("GET", f"/datasets/{new_ds39['id']}/rows")
+    assert status == 200 and len(rows39["rows"]) == 2 and rows39["rows"][1]["city"] == "kyiv", rows39
+    status, det39 = req("GET", f"/workflows/{new_wf39['id']}")
+    assert status == 200 and det39["is_active"] is False, det39
+    print(f"pack import OK ('{new_wf39['name']}' inactive, dataset '{new_ds39['name']}' with rows intact)")
+
+    # invalid entries are skipped with reasons, the healthy pair still lands
+    bad39 = {
+        "format": "py8n-pack",
+        "workflows": [{"name": f"SMOKE39 Broken {tag39}", "graph": {"nodes": [
+            {"id": "x", "type": "no_such_node", "name": "X", "position": {"x": 0, "y": 0}, "parameters": {}},
+        ], "edges": []}}],
+        "datasets": [{"name": f"smoke39 ok {tag39}", "rows": [{"a": 1}]}],
+    }
+    status, impb39 = req("POST", "/packs/import", bad39)
+    assert status == 201 and len(impb39["workflows"]) == 0 and len(impb39["datasets"]) == 1, impb39
+    assert len(impb39["skipped"]) == 1 and "Unknown node type" in impb39["skipped"][0]["reason"], impb39
+    print("pack skip OK (broken workflow skipped, healthy dataset landed)")
+
+    req("DELETE", f"/datasets/{ds39['id']}")
+    req("DELETE", f"/datasets/{new_ds39['id']}")
+    req("DELETE", f"/datasets/{impb39['datasets'][0]['id']}")
+    req("DELETE", f"/workflows/{wf39['id']}")
+    req("DELETE", f"/workflows/{new_wf39['id']}")
+    print("v39 template packs OK")
+
     print("\nALL SMOKE TESTS PASSED ✅")
 
 

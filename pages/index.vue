@@ -4,7 +4,7 @@ import {
   Workflow as WorkflowIcon, Play, Plus, CheckCircle2, XCircle, Check,
   Clock, Webhook, ChevronRight, Activity, Sparkles, Trash2, Upload, Loader2,
   ShieldAlert, Search, Tag as TagIcon, X, Folder as FolderIcon, FolderPlus,
-  FolderInput, Pencil,
+  FolderInput, Pencil, Download,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 import type { Workflow, WorkflowListItem, WorkflowScheduleInfo, ExecutionSummary, Folder } from '~/types/node'
@@ -25,12 +25,118 @@ const newDesc = ref('')
 const newFolderId = ref('')
 const importInput = ref<HTMLInputElement | null>(null)
 
+// ------------------------------------------------------------------ v39 template packs
+interface PackDatasetMeta { id: string; name: string; row_count: number }
+interface PackInspection {
+  workflow_count: number
+  dataset_count: number
+  workflows: { name: string; node_count: number; valid: boolean; error: string | null; exists: boolean }[]
+  datasets: { name: string; rows: number; rename_to: string | null; invalid_name: boolean }[]
+  warnings: string[]
+}
+interface PackImportSummary {
+  workflows: { id: string; name: string; node_count: number }[]
+  datasets: { id: string; name: string; row_count: number }[]
+  skipped: { name: string; reason: string }[]
+  warnings: string[]
+}
+
+const datasets = ref<PackDatasetMeta[]>([])
+const packBusy = ref(false)
+const showExportPack = ref(false)
+const packWfSel = ref<Record<string, boolean>>({})
+const packDsSel = ref<Record<string, boolean>>({})
+const pendingPack = ref<Record<string, unknown> | null>(null)
+const packPreview = ref<PackInspection | null>(null)
+const packImporting = ref(false)
+const packResult = ref<PackImportSummary | null>(null)
+
+function downloadJson(doc: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+function slugify(s: string) {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'workflow'
+}
+
+async function exportOne(wf: WorkflowListItem) {
+  packBusy.value = true
+  try {
+    const pack = await api.post<Record<string, unknown>>('/packs/export', { workflow_ids: [wf.id] })
+    downloadJson(pack, `${slugify(wf.name)}.py8n.json`)
+  } catch (e: any) {
+    alert(e?.data?.detail || e?.message || 'Export failed')
+  } finally {
+    packBusy.value = false
+  }
+}
+
+function openExportPack() {
+  const wsel: Record<string, boolean> = {}
+  for (const wf of workflows.value) wsel[wf.id] = true
+  const dsel: Record<string, boolean> = {}
+  for (const ds of datasets.value) dsel[ds.id] = true
+  packWfSel.value = wsel
+  packDsSel.value = dsel
+  showExportPack.value = true
+}
+
+const packSelCounts = computed(() => {
+  const w = Object.values(packWfSel.value).filter(Boolean).length
+  const d = Object.values(packDsSel.value).filter(Boolean).length
+  return { w, d, total: w + d }
+})
+
+async function downloadExportPack() {
+  if (!packSelCounts.value.total) return
+  packBusy.value = true
+  try {
+    const pack = await api.post<Record<string, unknown>>('/packs/export', {
+      workflow_ids: Object.keys(packWfSel.value).filter((id) => packWfSel.value[id]),
+      dataset_ids: Object.keys(packDsSel.value).filter((id) => packDsSel.value[id]),
+    })
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-')
+    downloadJson(pack, `py8n-pack-${stamp}.json`)
+    showExportPack.value = false
+  } catch (e: any) {
+    alert(e?.data?.detail || e?.message || 'Export failed')
+  } finally {
+    packBusy.value = false
+  }
+}
+
+async function confirmPackImport() {
+  if (!pendingPack.value) return
+  packImporting.value = true
+  try {
+    packResult.value = await api.post<PackImportSummary>('/packs/import', pendingPack.value)
+    await loadAll()
+  } catch (e: any) {
+    alert(e?.data?.detail || e?.message || 'Pack import failed')
+  } finally {
+    packImporting.value = false
+  }
+}
+
+function closePackPreview() {
+  packPreview.value = null
+  pendingPack.value = null
+  packResult.value = null
+}
+
 async function loadAll() {
   loading.value = true
   try {
     workflows.value = await api.get<WorkflowListItem[]>('/workflows')
     recentRuns.value = await api.get<ExecutionSummary[]>('/executions?limit=8')
     folders.value = await api.get<Folder[]>('/folders')
+    datasets.value = await api.get<PackDatasetMeta[]>('/datasets')
   } finally {
     loading.value = false
   }
@@ -94,6 +200,13 @@ async function onImportFile(event: Event) {
   try {
     const text = await file.text()
     const doc = JSON.parse(text)
+    if (doc && doc.format === 'py8n-pack') {
+      // v39: multi-resource pack - preview first, the dialog drives the import
+      packPreview.value = await api.post<PackInspection>('/packs/inspect', doc)
+      pendingPack.value = doc
+      packResult.value = null
+      return
+    }
     const wf = await api.post<Workflow>('/workflows/import', { data: doc })
     navigateTo(`/workflows/${wf.id}`)
   } catch (e: any) {
@@ -375,12 +488,22 @@ watch(
           <button
             class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
             :disabled="importing"
-            title="Import a workflow JSON export"
+            title="Import a workflow JSON export or a .py8n.json template pack"
             @click="importInput?.click()"
           >
             <Loader2 v-if="importing" class="h-4 w-4 animate-spin" />
             <Upload v-else class="h-4 w-4" />
             <span class="hidden sm:inline">Import</span>
+          </button>
+          <button
+            class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
+            :disabled="packBusy"
+            title="Bundle workflows and datasets into one shareable pack"
+            @click="openExportPack"
+          >
+            <Loader2 v-if="packBusy" class="h-4 w-4 animate-spin" />
+            <Download v-else class="h-4 w-4" />
+            <span class="hidden sm:inline">Export pack</span>
           </button>
           <NuxtLink
             to="/templates"
@@ -690,6 +813,14 @@ watch(
                   </div>
                 </div>
                 <button
+                  class="rounded-lg p-1.5 text-zinc-600 opacity-0 transition hover:bg-zinc-800 hover:text-zinc-300 group-hover:opacity-100"
+                  title="Export as template pack (.py8n.json)"
+                  :disabled="packBusy"
+                  @click.stop="exportOne(wf)"
+                >
+                  <Download class="h-4 w-4" />
+                </button>
+                <button
                   class="rounded-lg p-1.5 text-zinc-600 opacity-0 transition hover:bg-rose-500/10 hover:text-rose-400 group-hover:opacity-100"
                   title="Delete workflow"
                   @click.stop="removeWorkflow(wf)"
@@ -833,6 +964,167 @@ watch(
             {{ folderModalMode === 'create' ? 'Create folder' : 'Save' }}
           </button>
         </div>
+      </div>
+    </div>
+
+    <!-- v39 export pack modal: pick workflows + datasets, download one bundle -->
+    <div
+      v-if="showExportPack"
+      class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
+      @click.self="showExportPack = false"
+    >
+      <div class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
+        <h3 class="mb-1 text-lg font-bold">Export template pack</h3>
+        <p class="mb-5 text-xs text-zinc-500">
+          Bundles the selected workflows and dataset snapshots into a single .json file you can
+          re-import on any Py8n instance.
+        </p>
+        <div class="mb-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+          <div>
+            <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              Workflows ({{ workflows.length }})
+            </p>
+            <p v-if="!workflows.length" class="text-xs text-zinc-600">No workflows yet.</p>
+            <label
+              v-for="wf in workflows"
+              :key="wf.id"
+              class="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-2 py-1.5 text-sm transition hover:bg-zinc-800/60"
+            >
+              <span class="flex min-w-0 items-center gap-2">
+                <input v-model="packWfSel[wf.id]" type="checkbox" class="accent-orange-500" />
+                <span class="truncate">{{ wf.name }}</span>
+              </span>
+              <span class="shrink-0 text-[11px] text-zinc-600">{{ wf.node_count }} nodes</span>
+            </label>
+          </div>
+          <div>
+            <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">
+              Datasets ({{ datasets.length }})
+            </p>
+            <p v-if="!datasets.length" class="text-xs text-zinc-600">No datasets yet.</p>
+            <label
+              v-for="ds in datasets"
+              :key="ds.id"
+              class="flex cursor-pointer items-center justify-between gap-3 rounded-xl px-2 py-1.5 text-sm transition hover:bg-zinc-800/60"
+            >
+              <span class="flex min-w-0 items-center gap-2">
+                <input v-model="packDsSel[ds.id]" type="checkbox" class="accent-orange-500" />
+                <span class="truncate">{{ ds.name }}</span>
+              </span>
+              <span class="shrink-0 text-[11px] text-zinc-600">{{ ds.row_count }} rows</span>
+            </label>
+          </div>
+        </div>
+        <div class="mt-4 flex items-center justify-between gap-2 border-t border-zinc-800 pt-4">
+          <span class="text-xs text-zinc-500">
+            {{ packSelCounts.total ? `${packSelCounts.w} workflow(s) + ${packSelCounts.d} dataset(s) selected` : 'Nothing selected' }}
+          </span>
+          <div class="flex gap-2">
+            <button class="rounded-xl px-4 py-2 text-sm text-zinc-400 transition hover:text-zinc-200" @click="showExportPack = false">
+              Cancel
+            </button>
+            <button
+              class="inline-flex items-center gap-2 rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:opacity-50"
+              :disabled="packBusy || !packSelCounts.total"
+              @click="downloadExportPack"
+            >
+              <Loader2 v-if="packBusy" class="h-4 w-4 animate-spin" />
+              <Download v-else class="h-4 w-4" />
+              Download pack
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- v39 import preview modal: what a pack import would do -->
+    <div
+      v-if="packPreview"
+      class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
+      @click.self="closePackPreview"
+    >
+      <div class="flex max-h-[85vh] w-full max-w-lg flex-col rounded-2xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
+        <template v-if="!packResult">
+          <h3 class="mb-1 text-lg font-bold">Import template pack</h3>
+          <p class="mb-5 text-xs text-zinc-500">
+            {{ packPreview.workflow_count }} workflow(s) and {{ packPreview.dataset_count }} dataset(s) inside.
+            Review before anything is created.
+          </p>
+          <div class="mb-4 min-h-0 flex-1 space-y-5 overflow-y-auto pr-1">
+            <div>
+              <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Workflows</p>
+              <div
+                v-for="w in packPreview.workflows"
+                :key="w.name"
+                class="mb-1.5 rounded-xl border border-zinc-800 px-3 py-2"
+                :class="w.valid ? '' : 'border-rose-500/40 bg-rose-500/5'"
+              >
+                <div class="flex items-center justify-between gap-2 text-sm">
+                  <span class="truncate">{{ w.name }}</span>
+                  <span class="shrink-0 text-[11px]" :class="w.valid ? 'text-zinc-600' : 'text-rose-400'">
+                    {{ w.valid ? `${w.node_count} nodes` : 'invalid graph' }}
+                  </span>
+                </div>
+                <p v-if="!w.valid" class="mt-1 text-[11px] text-rose-300/80">{{ w.error }}</p>
+                <p v-else-if="w.exists" class="mt-1 text-[11px] text-zinc-600">A workflow with this name already exists - it will be imported again.</p>
+              </div>
+            </div>
+            <div>
+              <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500">Datasets</p>
+              <div
+                v-for="d in packPreview.datasets"
+                :key="d.name"
+                class="mb-1.5 rounded-xl border border-zinc-800 px-3 py-2"
+                :class="d.invalid_name ? 'border-rose-500/40 bg-rose-500/5' : ''"
+              >
+                <div class="flex items-center justify-between gap-2 text-sm">
+                  <span class="truncate">{{ d.name }}</span>
+                  <span class="shrink-0 text-[11px]" :class="d.invalid_name ? 'text-rose-400' : 'text-zinc-600'">
+                    {{ d.invalid_name ? 'invalid name' : `${d.rows} rows` }}
+                  </span>
+                </div>
+                <p v-if="d.rename_to" class="mt-1 text-[11px] text-amber-300/80">Name taken - will be created as "{{ d.rename_to }}".</p>
+              </div>
+            </div>
+            <p v-for="wn in packPreview.warnings" :key="wn" class="text-[11px] text-amber-300/80">{{ wn }}</p>
+          </div>
+          <div class="mt-4 flex justify-end gap-2 border-t border-zinc-800 pt-4">
+            <button class="rounded-xl px-4 py-2 text-sm text-zinc-400 transition hover:text-zinc-200" @click="closePackPreview">
+              Cancel
+            </button>
+            <button
+              class="inline-flex items-center gap-2 rounded-xl bg-orange-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-orange-400 disabled:opacity-50"
+              :disabled="packImporting"
+              @click="confirmPackImport"
+            >
+              <Loader2 v-if="packImporting" class="h-4 w-4 animate-spin" />
+              Import pack
+            </button>
+          </div>
+        </template>
+        <template v-else>
+          <h3 class="mb-1 text-lg font-bold">Pack imported</h3>
+          <p class="mb-5 text-xs text-zinc-500">Imported as inactive; datasets landed through the normal parquet pipeline.</p>
+          <div class="mb-4 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1 text-sm">
+            <div v-if="packResult.workflows.length">
+              <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">Created {{ packResult.workflows.length }} workflow(s)</p>
+              <p v-for="w in packResult.workflows" :key="w.id" class="truncate text-zinc-300">{{ w.name }}</p>
+            </div>
+            <div v-if="packResult.datasets.length">
+              <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">Created {{ packResult.datasets.length }} dataset(s)</p>
+              <p v-for="d in packResult.datasets" :key="d.id" class="truncate text-zinc-300">{{ d.name }} ({{ d.row_count }} rows)</p>
+            </div>
+            <div v-if="packResult.skipped.length">
+              <p class="mb-2 text-xs font-semibold uppercase tracking-wider text-rose-400">Skipped {{ packResult.skipped.length }} item(s)</p>
+              <p v-for="s in packResult.skipped" :key="s.name" class="truncate text-zinc-400" :title="s.reason">{{ s.name }}: {{ s.reason }}</p>
+            </div>
+          </div>
+          <div class="mt-4 flex justify-end border-t border-zinc-800 pt-4">
+            <button class="rounded-xl bg-zinc-800 px-4 py-2 text-sm font-medium text-zinc-200 transition hover:bg-zinc-700" @click="closePackPreview">
+              Done
+            </button>
+          </div>
+        </template>
       </div>
     </div>
   </div>

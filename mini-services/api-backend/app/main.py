@@ -71,6 +71,7 @@ from .api.executions import router as executions_router  # noqa: E402
 from .api.folders import router as folders_router  # noqa: E402
 from .api.insights import router as insights_router  # noqa: E402
 from .api.node_defs import router as node_defs_router  # noqa: E402
+from .api.packs import router as packs_router  # noqa: E402 (v39)
 from .api.schedules import router as schedules_router  # noqa: E402
 from .api.settings import router as settings_router  # noqa: E402
 from .api.templates import router as templates_router  # noqa: E402
@@ -108,6 +109,7 @@ app.include_router(insights_router, prefix=API, dependencies=ENFORCED)
 app.include_router(settings_router, prefix=API, dependencies=ENFORCED)
 app.include_router(node_defs_router, prefix=API, dependencies=ENFORCED)
 app.include_router(templates_router, prefix=API, dependencies=ENFORCED)
+app.include_router(packs_router, prefix=API, dependencies=ENFORCED)  # v39
 app.include_router(ws_router)  # /ws/...
 
 
