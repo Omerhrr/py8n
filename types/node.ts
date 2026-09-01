@@ -40,6 +40,23 @@ export interface NodeSettings {
   max_retries: number
   retry_wait_ms: number
   continue_on_fail: boolean
+  // v38 resilience pack
+  timeout_ms?: number
+  fallback_enabled?: boolean
+  fallback_value?: any
+}
+
+export interface QueueItem {
+  execution_id: string
+  workflow_id: string
+  workflow_name?: string | null
+  trigger_type?: string | null
+  status: string
+  started_at?: string | null
+  duration_ms?: number | null
+  nodes_done?: number | null
+  nodes_total?: number | null
+  current_node?: string | null
 }
 
 export interface NodeSpec {

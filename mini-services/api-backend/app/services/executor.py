@@ -23,6 +23,27 @@ _cancel_flags: dict[str, Any] = {}
 # Hard cancellation: execution_id -> asyncio.Task (task.cancel() aborts at the
 # next await point, e.g. a long delay node - no waiting for it to finish).
 _running_tasks: dict[str, Any] = {}
+# v38 live progress for the queue view: execution_id -> {workflow_id,
+# workflow_name, trigger_type, started_at, nodes_total, nodes_done,
+# current_node, status}. Fed by the emit wrapper below, popped when the run
+# leaves the running state. Lost on restart (the queue endpoint falls back to
+# the DB rows for anything not tracked here).
+_live_progress: dict[str, dict] = {}
+
+
+def _track_progress(execution_id: str, event: dict) -> None:
+    """Update the in-memory progress snapshot from runner events (best effort)."""
+    prog = _live_progress.get(execution_id)
+    if prog is None:
+        return
+    kind = event.get("event")
+    if kind == "node_started":
+        prog["current_node"] = event.get("node_name")
+    elif kind == "node_finished":
+        prog["nodes_done"] = prog.get("nodes_done", 0) + 1
+        prog["current_node"] = None
+    elif kind == "execution_finished":
+        prog["status"] = event.get("status", "finished")
 
 
 async def execute_workflow(
@@ -62,9 +83,20 @@ async def execute_workflow(
             await session.commit()
 
     async def emit(event: dict) -> None:
+        _track_progress(execution_id, event)
         await bus.publish(execution_id, event)
 
     cancel_event = _cancel_flags[execution_id] = asyncio.Event()
+    _live_progress[execution_id] = {
+        "workflow_id": workflow_id,
+        "workflow_name": workflow.name,
+        "trigger_type": trigger_type,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "nodes_total": len(graph.nodes),
+        "nodes_done": 0,
+        "current_node": None,
+        "status": "running",
+    }
     runner = GraphRunner(
         graph,
         workflow_id=workflow_id,
@@ -109,6 +141,7 @@ async def execute_workflow(
         }
     finally:
         _cancel_flags.pop(execution_id, None)
+        _live_progress.pop(execution_id, None)
 
     waiting = result["status"] == "waiting"
     async with AsyncSessionLocal() as session:

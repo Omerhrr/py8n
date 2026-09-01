@@ -505,6 +505,7 @@ function updateSettings(patch: Record<string, any>) {
   if (!vf) return
   const current = vf.data.spec.settings || {
     retry_on_fail: false, max_retries: 2, retry_wait_ms: 500, continue_on_fail: false,
+    timeout_ms: 0, fallback_enabled: false, fallback_value: null,
   }
   vf.data.spec.settings = { ...current, ...patch }
   store.markDirty()

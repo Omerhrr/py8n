@@ -38,6 +38,23 @@ class NodeSettings(BaseModel):
         default=False,
         description="On final failure, keep the flow alive: emit {'error': ...} on the main handle",
     )
+    # v38 resilience pack: a wall-clock timeout enforced by the runner around
+    # every attempt (a timeout is a normal failure - retries apply), and a
+    # fallback value emitted on the main handle when every attempt failed.
+    timeout_ms: int = Field(
+        default=0,
+        ge=0,
+        le=600_000,
+        description="Wall-clock timeout per attempt (ms); 0 = unlimited",
+    )
+    fallback_enabled: bool = Field(
+        default=False,
+        description="On final failure, emit the fallback value instead of failing the run",
+    )
+    fallback_value: Any = Field(
+        default=None,
+        description="Payload placed on the main handle when the fallback fires",
+    )
 
 
 class NodeSpec(BaseModel):

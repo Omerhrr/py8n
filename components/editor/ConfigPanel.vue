@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { Trash2, KeyRound, Plus, ChevronDown, AlertTriangle, Settings2, RotateCcw, Ban, Pin, FlaskConical, Download, Loader2, Bot } from 'lucide-vue-next'
+import { Trash2, KeyRound, Plus, ChevronDown, AlertTriangle, Settings2, RotateCcw, Ban, Pin, FlaskConical, Download, Loader2, Bot, LifeBuoy } from 'lucide-vue-next'
 import ExprInput from '~/components/editor/ExprInput.vue'
 import type { Credential, NodeDefinition, NodeSpec, NodeSettings, NodeTestResult, ParamProperty } from '~/types/node'
 
@@ -182,8 +182,21 @@ watch(
 // ---- node settings (retry / continue-on-fail) -----------------------------
 const showSettings = ref(false)
 const settings = computed<NodeSettings>(
-  () => props.node?.settings || { retry_on_fail: false, max_retries: 2, retry_wait_ms: 500, continue_on_fail: false },
+  () => props.node?.settings || { retry_on_fail: false, max_retries: 2, retry_wait_ms: 500, continue_on_fail: false, timeout_ms: 0, fallback_enabled: false, fallback_value: null },
 )
+// v38: the fallback payload is edited as JSON; unparsable input falls back to
+// the raw string so nothing the user types is silently dropped.
+const fallbackText = computed(() => {
+  const v = settings.value.fallback_value
+  if (v == null) return ''
+  try { return JSON.stringify(v, null, 2) } catch { return String(v) }
+})
+function onFallbackInput(e: Event) {
+  const raw = (e.target as HTMLTextAreaElement).value
+  let parsed: any = raw
+  try { parsed = JSON.parse(raw) } catch { /* keep the raw string */ }
+  emit('update-settings', { fallback_value: parsed })
+}
 
 // ---- v17 pinned output + test step -----------------------------------------
 const showPinTest = ref(false)
@@ -785,6 +798,16 @@ async function runTest() {
                 />
               </div>
             </div>
+            <div>
+              <label class="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Timeout (ms, 0 = off)</label>
+              <input
+                type="number" min="0" max="600000" step="100"
+                :value="settings.timeout_ms ?? 0"
+                class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs outline-none focus:border-orange-500/60"
+                @change="emit('update-settings', { timeout_ms: Math.max(0, Number(($event.target as HTMLInputElement).value) || 0) })"
+              />
+              <p class="mt-1 text-[10px] leading-snug text-zinc-600">Wall-clock cap per attempt. A timeout counts as a normal failure, so retries apply.</p>
+            </div>
             <div class="flex items-center justify-between">
               <span class="flex items-center gap-1.5 text-[11px] text-zinc-400">
                 <RotateCcw class="h-3 w-3" /> Continue on fail
@@ -800,6 +823,28 @@ async function runTest() {
             <p class="text-[10px] leading-snug text-zinc-600">
               Continue: the failure is emitted as data ({"{ error, failed_node }"}) and the flow keeps going instead of stopping.
             </p>
+            <div class="flex items-center justify-between">
+              <span class="flex items-center gap-1.5 text-[11px] text-zinc-400">
+                <LifeBuoy class="h-3 w-3" /> Fallback value
+              </span>
+              <button
+                class="flex h-5 w-9 items-center rounded-full transition"
+                :class="settings.fallback_enabled ? 'bg-orange-500' : 'bg-zinc-700'"
+                @click="emit('update-settings', { fallback_enabled: !settings.fallback_enabled })"
+              >
+                <span class="mx-0.5 h-4 w-4 rounded-full bg-white shadow transition" :class="settings.fallback_enabled ? 'translate-x-4' : ''" />
+              </button>
+            </div>
+            <div v-if="settings.fallback_enabled">
+              <label class="mb-1 block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Fallback payload (JSON)</label>
+              <textarea
+                rows="3"
+                :value="fallbackText"
+                class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 font-mono text-[11px] outline-none focus:border-orange-500/60"
+                @change="onFallbackInput($event as Event)"
+              />
+              <p class="mt-1 text-[10px] leading-snug text-zinc-600">Emitted on the main handle when every attempt failed; the flow keeps going. Takes precedence over continue-on-fail.</p>
+            </div>
           </div>
         </div>
       </div>

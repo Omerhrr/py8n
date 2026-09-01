@@ -71,6 +71,72 @@ async def list_executions(
     ]
 
 
+@router.get("/queue")
+async def execution_queue(
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """v38: the live queue - every running / waiting execution with progress.
+
+    Merges the DB rows (source of truth, survives restarts) with the
+    executor's in-memory progress map (nodes done / total, current node).
+    Progress fields are null for rows the map no longer tracks (e.g. resumed
+    runs after a restart). Ordered oldest first: the queue is FIFO-ish.
+    """
+    from datetime import datetime
+
+    from ..auth import visible_workflow_ids
+    from ..services.executor import _live_progress
+
+    stmt = (
+        select(ExecutionLog)
+        .where(ExecutionLog.status.in_(["running", "waiting"]))
+        .order_by(ExecutionLog.started_at.asc())
+        .limit(100)
+    )
+    if user is not None:
+        visible = await visible_workflow_ids(db, user)
+        stmt = stmt.where(ExecutionLog.workflow_id.in_(visible))
+    rows = (await db.execute(stmt)).scalars().all()
+
+    names: dict[str, str] = {}
+    wf_ids = {r.workflow_id for r in rows}
+    if wf_ids:
+        name_rows = (
+            await db.execute(select(Workflow.id, Workflow.name).where(Workflow.id.in_(wf_ids)))
+        ).all()
+        names = dict(name_rows)
+
+    now = datetime.utcnow()  # started_at is stored naive (sqlite) - stay naive
+    items = []
+    for r in rows:
+        prog = _live_progress.get(r.id) or {}
+        nodes_total = prog.get("nodes_total")
+        nodes_done = prog.get("nodes_done", 0)
+        if nodes_total:
+            nodes_done = min(nodes_done, nodes_total)
+        started = r.started_at
+        items.append(
+            {
+                "execution_id": r.id,
+                "workflow_id": r.workflow_id,
+                "workflow_name": names.get(r.workflow_id),
+                "trigger_type": r.trigger_type,
+                "status": r.status,
+                "started_at": started.isoformat() if started else None,
+                "duration_ms": (
+                    int((now - started).total_seconds() * 1000)
+                    if started and r.status == "running"
+                    else r.duration_ms
+                ),
+                "nodes_done": nodes_done,
+                "nodes_total": nodes_total,
+                "current_node": prog.get("current_node"),
+            }
+        )
+    return {"items": items, "total": len(items)}
+
+
 @router.get("/{execution_id}")
 async def get_execution(execution_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     r = await db.get(ExecutionLog, execution_id)

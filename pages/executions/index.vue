@@ -4,7 +4,7 @@ import {
   RefreshCw, Activity, ChevronDown, ChevronUp, Clock, Webhook, Play, Copy, Check,
   PauseCircle, Send, Square, Ban,
 } from 'lucide-vue-next'
-import type { ExecutionDetail, ExecutionSummary, NodeRun, WorkflowListItem } from '~/types/node'
+import type { ExecutionDetail, ExecutionSummary, NodeRun, QueueItem, WorkflowListItem } from '~/types/node'
 
 const { api } = useApi()
 const store = usePy8nStore()
@@ -21,6 +21,27 @@ const resuming = ref(false)
 const resumeError = ref<string | null>(null)
 
 const executions = computed(() => store.allExecutions)
+
+// v38: the live queue (running / waiting executions with node progress)
+const queue = ref<QueueItem[]>([])
+async function refreshQueue() {
+  try {
+    const res = await api.get<{ items: QueueItem[]; total: number }>('/executions/queue')
+    queue.value = res.items || []
+  } catch { /* backend hiccup - keep last data */ }
+}
+function queueProgress(item: QueueItem): number {
+  if (!item.nodes_total) return 0
+  return Math.min(100, Math.round(((item.nodes_done || 0) / item.nodes_total) * 100))
+}
+async function cancelQueued(item: QueueItem) {
+  try {
+    await store.cancelExecution(item.execution_id)
+    setTimeout(refreshQueue, 400)
+  } catch (e: any) {
+    console.warn('cancel failed', e)
+  }
+}
 
 // ------------------------------------------------------------------ stats
 const stats = computed(() => {
@@ -73,14 +94,20 @@ async function refresh({ silent = false } = {}) {
 }
 
 let pollTimer: ReturnType<typeof setInterval> | null = null
+let queueTimer: ReturnType<typeof setInterval> | null = null
 onMounted(async () => {
   try {
     workflows.value = await api.get<WorkflowListItem[]>('/workflows?limit=100')
   } catch { /* non-fatal */ }
   await refresh()
   pollTimer = setInterval(() => refresh({ silent: true }), 5000)
+  await refreshQueue()
+  queueTimer = setInterval(refreshQueue, 2000)
 })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  if (queueTimer) clearInterval(queueTimer)
+})
 
 function setStatus(s: '' | 'success' | 'error' | 'running' | 'waiting' | 'cancelled') {
   statusFilter.value = s
@@ -283,6 +310,50 @@ const nodeRunsOf = (detail: ExecutionDetail | null): NodeRun[] => detail?.node_r
         <div class="col-span-2 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 sm:col-span-1">
           <p class="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Success rate</p>
           <p class="mt-1 text-2xl font-bold tabular-nums">{{ stats.rate }}<span class="text-sm text-zinc-500">%</span></p>
+        </div>
+      </section>
+
+      <!-- v38 live queue: running / waiting executions with node progress -->
+      <section v-if="queue.length" class="mb-5">
+        <div class="mb-2 flex items-center gap-2">
+          <h2 class="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Queue</h2>
+          <span class="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold text-amber-400">{{ queue.length }} live</span>
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div
+            v-for="item in queue"
+            :key="item.execution_id"
+            class="rounded-2xl border p-4"
+            :class="item.status === 'running' ? 'border-amber-500/30 bg-amber-500/5' : 'border-zinc-800 bg-zinc-900/40'"
+          >
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <p class="truncate text-sm font-semibold text-zinc-100">{{ item.workflow_name || 'Unnamed workflow' }}</p>
+                <p class="mt-0.5 text-[10px] uppercase tracking-wider text-zinc-500">{{ item.trigger_type || 'manual' }} · {{ fmtDuration(item.duration_ms) }}</p>
+              </div>
+              <span class="flex shrink-0 items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider" :class="item.status === 'running' ? 'text-amber-400' : 'text-zinc-400'">
+                <Loader2 v-if="item.status === 'running'" class="h-3.5 w-3.5 animate-spin" />
+                <PauseCircle v-else class="h-3.5 w-3.5" />
+                {{ item.status }}
+              </span>
+            </div>
+            <div class="mt-3">
+              <div class="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                <div class="h-full rounded-full bg-gradient-to-r from-orange-500 to-amber-400 transition-all duration-500" :style="{ width: queueProgress(item) + '%' }" />
+              </div>
+              <p class="mt-1.5 truncate text-[10px] text-zinc-500">
+                <template v-if="item.status === 'waiting'">paused at a Wait node - resume from the run detail</template>
+                <template v-else-if="item.current_node">running {{ item.current_node }}</template>
+                <template v-else>{{ item.nodes_done ?? 0 }}/{{ item.nodes_total ?? '?' }} nodes done</template>
+              </p>
+            </div>
+            <button
+              class="mt-3 inline-flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1 text-[11px] text-zinc-300 transition hover:border-rose-500/60 hover:text-rose-300"
+              @click="cancelQueued(item)"
+            >
+              <Ban class="h-3 w-3" /> Cancel
+            </button>
+          </div>
         </div>
       </section>
 

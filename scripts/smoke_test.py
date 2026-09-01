@@ -2398,6 +2398,105 @@ def main() -> None:
     req("DELETE", f"/workflows/{wf37['id']}", headers={"Authorization": f"Bearer {tok37}"})
     print("v37 auth and multi-user OK")
 
+    # ------------------------------------------------------------- v38: resilience pack + queue
+    status, health38 = req("GET", "/health")
+    ver38 = tuple(int(x) for x in health38.get("version", "0").split(".")[:2])
+    assert status == 200 and ver38 >= (1, 38), health38
+    tag38 = uuid.uuid4().hex[:6]
+
+    def _graph_38(nodes: list[dict]) -> dict:
+        return {
+            "nodes": nodes,
+            "edges": [
+                {"id": f"e{i}", "source": nodes[i]["id"], "target": nodes[i + 1]["id"],
+                 "sourceHandle": "main", "targetHandle": "main"}
+                for i in range(len(nodes) - 1)
+            ],
+        }
+
+    def _run_and_wait_38(wf_id: str) -> dict:
+        status, run = req("POST", f"/workflows/{wf_id}/run", {"payload": {}})
+        assert status in (200, 202), run
+        ex_id = run["execution_id"]
+        final = None
+        for _ in range(80):
+            status, det = req("GET", f"/executions/{ex_id}")
+            assert status == 200, det
+            if det["status"] != "running":
+                final = det
+                break
+            time.sleep(0.2)
+        assert final is not None, "run never finished"
+        return final
+
+    # fallback: a node that always fails, kept alive by a fallback value
+    graph38a = _graph_38([
+        {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "boom", "type": "code", "name": "Boom", "position": {"x": 120, "y": 0},
+         "parameters": {"code": "result = 1 / 0"},
+         "settings": {"fallback_enabled": True, "fallback_value": {"kept": True}}},
+        {"id": "echo", "type": "code", "name": "Echo", "position": {"x": 240, "y": 0},
+         "parameters": {"code": "result = input_data"}},
+    ])
+    status, wf38a = req("POST", "/workflows", {"name": f"SMOKE38 Fallback {tag38}", "graph": graph38a})
+    assert status == 201, wf38a
+    final38a = _run_and_wait_38(wf38a["id"])
+    assert final38a["status"] == "success", final38a.get("error")
+    runs38a = {r["node_id"]: r for r in final38a["node_runs"]}
+    assert runs38a["boom"].get("fallback_used") is True, runs38a["boom"]
+    assert runs38a["boom"]["status"] == "error", runs38a["boom"]
+    assert runs38a["echo"]["output"] == {"result": {"kept": True}}, runs38a["echo"]
+    print(f"fallback OK (boom errored, flow delivered {runs38a['echo']['output']['result']})")
+    req("DELETE", f"/workflows/{wf38a['id']}")
+
+    # timeout: a 5s delay capped at 250ms must fail fast with the timeout message
+    graph38b = _graph_38([
+        {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "slow", "type": "delay", "name": "Delay", "position": {"x": 120, "y": 0},
+         "parameters": {"seconds": 5}, "settings": {"timeout_ms": 250}},
+    ])
+    status, wf38b = req("POST", "/workflows", {"name": f"SMOKE38 Timeout {tag38}", "graph": graph38b})
+    assert status == 201, wf38b
+    t038 = time.monotonic()
+    final38b = _run_and_wait_38(wf38b["id"])
+    assert final38b["status"] == "error", final38b
+    assert "timed out after 0.25s" in (final38b.get("error") or ""), final38b.get("error")
+    assert time.monotonic() - t038 < 4, "timeout did not cut in"
+    print("timeout OK (5s delay cut at 250ms)")
+    req("DELETE", f"/workflows/{wf38b['id']}")
+
+    # queue: launch a 4s delay, catch it in the live queue, cancel it
+    graph38c = _graph_38([
+        {"id": "t", "type": "manual_trigger", "name": "Trigger", "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "d", "type": "delay", "name": "Delay", "position": {"x": 120, "y": 0}, "parameters": {"seconds": 4}},
+    ])
+    status, wf38c = req("POST", "/workflows", {"name": f"SMOKE38 Queue {tag38}", "graph": graph38c})
+    assert status == 201, wf38c
+    status, run38c = req("POST", f"/workflows/{wf38c['id']}/run", {"payload": {}})
+    assert status in (200, 202), run38c
+    ex38c = run38c["execution_id"]
+    time.sleep(0.5)  # trigger finishes, delay starts sleeping
+    status, q38 = req("GET", "/executions/queue")
+    assert status == 200 and q38.get("total", 0) >= 1, q38
+    item38 = next((i for i in q38["items"] if i["execution_id"] == ex38c), None)
+    assert item38 is not None, "run missing from the queue"
+    assert item38["status"] == "running" and item38["nodes_total"] == 2, item38
+    assert item38["current_node"] == "Delay", item38
+    status, _ = req("POST", f"/executions/{ex38c}/cancel", {})
+    assert status == 202, status
+    left38 = False
+    for _ in range(40):
+        status, q38 = req("GET", "/executions/queue")
+        ids38 = [i["execution_id"] for i in q38.get("items", [])]
+        if ex38c not in ids38:
+            left38 = True
+            break
+        time.sleep(0.2)
+    assert left38, "cancelled run never left the queue"
+    print(f"queue OK (live progress, cancel -> left; peak total {q38.get('total')})")
+    req("DELETE", f"/workflows/{wf38c['id']}")
+    print("v38 resilience pack + queue OK")
+
     for wf in (pipe, child, parent, imported, dup, integ, hook, integ2):
         req("DELETE", f"/workflows/{wf['id']}")
     print("cleaned up temp workflows")

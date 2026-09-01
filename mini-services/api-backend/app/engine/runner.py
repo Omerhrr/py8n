@@ -534,20 +534,49 @@ class GraphRunner:
         for attempt in range(attempts):
             if attempt:
                 await asyncio.sleep(cfg.retry_wait_ms / 1000)
+                # v38: make retries visible on the live stream (canvas + SSE/WS
+                # consumers ignore unknown kinds, so this is purely additive).
+                await self.emit(
+                    self._event(
+                        "node_retry",
+                        node_id=node.id,
+                        node_type=node.type,
+                        node_name=node.display_name,
+                        attempt=attempt + 1,
+                        max_attempts=attempts,
+                        last_error=last_error,
+                    )
+                )
             try:
-                result = await instance.run(context)
+                # v38: per-node wall-clock timeout. A timeout is an ordinary
+                # failure - the retry loop applies to it like any other error.
+                if cfg.timeout_ms > 0:
+                    result = await asyncio.wait_for(instance.run(context), timeout=cfg.timeout_ms / 1000)
+                else:
+                    result = await instance.run(context)
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 await self._record(
                     context, node, "success", result.outputs, duration_ms, None,
                     raw_output=result.raw_output, attempt=attempt + 1,
                 )
                 return
+            except asyncio.TimeoutError:
+                last_error = f"timed out after {cfg.timeout_ms / 1000:g}s"
             except TemplateResolutionError as exc:
                 last_error = str(exc)
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{exc}"
 
         duration_ms = int((time.monotonic() - t0) * 1000)
+        if cfg.fallback_enabled:
+            # v38 n8n-style fallback output: the configured value replaces the
+            # failure on the main handle so the flow keeps running; the error
+            # is still recorded (status "error" on the node, run continues).
+            await self._record(
+                context, node, "error", {"main": cfg.fallback_value}, duration_ms, last_error,
+                raw_output=cfg.fallback_value, continued=True, attempt=attempts, fallback=True,
+            )
+            return
         if cfg.continue_on_fail:
             # n8n parity: surface the error as data and keep the flow alive.
             payload = {"error": last_error, "failed_node": node.display_name}
@@ -648,6 +677,7 @@ class GraphRunner:
         continued: bool = False,
         attempt: int = 1,
         pinned: bool = False,
+        fallback: bool = False,
     ) -> None:
         """Persist node run, update context state, activate edges, emit event.
 
@@ -694,8 +724,10 @@ class GraphRunner:
             run_record["input"] = self._capture(next(iter(context.current_inputs.values())))
         elif context.current_inputs:
             run_record["input"] = self._capture(context.current_inputs)
-        if continued:
+        if continued and not fallback:
             run_record["continued_on_fail"] = True
+        if fallback:
+            run_record["fallback_used"] = True  # v38: output came from the fallback value
         if attempt > 1:
             run_record["attempts"] = attempt
         if pinned:

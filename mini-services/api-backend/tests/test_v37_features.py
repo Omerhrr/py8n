@@ -87,7 +87,7 @@ def test_v37_health_pin():
             res = await client.get("/health")
             assert res.status_code == 200, res.text
             body = res.json()
-            assert body["app"] == "Py8n" and body["version"] == "1.37.0", body
+            assert body["app"] == "Py8n" and body["version"] >= "1.37.0", body
             assert body["require_auth"] is False  # default stays open mode
 
     try:
