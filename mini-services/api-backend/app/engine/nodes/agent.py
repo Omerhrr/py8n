@@ -186,6 +186,42 @@ class AgentNode(BaseNode):
         text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
         return text[:MAX_TOOL_RESULT_CHARS]
 
+    MAX_PREVIEW_ROWS = 3
+    MAX_PREVIEW_COLS = 8
+    MAX_PREVIEW_CELL_CHARS = 60
+
+    @classmethod
+    def _data_preview(cls, value: Any) -> dict | None:
+        """v40: compact row preview attached to agent_tool_result frames so the
+        live trace can render actual dataset rows instead of a JSON blob.
+        Only dataset-shaped payloads ({columns: [...], rows: [...]}) qualify."""
+        if not isinstance(value, dict):
+            return None
+        columns = value.get("columns")
+        rows = value.get("rows")
+        if not isinstance(columns, list) or not isinstance(rows, list) or not columns:
+            return None
+        cols = [str(c) for c in columns][: cls.MAX_PREVIEW_COLS]
+
+        def _cell(row: Any, col: str) -> str:
+            v = row.get(col) if isinstance(row, dict) else row
+            return str(v)[: cls.MAX_PREVIEW_CELL_CHARS]
+
+        shown = rows[: cls.MAX_PREVIEW_ROWS]
+        total = value.get("row_count", len(rows))
+        try:
+            total = int(total)
+        except (TypeError, ValueError):
+            total = len(rows)
+        return {
+            "columns": cols,
+            "rows": [[_cell(r, c) for c in cols] for r in shown],
+            "total_rows": total,
+            "rows_shown": len(shown),
+            "columns_shown": len(cols),
+            "columns_total": len(columns),
+        }
+
     # ------------------------------------------------------------------
     # v34 tool kinds - dataset (read-only SQL) and code (sandboxed Python)
     # ------------------------------------------------------------------
@@ -261,13 +297,15 @@ class AgentNode(BaseNode):
             raise NodeExecutionError(f"code error: {type(exc).__name__}: {exc}") from exc
         return {"result": result, "stdout": stdout.strip()}
 
-    async def _run_tool(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> str:
+    async def _run_tool(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> Any:
+        """Run a tool and return the STRUCTURED value (v40); the caller owns
+        stringification via _truncate so the trace can also preview rows."""
         if tool.kind == "knowledge":
-            return self._truncate(tool.content or "")
+            return tool.content or ""
         if tool.kind == "dataset":
-            return self._truncate(await self._run_tool_dataset(tool, args))
+            return await self._run_tool_dataset(tool, args)
         if tool.kind == "code":
-            return self._truncate(await self._run_tool_code(tool, args))
+            return await self._run_tool_code(tool, args)
         if tool.kind == "http":
             method = str(args.get("method", "GET")).upper()
             url = str(args.get("url", ""))
@@ -287,16 +325,16 @@ class AgentNode(BaseNode):
                         content=None if isinstance(body, (dict, list)) else body,
                     )
             except httpx.HTTPError as exc:
-                return self._truncate({"error": str(exc)})
+                return {"error": str(exc)}
             try:
                 parsed: Any = resp.json()
             except ValueError:
                 parsed = resp.text
-            return self._truncate({"status": resp.status_code, "body": parsed})
+            return {"status": resp.status_code, "body": parsed}
         if tool.kind == "workflow":
             if not tool.workflow_id:
                 raise NodeExecutionError(f"Workflow tool {tool.name!r}: no workflow selected")
-            return self._truncate(await self._run_tool_workflow(tool, args, context))
+            return await self._run_tool_workflow(tool, args, context)
         raise NodeExecutionError(f"Unknown tool kind {tool.kind!r}")
 
     async def _run_tool_workflow(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> Any:
@@ -422,16 +460,22 @@ class AgentNode(BaseNode):
                         "event": "agent_tool_call", "iteration": iterations,
                         "tool": tool.name, "arguments": self._preview(args, MAX_EVENT_ARGS_CHARS),
                     })
-                    result = await self._run_tool(tool, args, context)
+                    value = await self._run_tool(tool, args, context)  # v40: structured
+                    result = self._truncate(value)
                     status = "ok"
                 except NodeExecutionError as exc:
+                    value = None
                     result = f"tool error: {exc}"
                     status = "error"
-                await self._emit_agent(context, {
+                frame = {
                     "event": "agent_tool_result", "iteration": iterations,
                     "tool": tool.name, "status": status,
                     "preview": self._preview(result, MAX_EVENT_PREVIEW_CHARS),
-                })
+                }
+                data_preview = self._data_preview(value) if status == "ok" else None
+                if data_preview is not None:
+                    frame["data"] = data_preview  # v40: row preview for the live trace
+                await self._emit_agent(context, frame)
                 tool_calls.append({"tool": tool.name, "arguments": args, "status": status, "result": result})
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": f"TOOL RESULT {tool.name}: {result}"})

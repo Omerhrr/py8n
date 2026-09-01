@@ -303,7 +303,7 @@ async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSessi
                     # replies, tool calls and results stream out as they happen
                     phase = kind[len("agent_"):]
                     frame = {"phase": phase, "execution_id": execution_id}
-                    for key in ("iteration", "max_iterations", "reply", "tool", "arguments", "status", "preview", "answer"):
+                    for key in ("iteration", "max_iterations", "reply", "tool", "arguments", "status", "preview", "answer", "data"):
                         if key in event:
                             frame[key] = event[key]
                     yield _sse_frame("agent", frame)

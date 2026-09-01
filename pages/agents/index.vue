@@ -21,6 +21,15 @@ interface AgentSummary {
   node_count: number
 }
 // v36: one live trace step per SSE agent frame, rendered as it arrives
+// v40: dataset-shaped tool results also carry a compact row preview
+interface DataPreview {
+  columns: string[]
+  rows: string[][]
+  total_rows: number
+  rows_shown: number
+  columns_shown: number
+  columns_total: number
+}
 interface LiveStep {
   kind: 'iteration' | 'reply' | 'tool_call' | 'tool_result'
   iteration?: number
@@ -29,6 +38,7 @@ interface LiveStep {
   arguments?: string
   status?: string
   preview?: string
+  data?: DataPreview
 }
 interface Turn {
   role: 'user' | 'assistant'
@@ -120,7 +130,7 @@ function handleFrame(turn: Turn, ev: string, data: Record<string, any>) {
     } else if (step === 'tool_call') {
       turn.steps.push({ kind: 'tool_call', iteration: data.iteration, tool: data.tool, arguments: data.arguments })
     } else if (step === 'tool_result') {
-      turn.steps.push({ kind: 'tool_result', iteration: data.iteration, tool: data.tool, status: data.status, preview: data.preview })
+      turn.steps.push({ kind: 'tool_result', iteration: data.iteration, tool: data.tool, status: data.status, preview: data.preview, data: data.data || undefined })
     } else if (step === 'answer') {
       turn.text = typeof data.answer === 'string' ? data.answer : turn.text
     }
@@ -383,7 +393,33 @@ onMounted(() => loadAgents(false))
                       <span class="font-mono" :class="s.status === 'ok' ? 'text-emerald-300' : 'text-rose-300'">{{ s.tool }}</span>
                       <details class="inline">
                         <summary class="cursor-pointer text-zinc-600 hover:text-zinc-400">result</summary>
-                        <pre class="mt-1 max-h-40 max-w-full overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ pretty(s.preview) }}</pre>
+                        <!-- v40: dataset-shaped results render as a real mini table -->
+                        <div v-if="s.data && s.data.rows.length" class="mt-1 max-w-full overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950">
+                          <table class="w-full border-collapse font-mono text-[10px] leading-relaxed">
+                            <thead>
+                              <tr class="border-b border-zinc-800">
+                                <th
+                                  v-for="c in s.data.columns"
+                                  :key="c"
+                                  class="px-2 py-1 text-left font-semibold uppercase tracking-wide text-zinc-500"
+                                >{{ c }}</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              <tr
+                                v-for="(row, ri) in s.data.rows"
+                                :key="ri"
+                                class="border-b border-zinc-800/50 last:border-0"
+                              >
+                                <td v-for="(cell, ci) in row" :key="ci" class="max-w-[16rem] truncate px-2 py-1 text-zinc-400">{{ cell }}</td>
+                              </tr>
+                            </tbody>
+                          </table>
+                          <p class="border-t border-zinc-800 px-2 py-1 text-[9px] text-zinc-600">
+                            {{ s.data.rows_shown }} of {{ s.data.total_rows }} rows<template v-if="s.data.columns_shown < s.data.columns_total"> - {{ s.data.columns_shown }} of {{ s.data.columns_total }} columns</template>
+                          </p>
+                        </div>
+                        <pre v-else class="mt-1 max-h-40 max-w-full overflow-auto whitespace-pre-wrap rounded-lg border border-zinc-800 bg-zinc-950 p-2 font-mono text-[10px] leading-relaxed text-zinc-400">{{ pretty(s.preview) }}</pre>
                       </details>
                     </div>
                   </template>

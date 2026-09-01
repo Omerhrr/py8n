@@ -27,6 +27,42 @@ def req(method: str, path: str, body: dict | None = None, headers: dict | None =
         return e.code, json.loads(e.read().decode() or "{}")
 
 
+def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 3) -> list:
+    """POST /chat/{id}/stream and return the parsed SSE frames.
+
+    Retries with a backoff when the upstream LLM gateway rate-limits (its 429
+    and 502 bubbles arrive either as HTTP errors or as a terminal error frame).
+    """
+    last_exc: Exception | None = None
+    for _ in range(attempts):
+        try:
+            with httpx.Client(base_url=BASE, timeout=180) as hc:
+                with hc.stream("POST", f"/chat/{wf_id}/stream", json={"message": message, "session_id": session_id}) as r:
+                    raw = "".join(chunk.decode() for chunk in r.iter_bytes())
+        except Exception as exc:  # noqa: BLE001 - transport level, retryable
+            last_exc = exc
+            time.sleep(45)
+            continue
+        frames = []
+        for block in raw.split("\n\n"):
+            ev_name = data_line = None
+            for line in block.split("\n"):
+                if line.startswith("event: "):
+                    ev_name = line[7:].strip()
+                elif line.startswith("data: "):
+                    data_line = line[6:]
+            if ev_name and data_line:
+                frames.append((ev_name, json.loads(data_line)))
+        if frames and frames[-1][0] == "error":
+            blob = json.dumps(frames[-1][1])
+            if any(marker in blob for marker in ("429", "502", "Too many requests")):
+                last_exc = RuntimeError(f"LLM gateway rate limited: {blob[:160]}")
+                time.sleep(45)
+                continue
+        return frames
+    raise last_exc if last_exc else RuntimeError("SSE chat retries exhausted")
+
+
 async def ws_test(execution_id: str, expect_nodes: int) -> list:
     import websockets
 
@@ -2330,26 +2366,7 @@ def main() -> None:
         assert status == 201, wf36
         status, act = req("POST", f"/workflows/{wf36['id']}/activate", {})
         assert status == 200, act
-        # raw SSE over urllib (stream endpoint answers text/event-stream)
-        sreq = urllib.request.Request(
-            BASE + f"/chat/{wf36['id']}/stream",
-            data=json.dumps({"message": "How many rows do I have? Reply with the number only.", "session_id": f"smoke36-{tag36}"}).encode(),
-            method="POST", headers={"Content-Type": "application/json"},
-        )
-        with urllib.request.urlopen(sreq, timeout=120) as sresp:
-            ctype = sresp.headers.get("content-type", "")
-            raw = sresp.read().decode()
-        assert ctype.startswith("text/event-stream"), ctype
-        frames = []
-        for block in raw.split("\n\n"):
-            ev_name = data_line = None
-            for line in block.split("\n"):
-                if line.startswith("event: "):
-                    ev_name = line[7:].strip()
-                elif line.startswith("data: "):
-                    data_line = line[6:]
-            if ev_name and data_line:
-                frames.append((ev_name, json.loads(data_line)))
+        frames = sse_chat_frames(wf36["id"], "How many rows do I have? Reply with the number only.", f"smoke36-{tag36}")
         names = [e for e, _ in frames]
         assert names[0] == "start" and names[-1] == "done", names
         phases = [d.get("phase") for e, d in frames if e == "agent"]
@@ -2566,6 +2583,39 @@ def main() -> None:
     req("DELETE", f"/workflows/{wf39['id']}")
     req("DELETE", f"/workflows/{new_wf39['id']}")
     print("v39 template packs OK")
+
+    # ------------------------------------------------------------- v40: dataset rows in the agent trace
+    status, health40 = req("GET", "/health")
+    ver40 = tuple(int(x) for x in health40.get("version", "0").split(".")[:2])
+    assert status == 200 and ver40 >= (1, 40), health40
+    tag40 = uuid.uuid4().hex[:6]
+    status, ds40 = req("POST", "/datasets", {"name": f"smoke40 stations {tag40}", "rows": [
+        {"station": "a", "power": 12}, {"station": "b", "power": 30}, {"station": "c", "power": 7},
+    ]})
+    assert status == 201, ds40
+    # the data-analyst template's system prompt makes the model actually call its
+    # dataset tool (a bare hand-rolled prompt freehands an answer without tools)
+    status, wf40 = req("POST", "/templates/data-analyst/use", {"name": f"SMOKE40 Trace {tag40}"})
+    assert status == 201, wf40
+    status, act40 = req("POST", f"/workflows/{wf40['id']}/activate")
+    assert status == 200, act40
+    sid40 = f"smoke40-{tag40}"
+    frames40 = sse_chat_frames(wf40["id"], f"Query the view named smoke40_stations_{tag40} and reply with the SUM of the power column across all stations. Reply with the number only.", sid40)
+    agent40 = [d for e, d in frames40 if e == "agent"]
+    phases40 = [d.get("phase") for d in agent40]
+    assert "tool_result" in phases40 and "answer" in phases40, phases40
+    tr40 = next(d for d in agent40 if d.get("phase") == "tool_result")
+    assert tr40.get("status") == "ok" and tr40.get("data"), tr40
+    d40 = tr40["data"]
+    assert d40["columns"] == ["station", "power"], d40
+    assert d40["total_rows"] == 3 and d40["rows_shown"] == 3, d40
+    assert d40["rows"][0] == ["a", "12"], d40
+    done40 = frames40[-1][1]
+    assert done40.get("status") == "success", done40
+    print(f"agent trace data preview OK ({d40['total_rows']} rows, cols {d40['columns']}, answer: {done40.get('reply', '')[:40]!r})")
+    req("DELETE", f"/workflows/{wf40['id']}")
+    req("DELETE", f"/datasets/{ds40['id']}")
+    print("v40 dataset row previews OK")
 
     print("\nALL SMOKE TESTS PASSED ✅")
 
