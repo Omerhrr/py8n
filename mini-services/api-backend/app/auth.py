@@ -30,6 +30,7 @@ import json
 import re
 import secrets
 import time
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
@@ -150,19 +151,48 @@ def decode_token(token: str) -> str | None:
 # FastAPI dependencies
 # ----------------------------------------------------------------------
 async def get_optional_user(request: Request, db: AsyncSession = Depends(get_db)):
-    """Resolve the Bearer token to a User, or None (anonymous is legal)."""
-    from .models import User
+    """Resolve the caller to a User, or None (anonymous is legal).
+
+    Two credential channels (v41 added the second):
+      1. ``Authorization: Bearer <jwt>`` - interactive sessions
+      2. ``X-API-Key: py8n_...`` - machine access (scripts, CI); the key
+         authenticates AS ITS OWNER with the same scoping
+    """
+    from .models import ApiKey, User
 
     header = request.headers.get("authorization") or ""
-    if not header.startswith("Bearer "):
-        return None
-    user_id = decode_token(header.removeprefix("Bearer ").strip())
-    if not user_id:
-        return None
-    user = await db.get(User, user_id)
-    if user is None:
-        return None
-    return user
+    if header.startswith("Bearer "):
+        user_id = decode_token(header.removeprefix("Bearer ").strip())
+        if not user_id:
+            return None
+        user = await db.get(User, user_id)
+        if user is None:
+            return None
+        return user
+
+    api_key = (request.headers.get("x-api-key") or "").strip()
+    if api_key:
+        key_hash = hashlib.sha256(api_key.encode()).hexdigest()
+        row = (
+            await db.execute(
+                select(ApiKey).where(ApiKey.key_hash == key_hash, ApiKey.revoked_at.is_(None))
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        # sqlite stores naive datetimes - keep arithmetic in naive UTC (v38 GOTCHA)
+        now = datetime.utcnow()
+        if row.last_used_at is None or (now - row.last_used_at) > timedelta(seconds=60):
+            row.last_used_at = now  # throttled touch
+            await db.commit()
+        if row.owner_id is None:
+            return None
+        user = await db.get(User, row.owner_id)
+        if user is None:
+            return None
+        return user
+
+    return None
 
 
 def enforce_auth(request: Request, user=Depends(get_optional_user)) -> None:

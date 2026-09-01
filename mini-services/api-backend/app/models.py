@@ -336,3 +336,25 @@ class Dashboard(Base):
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ApiKey(Base):
+    """Machine access credential (v41) - long random bearer for API callers.
+
+    The full key (``py8n_`` + 32 url-safe chars) is shown exactly once at
+    creation; only its sha256 hash and a display prefix live in the DB. Keys
+    authenticate as their OWNER (same scoping as the owner's JWT) and work
+    through the ``X-API-Key`` header, so scripts and CI can talk to Py8n even
+    when auth enforcement is on. Revoke = stamp revoked_at (history stays).
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # v37 user
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(20), default="")  # display form, e.g. py8n_ab12cd34
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # sha256 hex
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
