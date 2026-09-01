@@ -350,6 +350,7 @@ async def form_submit(slug: str, body: AppRecordIn, db: AsyncSession = Depends(g
         result = await app_svc.append_record(
             dataset, body.record, dataset.schema_json or [],
             form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+            db=db,  # v44: form submissions land on the dataset version timeline
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -391,6 +392,7 @@ async def create_record(slug: str, body: AppRecordIn, db: AsyncSession = Depends
         result = await app_svc.append_record(
             dataset, body.record, dataset.schema_json or [],
             form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+            db=db,  # v44: form submissions land on the dataset version timeline
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

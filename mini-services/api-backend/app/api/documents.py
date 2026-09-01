@@ -105,9 +105,9 @@ async def to_dataset(
     if df.empty:
         raise HTTPException(status_code=400, detail="The extracted table has no data rows")
     row = await ds_svc.create_from_df(
-        db, final_name, df, source="document", description=description
+        db, final_name, df, source="document", description=description,
+        owner_id=user.id if user else None,
     )
-    row.owner_id = user.id if user else None  # v37
     await db.commit()
     await db.refresh(row)
 

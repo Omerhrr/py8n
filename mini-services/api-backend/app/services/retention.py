@@ -13,7 +13,10 @@ A single AppSetting row (key = ``execution_retention``) stores the policy:
 * age-based: every FINISHED execution older than ``retention_days`` is deleted
   (running executions are never touched);
 * volume-based: per workflow, only the newest ``max_executions_per_workflow``
-  finished executions survive.
+  finished executions survive;
+* orphan sweep (v44): artifact rows whose execution no longer exists (usually
+  because the run was just purged) are deleted together with their files -
+  before this sweep purged executions leaked their chart/model files forever.
 
 Explicit commits everywhere - the yield-dependency teardown commit runs after
 the response is sent, so background/purge writes must commit themselves.
@@ -27,7 +30,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 
 from ..db import AsyncSessionLocal
-from ..models import AppSetting, ExecutionLog
+from ..models import AppSetting, Artifact, ExecutionLog
 
 logger = logging.getLogger("py8n.retention")
 
@@ -102,6 +105,7 @@ async def purge_execution_data() -> dict:
     cap = policy["max_executions_per_workflow"]
     deleted_by_age = 0
     deleted_by_volume = 0
+    deleted_artifacts = 0
 
     async with AsyncSessionLocal() as session:
         override_rows = (
@@ -162,10 +166,29 @@ async def purge_execution_data() -> dict:
                 )
                 deleted_by_volume += result.rowcount or 0
 
+        # v44: sweep artifacts orphaned by the purge (execution row is gone)
+        deleted_artifacts = 0
+        if deleted_by_age or deleted_by_volume:
+            from . import artifacts as art_svc
+
+            orphan_rows = (
+                await session.execute(
+                    select(Artifact).where(
+                        Artifact.execution_id.is_not(None),
+                        Artifact.execution_id.not_in(select(ExecutionLog.id)),
+                    )
+                )
+            ).scalars().all()
+            for art in orphan_rows:
+                art_svc.delete_file(art)
+                await session.delete(art)
+                deleted_artifacts += 1
+
         row = await session.get(AppSetting, SETTING_KEY)
         bookkeeping = dict(policy)
         bookkeeping["last_purge_at"] = datetime.now(timezone.utc).isoformat()
         bookkeeping["last_purge_deleted"] = deleted_by_age + deleted_by_volume
+        bookkeeping["last_purge_artifacts"] = deleted_artifacts
         if row is None:
             row = AppSetting(key=SETTING_KEY, value=bookkeeping)
             session.add(row)
@@ -174,11 +197,12 @@ async def purge_execution_data() -> dict:
         await session.commit()  # explicit - purge may run outside a request
 
     logger.info(
-        "retention purge: %s by age, %s by volume (days=%s cap=%s)",
-        deleted_by_age, deleted_by_volume, days, cap,
+        "retention purge: %s by age, %s by volume, %s artifacts orphaned (days=%s cap=%s)",
+        deleted_by_age, deleted_by_volume, deleted_artifacts, days, cap,
     )
     return {
         "deleted_by_age": deleted_by_age,
         "deleted_by_volume": deleted_by_volume,
+        "artifacts_deleted": deleted_artifacts,
         "total": deleted_by_age + deleted_by_volume,
     }

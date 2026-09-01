@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from pathlib import Path
@@ -40,7 +41,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
-from ..models import Dataset
+from ..models import Dataset, DatasetVersion
 
 
 # ----------------------------------------------------------------- paths
@@ -173,6 +174,7 @@ async def create_from_df(
     df: pd.DataFrame,
     source: str = "api",
     description: str = "",
+    owner_id: str | None = None,
 ) -> Dataset:
     ds = Dataset(
         name=name.strip(),
@@ -182,6 +184,7 @@ async def create_from_df(
         row_count=0,
         source=source,
     )
+    ds.owner_id = owner_id  # stamped pre-flush so the v1 snapshot inherits it
     db.add(ds)
     await db.flush()  # assigns the id used by the parquet filename
     ds.file_path = f"{ds.id}.parquet"
@@ -190,10 +193,107 @@ async def create_from_df(
     ds.schema_json = schema_of(df)
     ds.row_count = int(len(df))
     await db.flush()
+    await snapshot_version(db, ds, source=source)
     return ds
 
 
-async def append_rows(ds: Dataset, items: list[dict]) -> int:
+# ----------------------------------------------------------------- versions (v44)
+MAX_DATASET_VERSIONS = 20  # per dataset; oldest snapshots beyond the cap are pruned
+
+
+def versions_root() -> Path:
+    path = datasets_dir() / "versions"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def version_dir(dataset_id: str) -> Path:
+    return versions_root() / dataset_id
+
+
+def version_file(dataset_id: str, version: int) -> Path:
+    return version_dir(dataset_id) / f"v{version}.parquet"
+
+
+async def snapshot_version(
+    db: AsyncSession, ds: Dataset, source: str, note: str = ""
+) -> DatasetVersion:
+    """Record the dataset's CURRENT parquet state as the next version.
+
+    The snapshot copies the live file (empty/fileless datasets record a
+    version with row_count 0 and no file), so the versions list is a full
+    timeline whose newest entry always equals the current state. Snapshots
+    beyond MAX_DATASET_VERSIONS are pruned together with their files.
+    Caller owns the commit.
+    """
+    last = (
+        await db.execute(
+            select(DatasetVersion.version)
+            .where(DatasetVersion.dataset_id == ds.id)
+            .order_by(DatasetVersion.version.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    next_v = int(last or 0) + 1
+
+    vdir = version_dir(ds.id)
+    vdir.mkdir(parents=True, exist_ok=True)
+    src = parquet_path(ds.id)
+    if src.exists():
+        shutil.copyfile(src, version_file(ds.id, next_v))
+
+    row = DatasetVersion(
+        dataset_id=ds.id,
+        owner_id=ds.owner_id,
+        version=next_v,
+        row_count=int(ds.row_count or 0),
+        source=source[:20],
+        note=note[:300],
+    )
+    db.add(row)
+    await db.flush()
+
+    stale = (
+        (
+            await db.execute(
+                select(DatasetVersion)
+                .where(DatasetVersion.dataset_id == ds.id)
+                .order_by(DatasetVersion.version.desc())
+                .offset(MAX_DATASET_VERSIONS)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for old in stale:
+        f = version_file(ds.id, old.version)
+        if f.exists():
+            f.unlink()
+        await db.delete(old)
+    return row
+
+
+async def restore_version(db: AsyncSession, ds: Dataset, version: int) -> DatasetVersion:
+    """Roll the dataset back to a snapshot; the restored state itself is
+    recorded as a new version, so a restore is always undoable."""
+    f = version_file(ds.id, version)
+    if not f.exists():
+        raise ValueError(f"snapshot v{version} has no file to restore")
+    df = read_parquet_df(f)
+    write_parquet(df, parquet_path(ds.id))
+    ds.schema_json = schema_of(df)
+    ds.row_count = int(len(df))
+    return await snapshot_version(db, ds, source="restore", note=f"restored from v{version}")
+
+
+def delete_versions(dataset_id: str) -> None:
+    """Remove every snapshot file of a dataset (called on dataset delete)."""
+    vdir = version_dir(dataset_id)
+    if vdir.exists():
+        shutil.rmtree(vdir, ignore_errors=True)
+
+
+async def append_rows(db: AsyncSession, ds: Dataset, items: list[dict]) -> int:
     """Append JSON rows; returns rows written."""
     if not items:
         return 0
@@ -203,10 +303,11 @@ async def append_rows(ds: Dataset, items: list[dict]) -> int:
     write_parquet(combined, parquet_path(ds.id))
     ds.schema_json = schema_of(combined)
     ds.row_count = int(len(combined))
+    await snapshot_version(db, ds, source="append")
     return len(fresh)
 
 
-async def replace_rows(ds: Dataset, items: list[dict]) -> int:
+async def replace_rows(db: AsyncSession, ds: Dataset, items: list[dict]) -> int:
     """Replace the whole row set (schema may change)."""
     if not items:
         raise ValueError("refusing to replace a dataset with zero items (schema would be unknown)")
@@ -214,6 +315,7 @@ async def replace_rows(ds: Dataset, items: list[dict]) -> int:
     write_parquet(fresh, parquet_path(ds.id))
     ds.schema_json = schema_of(fresh)
     ds.row_count = int(len(fresh))
+    await snapshot_version(db, ds, source="replace")
     return len(fresh)
 
 

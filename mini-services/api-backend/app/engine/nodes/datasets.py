@@ -110,9 +110,9 @@ class DatasetWriteNode(BaseNode):
             if p.mode == "replace":
                 if not rows:
                     raise NodeExecutionError("Refusing to replace a dataset with zero items")
-                written = await ds_svc.replace_rows(ds, rows)
+                written = await ds_svc.replace_rows(session, ds, rows)
             else:
-                written = await ds_svc.append_rows(ds, rows)
+                written = await ds_svc.append_rows(session, ds, rows)
             total = ds.row_count
             name = ds.name
             await session.commit()

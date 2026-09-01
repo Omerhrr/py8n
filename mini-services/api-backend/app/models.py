@@ -278,8 +278,56 @@ class Dataset(Base):
     schema_json: Mapped[list] = mapped_column(JSONVariant, default=list)
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str] = mapped_column(String(20), default="api")  # api|upload|workflow
+    tags: Mapped[list | None] = mapped_column(JSONVariant, nullable=True)  # v44 tag strings
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class DatasetVersion(Base):
+    """Point-in-time snapshot of a dataset's parquet file (v44).
+
+    Every mutation (create, append, replace, restore) writes the current
+    state to ``{versions_dir}/{dataset_id}/v{N}.parquet`` before/after the
+    fact and records a row here, so any dataset can be rolled back to an
+    earlier shape. Capped per dataset (MAX_DATASET_VERSIONS) - the oldest
+    snapshots beyond the cap are pruned with their files.
+    """
+
+    __tablename__ = "dataset_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(20), default="append")  # create|import|append|replace|restore|workflow
+    note: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class NotificationRule(Base):
+    """Webhook-on-event rule (v44) - POST a JSON payload when runs finish.
+
+    Events: execution_failed | execution_succeeded | execution_cancelled.
+    A rule may scope to one workflow (NULL = every workflow). Dispatch is
+    fire-and-forget: a slow or dead webhook never slows or breaks a run.
+    """
+
+    __tablename__ = "notification_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    events: Mapped[list] = mapped_column(JSONVariant, default=list)  # subset of NOTIFICATION_EVENTS
+    webhook_url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    headers: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)  # extra headers, e.g. auth
+    workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)  # scope filter
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fire_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_status: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ok|error
+    last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
 
 
 class Artifact(Base):

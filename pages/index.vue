@@ -453,6 +453,57 @@ onMounted(() => {
   loadAll()
 })
 
+// ------------------------------------------------------------------ tag manager (v44)
+interface TagEntry { name: string; workflows: number; datasets: number }
+const showTags = ref(false)
+const tagEntries = ref<TagEntry[]>([])
+const tagsLoading = ref(false)
+const renameFrom = ref('')
+const renameTo = ref('')
+const tagsMsg = ref('')
+
+async function openTags() {
+  showTags.value = true
+  tagsMsg.value = ''
+  tagsLoading.value = true
+  try {
+    tagEntries.value = await api.get<TagEntry[]>('/tags')
+  } finally {
+    tagsLoading.value = false
+  }
+}
+
+async function renameTag() {
+  if (!renameFrom.value || !renameTo.value.trim()) return
+  tagsMsg.value = ''
+  try {
+    const r = await api.put<{ workflows: number; datasets: number }>('/tags/rename', {
+      from: renameFrom.value,
+      to: renameTo.value.trim(),
+    })
+    tagsMsg.value = `Renamed on ${r.workflows} workflow(s) and ${r.datasets} dataset(s)`
+    renameFrom.value = ''
+    renameTo.value = ''
+    tagEntries.value = await api.get<TagEntry[]>('/tags')
+    await loadAll()
+  } catch (e: any) {
+    tagsMsg.value = e?.data?.detail || e?.message || 'Rename failed'
+  }
+}
+
+async function deleteTag(name: string) {
+  if (!confirm(`Delete tag "${name}" from every workflow and dataset?`)) return
+  tagsMsg.value = ''
+  try {
+    const r = await api.del<{ workflows: number; datasets: number }>(`/tags/${encodeURIComponent(name)}`)
+    tagsMsg.value = `Deleted from ${r.workflows} workflow(s) and ${r.datasets} dataset(s)`
+    tagEntries.value = await api.get<TagEntry[]>('/tags')
+    await loadAll()
+  } catch (e: any) {
+    tagsMsg.value = e?.data?.detail || e?.message || 'Delete failed'
+  }
+}
+
 // sidebar / palette "New workflow" lands on /?new=1 → open the create dialog.
 // A watch (not just onMounted) covers the case where the dashboard is ALREADY
 // the current page - a query-only change re-runs this without a remount.
@@ -485,6 +536,14 @@ watch(
             class="hidden"
             @change="onImportFile"
           />
+          <button
+            class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white"
+            title="Manage tags across workflows and datasets"
+            @click="openTags"
+          >
+            <TagIcon class="h-4 w-4" />
+            <span class="hidden sm:inline">Tags</span>
+          </button>
           <button
             class="inline-flex items-center gap-2 rounded-xl border border-zinc-700 px-3.5 py-2 text-sm font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-white disabled:opacity-50"
             :disabled="importing"
@@ -1125,6 +1184,86 @@ watch(
             </button>
           </div>
         </template>
+      </div>
+    </div>
+
+
+    <!-- tag manager modal (v44) -->
+    <div
+      v-if="showTags"
+      class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
+      @click.self="showTags = false"
+    >
+      <div class="max-h-[85vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+        <div class="sticky top-0 border-b border-zinc-800/80 bg-zinc-950 px-5 py-4">
+          <h2 class="flex items-center gap-2 text-sm font-bold">
+            <TagIcon class="h-4 w-4 text-orange-400" />
+            Tag manager
+          </h2>
+          <p class="mt-0.5 text-[11px] text-zinc-500">One vocabulary across workflows and datasets</p>
+        </div>
+
+        <div class="space-y-3 px-5 py-4">
+          <p v-if="tagsMsg" class="rounded-xl border border-zinc-700 bg-zinc-900 px-3 py-2 text-xs text-zinc-300">{{ tagsMsg }}</p>
+
+          <!-- rename form -->
+          <div class="flex items-end gap-2">
+            <label class="min-w-0 flex-1">
+              <span class="mb-1 block text-[10px] uppercase tracking-wider text-zinc-500">Rename tag</span>
+              <select
+                v-model="renameFrom"
+                class="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs outline-none focus:border-orange-500/60"
+              >
+                <option value="">pick a tag...</option>
+                <option v-for="t in tagEntries" :key="t.name" :value="t.name">{{ t.name }}</option>
+              </select>
+            </label>
+            <label class="min-w-0 flex-1">
+              <span class="mb-1 block text-[10px] uppercase tracking-wider text-zinc-500">to</span>
+              <input
+                v-model="renameTo"
+                class="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs outline-none focus:border-orange-500/60"
+                placeholder="new name"
+                @keyup.enter="renameTag"
+              />
+            </label>
+            <button
+              class="rounded-xl bg-orange-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-orange-400 disabled:opacity-40"
+              :disabled="!renameFrom || !renameTo.trim()"
+              @click="renameTag"
+            >
+              Rename
+            </button>
+          </div>
+
+          <!-- inventory -->
+          <div v-if="tagsLoading" class="flex items-center justify-center py-6 text-zinc-500">
+            <Loader2 class="h-4 w-4 animate-spin" />
+          </div>
+          <p v-else-if="!tagEntries.length" class="py-4 text-center text-xs text-zinc-500">No tags yet - tag workflows from their card menu, datasets from the dataset page</p>
+          <div v-else class="space-y-1.5">
+            <div v-for="t in tagEntries" :key="t.name" class="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2 text-xs">
+              <span class="min-w-0 flex-1 truncate font-medium text-zinc-200">{{ t.name }}</span>
+              <span class="shrink-0 text-zinc-500">{{ t.workflows }} wf · {{ t.datasets }} ds</span>
+              <button
+                class="shrink-0 rounded-lg p-1 text-zinc-500 transition hover:border-rose-500/40 hover:text-rose-300"
+                title="Delete this tag everywhere"
+                @click="deleteTag(t.name)"
+              >
+                <Trash2 class="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="sticky bottom-0 flex justify-end border-t border-zinc-800/80 bg-zinc-950 px-5 py-3.5">
+          <button
+            class="rounded-xl border border-zinc-800 px-3.5 py-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100"
+            @click="showTags = false"
+          >
+            Close
+          </button>
+        </div>
       </div>
     </div>
   </div>

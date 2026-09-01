@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import {
   Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
-  Play, BarChart3, Table2, X,
+  Play, BarChart3, Table2, X, History, Undo2, Plus, Eye,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -17,8 +17,21 @@ interface DatasetMeta {
   schema_json: { name: string; dtype: string }[]
   row_count: number
   source: string
+  tags: string[]
   created_at: string | null
   updated_at: string | null
+}
+
+interface DatasetVersionRow {
+  id: string
+  dataset_id: string
+  version: number
+  row_count: number
+  source: string
+  note: string
+  created_at: string
+  current: boolean
+  file_exists: boolean
 }
 
 const loading = ref(true)
@@ -84,7 +97,7 @@ async function loadProfile() {
 onMounted(async () => {
   await loadMeta()
   if (meta.value) {
-    await Promise.all([loadRows(), loadProfile()])
+    await Promise.all([loadRows(), loadProfile(), loadVersions()])
   }
 })
 
@@ -106,7 +119,7 @@ async function runSql() {
 
 async function removeDataset() {
   if (!meta.value) return
-  if (!confirm(`Delete dataset "${meta.value.name}" and its ${meta.value.row_count} rows?`)) return
+  if (!confirm(`Delete dataset "${meta.value.name}" and its ${meta.value.row_count} rows? All snapshots die with it.`)) return
   deleting.value = true
   try {
     await api.del(`/datasets/${meta.value.id}`)
@@ -114,6 +127,110 @@ async function removeDataset() {
   } catch (e: any) {
     alert(e?.data?.detail || e?.message || 'Delete failed')
     deleting.value = false
+  }
+}
+
+// ------------------------------------------------------------------ tags (v44)
+const newTag = ref('')
+const savingTags = ref(false)
+
+async function addTag() {
+  if (!meta.value || !newTag.value.trim()) return
+  const t = newTag.value.trim()
+  if (meta.value.tags.some((x) => x.toLowerCase() === t.toLowerCase())) {
+    newTag.value = ''
+    return
+  }
+  await saveTags([...meta.value.tags, t])
+  newTag.value = ''
+}
+
+async function removeTag(tag: string) {
+  if (!meta.value) return
+  await saveTags(meta.value.tags.filter((x) => x !== tag))
+}
+
+async function saveTags(tags: string[]) {
+  if (!meta.value) return
+  savingTags.value = true
+  try {
+    meta.value = await api.put<DatasetMeta>(`/datasets/${meta.value.id}`, { tags })
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Tag update failed'
+  } finally {
+    savingTags.value = false
+  }
+}
+
+// ------------------------------------------------------------------ versions (v44)
+const versions = ref<DatasetVersionRow[]>([])
+const loadingVersions = ref(false)
+const versionPreview = ref<{ version: number; columns: string[]; rows: any[]; shown: number } | null>(null)
+const busyVersion = ref<number | null>(null)
+const versionMsg = ref('')
+
+const SOURCE_STYLE: Record<string, string> = {
+  api: 'bg-sky-500/10 text-sky-400',
+  upload: 'bg-cyan-500/10 text-cyan-400',
+  import: 'bg-violet-500/10 text-violet-400',
+  workflow: 'bg-orange-500/10 text-orange-400',
+  append: 'bg-emerald-500/10 text-emerald-400',
+  replace: 'bg-amber-500/10 text-amber-400',
+  restore: 'bg-rose-500/10 text-rose-400',
+}
+
+async function loadVersions() {
+  if (!meta.value) return
+  loadingVersions.value = true
+  try {
+    versions.value = await api.get<DatasetVersionRow[]>(`/datasets/${meta.value.id}/versions`)
+  } catch {
+    versions.value = []
+  } finally {
+    loadingVersions.value = false
+  }
+}
+
+async function previewVersion(v: DatasetVersionRow) {
+  if (!meta.value) return
+  busyVersion.value = v.version
+  try {
+    const data = await api.get<any>(`/datasets/${meta.value.id}/versions/${v.version}/rows?limit=50`)
+    versionPreview.value = data
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Preview failed'
+  } finally {
+    busyVersion.value = null
+  }
+}
+
+async function restoreVersion(v: DatasetVersionRow) {
+  if (!meta.value) return
+  if (!confirm(`Restore v${v.version} (${v.row_count} rows, ${v.source})? The current ${meta.value.row_count} rows will be replaced - the restored state itself becomes a new version, so this is undoable.`)) return
+  busyVersion.value = v.version
+  versionMsg.value = ''
+  try {
+    await api.post(`/datasets/${meta.value.id}/versions/${v.version}/restore`)
+    versionMsg.value = `Restored v${v.version} - it is now the newest snapshot`
+    await Promise.all([loadMeta(), loadRows(), loadVersions()])
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Restore failed'
+  } finally {
+    busyVersion.value = null
+  }
+}
+
+async function deleteVersion(v: DatasetVersionRow) {
+  if (!meta.value) return
+  if (!confirm(`Delete snapshot v${v.version}? The live dataset is untouched.`)) return
+  busyVersion.value = v.version
+  try {
+    await api.del(`/datasets/${meta.value.id}/versions/${v.version}`)
+    await loadVersions()
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Delete failed'
+  } finally {
+    busyVersion.value = null
   }
 }
 
@@ -181,6 +298,32 @@ const dtypeColor: Record<string, string> = {
 
     <div v-else class="mx-auto max-w-6xl space-y-5 px-4 lg:px-6">
       <p v-if="error" class="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">{{ error }}</p>
+
+      <!-- tags editor (v44) -->
+      <div class="mt-5 flex flex-wrap items-center gap-1.5">
+        <span
+          v-for="t in meta.tags"
+          :key="t"
+          class="flex items-center gap-1 rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[11px] font-medium text-orange-300"
+        >
+          {{ t }}
+          <button class="text-orange-400/60 transition hover:text-orange-200" title="Remove tag" @click="removeTag(t)">
+            <X class="h-3 w-3" />
+          </button>
+        </span>
+        <span class="flex items-center gap-1 rounded-lg border border-dashed border-zinc-700 px-2 py-1">
+          <input
+            v-model="newTag"
+            class="w-24 bg-transparent text-[11px] text-zinc-200 outline-none placeholder:text-zinc-600"
+            placeholder="add tag"
+            @keyup.enter="addTag"
+          />
+          <button class="text-zinc-500 transition hover:text-orange-300 disabled:opacity-40" :disabled="!newTag.trim() || savingTags" title="Add tag" @click="addTag">
+            <Loader2 v-if="savingTags" class="h-3 w-3 animate-spin" />
+            <Plus v-else class="h-3 w-3" />
+          </button>
+        </span>
+      </div>
 
       <!-- schema chips -->
       <div class="mt-5 flex flex-wrap gap-1.5">
@@ -316,8 +459,93 @@ const dtypeColor: Record<string, string> = {
             </div>
             <p v-else class="px-4 py-6 text-center text-xs text-zinc-500">No profile available</p>
           </div>
+
+          <!-- version timeline (v44) -->
+          <div class="mt-5 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+            <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
+              <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+                <History class="h-3.5 w-3.5 text-violet-400" /> Version timeline
+              </h2>
+              <span class="text-[11px] text-zinc-500">{{ versions.length }} snapshot{{ versions.length === 1 ? '' : 's' }} (cap 20)</span>
+            </div>
+            <p v-if="versionMsg" class="border-b border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-300">{{ versionMsg }}</p>
+            <div v-if="loadingVersions" class="flex items-center justify-center py-6 text-zinc-500">
+              <Loader2 class="h-4 w-4 animate-spin" />
+            </div>
+            <p v-else-if="!versions.length" class="px-4 py-5 text-center text-xs text-zinc-500">No snapshots yet</p>
+            <div v-else class="max-h-80 divide-y divide-zinc-800/40 overflow-y-auto">
+              <div v-for="v in versions" :key="v.id" class="flex items-center gap-2 px-4 py-2.5">
+                <span class="w-9 shrink-0 font-mono text-xs font-bold text-zinc-200">v{{ v.version }}</span>
+                <span
+                  class="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  :class="SOURCE_STYLE[v.source] || 'bg-zinc-800 text-zinc-400'"
+                >{{ v.source }}</span>
+                <span class="shrink-0 text-[11px] tabular-nums text-zinc-500">{{ v.row_count.toLocaleString() }} rows</span>
+                <span class="min-w-0 flex-1 truncate text-[11px] text-zinc-600">{{ fmtDate(v.created_at) }}{{ v.note ? ` · ${v.note}` : '' }}</span>
+                <span v-if="v.current" class="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-400">CURRENT</span>
+                <span v-else-if="!v.file_exists" class="shrink-0 rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-500">no file</span>
+                <div class="flex shrink-0 items-center gap-1">
+                  <button
+                    v-if="v.file_exists"
+                    class="rounded-lg border border-zinc-800 p-1 text-zinc-500 transition hover:border-sky-500/40 hover:text-sky-300 disabled:opacity-40"
+                    :disabled="busyVersion === v.version"
+                    title="Preview this snapshot"
+                    @click="previewVersion(v)"
+                  ><Eye class="h-3.5 w-3.5" /></button>
+                  <button
+                    v-if="v.file_exists && !v.current"
+                    class="rounded-lg border border-zinc-800 p-1 text-zinc-500 transition hover:border-amber-500/40 hover:text-amber-300 disabled:opacity-40"
+                    :disabled="busyVersion === v.version"
+                    title="Roll back to this snapshot"
+                    @click="restoreVersion(v)"
+                  ><Undo2 class="h-3.5 w-3.5" /></button>
+                  <button
+                    class="rounded-lg border border-zinc-800 p-1 text-zinc-500 transition hover:border-rose-500/40 hover:text-rose-300 disabled:opacity-40"
+                    :disabled="busyVersion === v.version"
+                    title="Delete snapshot"
+                    @click="deleteVersion(v)"
+                  ><Trash2 class="h-3.5 w-3.5" /></button>
+                </div>
+              </div>
+            </div>
+          </div>
         </section>
       </div>
     </div>
+
+    <!-- version preview modal (v44) -->
+    <Teleport to="body">
+      <div
+        v-if="versionPreview"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        @click.self="versionPreview = null"
+      >
+        <div class="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div class="sticky top-0 flex items-center justify-between border-b border-zinc-800/80 bg-zinc-950 px-5 py-4">
+            <h2 class="text-sm font-bold">Snapshot v{{ versionPreview.version }} preview</h2>
+            <button class="rounded-lg p-1 text-zinc-500 transition hover:text-zinc-200" @click="versionPreview = null">
+              <X class="h-4 w-4" />
+            </button>
+          </div>
+          <div class="px-5 py-4">
+            <p class="mb-2 text-[11px] text-zinc-500">showing {{ versionPreview.shown }} row(s)</p>
+            <div class="overflow-x-auto rounded-xl border border-zinc-800">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-zinc-900">
+                  <tr class="text-zinc-500">
+                    <th v-for="c in versionPreview.columns" :key="c" class="whitespace-nowrap px-3 py-2 font-medium">{{ c }}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(r, i) in versionPreview.rows" :key="i" class="border-t border-zinc-800/40 hover:bg-zinc-900/60">
+                    <td v-for="c in versionPreview.columns" :key="c" class="max-w-[240px] truncate px-3 py-1.5 text-zinc-300" :title="fmtCell(r[c])">{{ fmtCell(r[c]) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

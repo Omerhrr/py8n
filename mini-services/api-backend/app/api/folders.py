@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -208,3 +209,38 @@ async def delete_folder(folder_id: str, user=Depends(get_optional_user), db: Asy
         wf.folder_id = None
     await db.delete(folder)
     await db.commit()  # explicit - teardown commit races follow-up reads
+
+
+# ------------------------------------------------------------------ bulk move (v44)
+class FolderMoveIn(BaseModel):
+    workflow_ids: list[str] = Field(min_length=1, max_length=500)
+
+
+@router.post("/{folder_id}/move")
+async def move_workflows_into_folder(
+    folder_id: str, body: FolderMoveIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
+):
+    """Bulk-move workflows into a folder. Unknown ids are skipped with
+    reasons (packs-style batch semantics); workflows owned by someone else
+    look nonexistent and are skipped too. Pass folder_id "root" (or the
+    folder id of nothing) via DELETE-free unfile: use folder_id = "root"."""
+    if folder_id != "root":
+        folder = await db.get(Folder, folder_id)
+        if folder is None:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        own_or_404(folder.owner_id, user)  # v37
+
+    moved: list[dict] = []
+    skipped: list[dict] = []
+    for wid in dict.fromkeys(body.workflow_ids):  # de-dup, keep order
+        wf = await db.get(Workflow, wid)
+        if wf is None:
+            skipped.append({"id": wid, "reason": "workflow not found"})
+            continue
+        if user is not None and wf.owner_id is not None and wf.owner_id != user.id:
+            skipped.append({"id": wid, "reason": "workflow not found"})  # foreign rows look nonexistent
+            continue
+        wf.folder_id = None if folder_id == "root" else folder_id
+        moved.append({"id": wid, "name": wf.name})
+    await db.commit()
+    return {"folder_id": None if folder_id == "root" else folder_id, "moved": moved, "skipped": skipped}

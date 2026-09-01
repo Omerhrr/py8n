@@ -277,6 +277,10 @@ def test_agent_iteration_cap_errors():
 def test_retention_age_purge_and_policy_api():
     tag = uuid.uuid4().hex[:8]
     wf_ids: list[str] = []
+    # the retention runs only need a FINISHED execution - mock the LLM so the
+    # test stays deterministic even when the shared gateway is throttled
+    scripted = _ScriptedChat(['{"answer": "retention fixture"}'])
+    scripted.install()
 
     async def _go():
         from app.db import AsyncSessionLocal
@@ -307,6 +311,7 @@ def test_retention_age_purge_and_policy_api():
             wf_id = res.json()["id"]
             wf_ids.append(wf_id)
             detail = await _run_and_wait(client, wf_id, {})
+            scripted.restore()
             exec_id = detail["id"]
 
             async with AsyncSessionLocal() as session:
@@ -345,6 +350,9 @@ def test_retention_age_purge_and_policy_api():
 def test_retention_volume_cap_keeps_newest():
     tag = uuid.uuid4().hex[:8]
     wf_ids: list[str] = []
+    # mock the LLM: these runs only need FINISHED executions (gateway-independent)
+    scripted = _ScriptedChat(['{"answer": "cap fixture"}', '{"answer": "cap fixture 2"}'])
+    scripted.install()
 
     async def _go():
         async with _client() as client:
@@ -361,6 +369,7 @@ def test_retention_volume_cap_keeps_newest():
 
             first = await _run_and_wait(client, wf_id, {})
             second = await _run_and_wait(client, wf_id, {})
+            scripted.restore()
             assert first["id"] != second["id"]
 
             res = await client.put("/settings/retention", json={"max_executions_per_workflow": 1})

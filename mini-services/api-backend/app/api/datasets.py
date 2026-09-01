@@ -24,13 +24,13 @@ import io
 import json
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
-from ..models import Dataset
+from ..models import Dataset, DatasetVersion
 from ..schemas import (
     DatasetCreate,
     DatasetOut,
@@ -53,6 +53,7 @@ def _out(row: Dataset) -> DatasetOut:
         schema_json=row.schema_json or [],
         row_count=row.row_count,
         source=row.source,
+        tags=row.tags or [],
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -100,9 +101,17 @@ def _parse_upload(filename: str, raw: bytes) -> pd.DataFrame:
 
 
 @router.get("", response_model=list[DatasetOut])
-async def list_datasets(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def list_datasets(
+    tag: str | None = Query(default=None, description="filter by tag (case-insensitive)"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     rows = (await db.execute(select(Dataset).order_by(Dataset.updated_at.desc()))).scalars().all()
-    return [_out(r) for r in scope_rows(rows, user)]  # v37
+    visible = scope_rows(rows, user)  # v37
+    if tag:
+        want = tag.lower()
+        visible = [d for d in visible if any(t.lower() == want for t in (d.tags or []))]
+    return [_out(r) for r in visible]
 
 
 @router.post("", response_model=DatasetOut, status_code=201)
@@ -116,8 +125,19 @@ async def create_dataset(body: DatasetCreate, user=Depends(get_optional_user), d
     if await ds_svc.name_taken(db, name):
         raise HTTPException(status_code=409, detail=f"Dataset {name!r} already exists")
     df = ds_svc.normalize_df(pd.DataFrame(body.rows)) if body.rows else pd.DataFrame()
-    row = await ds_svc.create_from_df(db, name, df, source="api", description=body.description)
-    row.owner_id = user.id if user else None  # v37
+    row = await ds_svc.create_from_df(db, name, df, source="api", description=body.description,
+                                      owner_id=user.id if user else None)
+    if body.tags:
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for t in body.tags:
+            if not isinstance(t, str):
+                continue
+            t = t.strip()
+            if t and t.lower() not in seen:
+                seen.add(t.lower())
+                cleaned.append(t)
+        row.tags = cleaned
     await db.commit()
     await db.refresh(row)
     return _out(row)
@@ -142,8 +162,8 @@ async def upload_dataset(
     if len(raw) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="File too large (max 25 MB)")
     df = _parse_upload(file.filename or name, raw)
-    row = await ds_svc.create_from_df(db, name, df, source="upload", description=description)
-    row.owner_id = user.id if user else None  # v37
+    row = await ds_svc.create_from_df(db, name, df, source="upload", description=description,
+                                      owner_id=user.id if user else None)
     await db.commit()
     await db.refresh(row)
     return _out(row)
@@ -195,7 +215,7 @@ async def get_profile(dataset_id: str, user=Depends(get_optional_user), db: Asyn
 async def append_rows(dataset_id: str, body: DatasetRowsIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _get_or_404(db, dataset_id, user)
     fresh = ds_svc.normalize_df(pd.DataFrame(body.rows))
-    await ds_svc.append_rows(row, fresh.to_dict(orient="records"))
+    await ds_svc.append_rows(db, row, fresh.to_dict(orient="records"))
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -214,6 +234,8 @@ async def update_dataset(dataset_id: str, body: DatasetUpdate, user=Depends(get_
         row.name = name
     if body.description is not None:
         row.description = body.description.strip()
+    if body.tags is not None:  # v44: omitted = untouched; [] clears all
+        row.tags = body.tags or []
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -224,5 +246,102 @@ async def update_dataset(dataset_id: str, body: DatasetUpdate, user=Depends(get_
 async def delete_dataset(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _get_or_404(db, dataset_id, user)
     ds_svc.delete_file(row)
+    ds_svc.delete_versions(row.id)  # v44: snapshots die with the dataset
     await db.delete(row)
     await db.commit()
+
+
+# ------------------------------------------------------------------ versions (v44)
+def _version_out(v: DatasetVersion) -> dict:
+    return {
+        "id": v.id,
+        "dataset_id": v.dataset_id,
+        "version": v.version,
+        "row_count": v.row_count,
+        "source": v.source,
+        "note": v.note,
+        "created_at": v.created_at,
+        "current": False,
+        "file_exists": ds_svc.version_file(v.dataset_id, v.version).exists(),
+    }
+
+
+@router.get("/{dataset_id}/versions")
+async def list_versions(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Version timeline, newest first. The newest entry is always the CURRENT
+    state; restoring any entry records the restored content as a new version."""
+    row = await _get_or_404(db, dataset_id, user)
+    rows = (
+        await db.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == row.id)
+            .order_by(DatasetVersion.version.desc())
+        )
+    ).scalars().all()
+    out = [_version_out(v) for v in rows]
+    if out:
+        out[0]["current"] = True
+    return out
+
+
+@router.get("/{dataset_id}/versions/{version}/rows")
+async def version_rows(
+    dataset_id: str,
+    version: int,
+    limit: int = Query(default=50, ge=1, le=1000),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Preview rows stored in a snapshot (no restore needed to look)."""
+    await _get_or_404(db, dataset_id, user)
+    f = ds_svc.version_file(dataset_id, version)
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="Snapshot file not found (pruned or fileless)")
+    df = ds_svc.read_parquet_df(f).head(limit)
+    return {
+        "version": version,
+        "columns": list(df.columns),
+        "rows": ds_svc.jsonable_rows(df),
+        "shown": int(len(df)),
+    }
+
+
+@router.post("/{dataset_id}/versions/{version}/restore", response_model=DatasetOut)
+async def restore_dataset_version(
+    dataset_id: str, version: int, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
+):
+    """Roll the dataset back to a snapshot. The restored content is recorded
+    as a NEW version (source=restore), so the operation is undoable."""
+    row = await _get_or_404(db, dataset_id, user)
+    try:
+        await ds_svc.restore_version(db, row, version)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _out(row)
+
+
+@router.delete("/{dataset_id}/versions/{version}", status_code=204)
+async def delete_dataset_version(
+    dataset_id: str, version: int, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
+):
+    """Drop one snapshot (row + file). The CURRENT version can be deleted
+    too - it just stops being a restore point, the live dataset is untouched."""
+    row = await _get_or_404(db, dataset_id, user)
+    v = (
+        await db.execute(
+            select(DatasetVersion).where(
+                DatasetVersion.dataset_id == row.id, DatasetVersion.version == version
+            )
+        )
+    ).scalar_one_or_none()
+    if v is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    f = ds_svc.version_file(row.id, version)
+    if f.exists():
+        f.unlink()
+    await db.delete(v)
+    await db.commit()
+    return None

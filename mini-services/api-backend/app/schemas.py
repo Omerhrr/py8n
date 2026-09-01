@@ -313,6 +313,7 @@ class DatasetOut(BaseModel):
     schema_json: list = Field(default_factory=list)
     row_count: int = 0
     source: str = "api"
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -321,6 +322,7 @@ class DatasetCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=500)
     rows: list[dict] = Field(default_factory=list, description="Flat JSON objects; nested values are JSON-encoded")
+    tags: list[str] = Field(default_factory=list, max_length=20, description="Tag strings")
 
 
 class DatasetRowsIn(BaseModel):
@@ -330,6 +332,7 @@ class DatasetRowsIn(BaseModel):
 class DatasetUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
+    tags: list[str] | None = Field(default=None, max_length=20, description="Omitted = untouched; [] clears all")
 
 
 class DatasetQueryIn(BaseModel):

@@ -436,6 +436,7 @@ async def append_record(
     schema: list[dict],
     form: dict | None = None,
     rules: list[dict] | None = None,
+    db: AsyncSession | None = None,
 ) -> dict:
     """Create one record through an app - schema keys, form options, rules.
 
@@ -449,7 +450,18 @@ async def append_record(
     rec = _coerce_values(record, schema)
     rec = apply_form_options(rec, form_fields(form), "create")
     rec, warnings = rule_svc.apply_rules(rules, rec, "create", schema)
-    await ds_svc.append_rows(ds, [_coerce_values(rec, schema)])
+    session = db
+    if session is None:  # legacy path without a session - no version snapshot
+        from ..db import AsyncSessionLocal
+
+        session = AsyncSessionLocal()
+    try:
+        await ds_svc.append_rows(session, ds, [_coerce_values(rec, schema)])
+        if db is None:
+            await session.commit()
+    finally:
+        if db is None:
+            await session.close()
     return {"record": rec, "warnings": warnings}
 
 

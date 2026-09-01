@@ -245,8 +245,7 @@ async def _import_pack_doc(pack: PackDocument, owner: str | None, db: AsyncSessi
             continue
         final_name = await _unique_dataset_name(db, name)
         df = ds_svc.normalize_df(pd.DataFrame(d.rows)) if d.rows else pd.DataFrame()
-        ds = await ds_svc.create_from_df(db, final_name, df, source="import", description=d.description or "")
-        ds.owner_id = owner
+        ds = await ds_svc.create_from_df(db, final_name, df, source="import", description=d.description or "", owner_id=owner)
         created_datasets.append(ds)
 
     await db.commit()

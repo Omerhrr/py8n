@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -15,6 +16,9 @@ from ..db import AsyncSessionLocal
 from ..engine.runner import GraphRunner, validate_graph_document
 from ..models import ExecutionLog, Workflow
 from .events import get_event_bus
+from . import notifications as notif_svc  # v44 webhook-on-event
+
+logger = logging.getLogger("py8n.executor")
 
 # Keep references to in-flight tasks so asyncio GC doesn't cancel them.
 _background_tasks: set = set()
@@ -131,6 +135,23 @@ async def execute_workflow(
                 )
             )
             await session.commit()
+        try:
+            await notif_svc.dispatch(
+                "execution_cancelled",
+                {
+                    "execution_id": execution_id,
+                    "workflow_id": workflow_id,
+                    "workflow_name": workflow.name,
+                    "trigger_type": trigger_type,
+                    "status": "cancelled",
+                    "error": "Cancelled by user",
+                    "duration_ms": None,
+                },
+                workflow_id=workflow_id,
+                workflow_owner_id=workflow.owner_id,
+            )
+        except Exception:  # noqa: BLE001 - notifications must never break runs
+            logger.exception("notification dispatch failed (cancelled)")
         return {
             "execution_id": execution_id,
             "status": "cancelled",
@@ -169,6 +190,27 @@ async def execute_workflow(
         )
         await _trim_history(session, workflow_id)
         await session.commit()
+
+    # v44: webhook-on-event - fire notification rules for terminal states
+    # (waiting runs are not finished, so they never notify here)
+    if not waiting:
+        try:
+            await notif_svc.dispatch(
+                "execution_succeeded" if result["status"] == "success" else "execution_failed",
+                {
+                    "execution_id": execution_id,
+                    "workflow_id": workflow_id,
+                    "workflow_name": workflow.name,
+                    "trigger_type": trigger_type,
+                    "status": result["status"],
+                    "error": result["error"],
+                    "duration_ms": result["duration_ms"],
+                },
+                workflow_id=workflow_id,
+                workflow_owner_id=workflow.owner_id,
+            )
+        except Exception:  # noqa: BLE001 - notifications must never break runs
+            logger.exception("notification dispatch failed")
 
     # ------------------------------------------------------------
     # Error-workflow routing: an unhandled failure can dispatch a

@@ -64,5 +64,9 @@ async def init_db() -> None:
             if "scopes" not in key_cols:
                 # NULL scopes = legacy unrestricted key (pre-v43 rows keep access)
                 sync_conn.execute(text("ALTER TABLE api_keys ADD COLUMN scopes JSON"))
+            # v44: dataset tags + versions + notification rules
+            ds_cols = {c["name"] for c in insp.get_columns("datasets")}
+            if "tags" not in ds_cols:
+                sync_conn.execute(text("ALTER TABLE datasets ADD COLUMN tags JSON"))
 
         await conn.run_sync(_add_missing_columns)
