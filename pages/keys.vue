@@ -14,6 +14,8 @@ interface ApiKeyRow {
   last_used_at: string | null
   revoked: boolean
   revoked_at: string | null
+  scopes: string[]
+  read_only: boolean
 }
 
 const { api } = useApi()
@@ -23,6 +25,7 @@ const keys = ref<ApiKeyRow[]>([])
 const showCreate = ref(false)
 const creating = ref(false)
 const newName = ref('')
+const newScope = ref<'full' | 'read'>('full')
 const createdKey = ref<ApiKeyRow | null>(null)
 const fullKey = ref('')
 const copied = ref(false)
@@ -50,11 +53,13 @@ async function createKey() {
   creating.value = true
   error.value = null
   try {
-    const row = await api.post<ApiKeyRow & { key: string }>('/keys', { name: newName.value.trim() })
+    const scopes = newScope.value === 'read' ? ['read'] : ['read', 'write']
+    const row = await api.post<ApiKeyRow & { key: string }>('/keys', { name: newName.value.trim(), scopes })
     createdKey.value = row
     fullKey.value = row.key
     showCreate.value = false
     newName.value = ''
+    newScope.value = 'full'
     await loadKeys()
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Key creation failed'
@@ -143,6 +148,7 @@ function closeCreated() {
             <tr class="border-b border-zinc-800 bg-zinc-900/60 text-left text-[10px] uppercase tracking-wider text-zinc-500">
               <th class="px-4 py-2.5 font-semibold">Name</th>
               <th class="px-4 py-2.5 font-semibold">Prefix</th>
+              <th class="px-4 py-2.5 font-semibold">Access</th>
               <th class="px-4 py-2.5 font-semibold">Created</th>
               <th class="px-4 py-2.5 font-semibold">Last used</th>
               <th class="px-4 py-2.5 font-semibold">Status</th>
@@ -153,6 +159,15 @@ function closeCreated() {
             <tr v-for="row in keys" :key="row.id" class="border-b border-zinc-800/60 transition last:border-0 hover:bg-zinc-900/40">
               <td class="px-4 py-3 font-medium">{{ row.name }}</td>
               <td class="px-4 py-3 font-mono text-xs text-zinc-400">{{ row.prefix }}...</td>
+              <td class="px-4 py-3">
+                <span
+                  class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide"
+                  :class="row.read_only ? 'bg-amber-500/15 text-amber-400' : 'bg-sky-500/15 text-sky-400'"
+                  :title="row.read_only ? 'Read-only: safe methods (GET) only, writes are rejected with 403' : 'Full access: read and write'"
+                >
+                  {{ row.read_only ? 'Read-only' : 'Full access' }}
+                </span>
+              </td>
               <td class="px-4 py-3 text-xs text-zinc-500">{{ fmtDate(row.created_at) }}</td>
               <td class="px-4 py-3 text-xs text-zinc-500">{{ fmtDate(row.last_used_at) }}</td>
               <td class="px-4 py-3">
@@ -197,6 +212,27 @@ function closeCreated() {
           placeholder="e.g. CI pipeline"
           @keyup.enter="createKey"
         />
+
+        <label class="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">Access</label>
+        <div class="mb-4 grid grid-cols-2 gap-2">
+          <button
+            class="rounded-xl border px-3 py-2.5 text-left transition"
+            :class="newScope === 'full' ? 'border-orange-500/60 bg-orange-500/10' : 'border-zinc-700 bg-zinc-950 hover:border-zinc-600'"
+            @click="newScope = 'full'"
+          >
+            <span class="block text-xs font-semibold">Full access</span>
+            <span class="mt-0.5 block text-[10px] leading-snug text-zinc-500">Read and write - can create, run and delete</span>
+          </button>
+          <button
+            class="rounded-xl border px-3 py-2.5 text-left transition"
+            :class="newScope === 'read' ? 'border-amber-500/60 bg-amber-500/10' : 'border-zinc-700 bg-zinc-950 hover:border-zinc-600'"
+            @click="newScope = 'read'"
+          >
+            <span class="block text-xs font-semibold">Read-only</span>
+            <span class="mt-0.5 block text-[10px] leading-snug text-zinc-500">Safe GET calls only - writes are rejected with 403</span>
+          </button>
+        </div>
+
         <p v-if="error" class="mb-3 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{{ error }}</p>
         <div class="flex justify-end gap-2">
           <button class="rounded-xl px-4 py-2 text-sm text-zinc-400 transition hover:text-zinc-200" @click="showCreate = false">

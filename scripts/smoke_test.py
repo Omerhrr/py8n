@@ -2685,6 +2685,86 @@ def main() -> None:
     req("DELETE", f"/workflows/{pwf42['id']}")
     print(f"v42 gallery packs OK (gallery: {m42['workflow_count']} templates, data-analyst pack imported inactive)")
 
+    # ------------------------------------------------------------- v43: vault hardening, key scopes, pack registries
+    status, health43 = req("GET", "/health")
+    ver43 = tuple(int(x) for x in health43.get("version", "0").split(".")[:2])
+    assert status == 200 and ver43 >= (1, 43), health43
+    tag43 = uuid.uuid4().hex[:6]
+
+    # -- vault: rotation + audit trail (field names only, never values)
+    status, cred43 = req("POST", "/credentials", {"name": f"SMOKE43 vault {tag43}", "type": "header_auth",
+                                                  "data": {"header_name": "X-Smoke", "value": "smoke-secret-1"}})
+    assert status == 201 and cred43["rotated_at"] is None, cred43
+    status, rot43 = req("POST", f"/credentials/{cred43['id']}/rotate", {"secrets": {"value": "smoke-secret-2"}})
+    assert status == 200 and rot43["rotated_at"] is not None, rot43
+    assert rot43["masked_hint"] != cred43["masked_hint"], rot43
+    status, ev43 = req("GET", f"/credentials/{cred43['id']}/events")
+    assert status == 200 and [e["action"] for e in ev43] == ["rotated", "created"], ev43
+    assert "smoke-secret-2" not in json.dumps(ev43), "audit trail must never carry secret values"
+    status, _ = req("DELETE", f"/credentials/{cred43['id']}?force=true")
+    assert status == 204, status
+
+    # -- key scopes: read-only keys get 403 on mutations, full keys work
+    email43 = f"smoke43-{tag43}@py8n.test"
+    status, reg43 = req("POST", "/auth/register", {"email": email43, "password": "smoke-key-pw1", "name": "Smoke43"})
+    assert status == 201, reg43
+    tok43 = reg43["token"]
+    hdr43 = {"Authorization": f"Bearer {tok43}"}
+    status, ro43 = req("POST", "/keys", {"name": "smoke-ro", "scopes": ["read"]}, headers=hdr43)
+    assert status == 201 and ro43["read_only"] is True, ro43
+    roh43 = {"X-API-Key": ro43["key"]}
+    status, _ = req("GET", "/workflows", headers=roh43)
+    assert status == 200, status
+    status, deny43 = req("POST", "/workflows", {"name": "nope", "graph": {"nodes": [], "edges": []}}, headers=roh43)
+    assert status == 403 and "read-only" in deny43.get("detail", ""), deny43
+    status, full43 = req("POST", "/keys", {"name": "smoke-full"}, headers=hdr43)
+    assert status == 201 and full43["read_only"] is False, full43
+    status, fwf43 = req("POST", "/workflows", {"name": f"SMOKE43 Keyed {tag43}", "graph": {"nodes": [], "edges": []}},
+                        headers={"X-API-Key": full43["key"]})
+    assert status == 201 and fwf43.get("owner_id"), fwf43
+    status, _ = req("DELETE", f"/keys/{ro43['id']}", headers=hdr43)
+    assert status == 204, status
+    status, _ = req("DELETE", f"/keys/{full43['id']}", headers=hdr43)
+    assert status == 204, status
+    status, _ = req("DELETE", f"/workflows/{fwf43['id']}")
+
+    # -- pack registries: self-sync from the live instance's own gallery endpoint
+    status, catalog43 = req("GET", "/templates")
+    assert status == 200 and catalog43, catalog43
+    status, preg43 = req("POST", "/registries", {"name": f"SMOKE43 gallery {tag43}",
+                                                 "url": "http://127.0.0.1:8000/api/v1/templates/gallery/pack"})
+    assert status == 201, preg43
+    status, chk43 = req("POST", f"/registries/{preg43['id']}/check")
+    assert status == 200 and chk43["workflow_count"] == len(catalog43), chk43
+    assert all(w["valid"] for w in chk43["workflows"]), chk43
+    # check must not import and must not stamp the registry row
+    status, reglist43 = req("GET", "/registries")
+    row43 = next(r for r in reglist43 if r["id"] == preg43["id"])
+    assert row43["last_status"] is None, row43
+
+    status, syn43 = req("POST", f"/registries/{preg43['id']}/sync")
+    assert status == 200 and syn43["registry"]["last_status"] == "ok", syn43
+    assert len(syn43["import"]["workflows"]) == len(catalog43), syn43["import"]["workflows"]
+    assert syn43["import"]["skipped"] == [], syn43["import"]["skipped"]
+    for w43 in syn43["import"]["workflows"]:
+        status, detw43 = req("GET", f"/workflows/{w43['id']}")
+        assert status == 200 and detw43["is_active"] is False, detw43
+        req("DELETE", f"/workflows/{w43['id']}")
+    for d43 in syn43["import"]["datasets"]:
+        req("DELETE", f"/datasets/{d43['id']}")
+
+    # -- registries: a URL that is not a pack is a stamped 502, not a crash
+    status, badreg43 = req("POST", "/registries", {"name": f"SMOKE43 bad {tag43}", "url": "http://127.0.0.1:8000/"})
+    assert status == 201, badreg43
+    status, bad43 = req("POST", f"/registries/{badreg43['id']}/sync")
+    assert status == 502, bad43
+    status, reglist43 = req("GET", "/registries")
+    badrow43 = next(r for r in reglist43 if r["id"] == badreg43["id"])
+    assert badrow43["last_status"] == "error" and "error" in (badrow43["last_summary"] or {}), badrow43
+    req("DELETE", f"/registries/{badreg43['id']}")
+    req("DELETE", f"/registries/{preg43['id']}")
+    print(f"v43 vault+scopes+registries OK (rotate+audit clean, read-only key 403, self-sync of {len(catalog43)} templates, non-pack URL stamped error)")
+
     print("\nALL SMOKE TESTS PASSED ✅")
 
 

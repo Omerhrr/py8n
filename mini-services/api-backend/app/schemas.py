@@ -187,6 +187,7 @@ class CredentialOut(BaseModel):
     type: str
     masked_hint: str
     created_at: datetime
+    rotated_at: datetime | None = None  # v43: last secret rotation
 
 
 class CredentialDetail(CredentialOut):
@@ -205,6 +206,23 @@ class CredentialUpdate(BaseModel):
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     data: dict | None = None
+
+
+class CredentialRotate(BaseModel):
+    """v43 rotation payload - ONLY the secret fields being replaced; every
+    other field (base_url, header_name, ...) carries over untouched."""
+
+    secrets: dict = Field(description="Field -> new secret value; provided keys replace stored values")
+
+
+class CredentialEventOut(BaseModel):
+    """Vault audit entry (v43) - detail carries field names, never values."""
+
+    id: str
+    action: str
+    credential_name: str
+    detail: dict = Field(default_factory=dict)
+    created_at: datetime
 
 
 class CredentialTestRequest(BaseModel):

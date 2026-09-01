@@ -159,12 +159,9 @@ async def export_pack(body: PackExportRequest, user=Depends(get_optional_user), 
 
 
 # ------------------------------------------------------------------ inspect
-@router.post("/inspect")
-async def inspect_pack(pack: PackDocument, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    """Preview an import without touching the database (dialog support)."""
-    if pack.format != PACK_FORMAT:
-        raise HTTPException(status_code=400, detail=f"Not a Py8n pack (format {pack.format!r})")
-
+async def _inspect_pack_doc(pack: PackDocument, db: AsyncSession) -> dict:
+    """Dry-run a pack against this instance without touching the database.
+    Shared by POST /packs/inspect and registry checks (v43)."""
     warnings: list[str] = []
     wf_previews = []
     for w in pack.workflows:
@@ -208,15 +205,19 @@ async def inspect_pack(pack: PackDocument, user=Depends(get_optional_user), db: 
     }
 
 
-# ------------------------------------------------------------------ import
-@router.post("/import", status_code=201)
-async def import_pack(pack: PackDocument, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+@router.post("/inspect")
+async def inspect_pack(pack: PackDocument, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Preview an import without touching the database (dialog support)."""
     if pack.format != PACK_FORMAT:
         raise HTTPException(status_code=400, detail=f"Not a Py8n pack (format {pack.format!r})")
-    if not pack.workflows and not pack.datasets:
-        raise HTTPException(status_code=400, detail="Pack contains no workflows or datasets")
+    return await _inspect_pack_doc(pack, db)
 
-    owner = user.id if user else None  # v37
+
+# ------------------------------------------------------------------ import
+async def _import_pack_doc(pack: PackDocument, owner: str | None, db: AsyncSession) -> dict:
+    """Create every valid resource in the pack (shared by POST /packs/import
+    and registry syncs, v43). Invalid entries are skipped with reasons - one
+    bad graph never aborts the batch."""
     created_workflows = []
     skipped = []
     warnings: list[str] = []
@@ -262,3 +263,14 @@ async def import_pack(pack: PackDocument, user=Depends(get_optional_user), db: A
         "skipped": skipped,
         "warnings": warnings,
     }
+
+
+@router.post("/import", status_code=201)
+async def import_pack(pack: PackDocument, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    if pack.format != PACK_FORMAT:
+        raise HTTPException(status_code=400, detail=f"Not a Py8n pack (format {pack.format!r})")
+    if not pack.workflows and not pack.datasets:
+        raise HTTPException(status_code=400, detail="Pack contains no workflows or datasets")
+
+    owner = user.id if user else None  # v37
+    return await _import_pack_doc(pack, owner, db)

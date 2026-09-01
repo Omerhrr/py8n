@@ -168,6 +168,28 @@ class Credential(Base):
     type: Mapped[str] = mapped_column(String(60), default="generic")  # header_auth|openai_compatible|generic
     data_encrypted: Mapped[str] = mapped_column(Text, nullable=False)  # Fernet token
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    rotated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # v43 last secret rotation
+
+
+class CredentialEvent(Base):
+    """Vault audit trail (v43) - one row per lifecycle action on a credential.
+
+    Written on created / renamed / updated (payload via PATCH) / rotated /
+    tested / used (a node resolved the secret during an execution) / deleted.
+    ``credential_name`` is snapshotted so the trail stays meaningful after the
+    credential itself is gone. Detail dicts carry FIELD NAMES only - secret
+    values never touch the audit log.
+    """
+
+    __tablename__ = "credential_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    credential_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    credential_name: Mapped[str] = mapped_column(String(200), default="")
+    action: Mapped[str] = mapped_column(String(20), nullable=False)  # created|renamed|updated|rotated|tested|used|deleted
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)  # field names / workflow refs, never values
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class Folder(Base):
@@ -358,3 +380,27 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v43 scopes: list of "read" | "write". NULL/empty = legacy unrestricted
+    # key (pre-v43 rows keep working); new keys always store explicit scopes.
+    scopes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+
+class PackRegistry(Base):
+    """Remote pack source (v43) - a URL Py8n can pull py8n-pack documents from.
+
+    Point it at another instance's ``/templates/gallery/pack``, a teammate's
+    shared pack file or any static JSON endpoint; ``check`` dry-runs the pack
+    against the local estate and ``sync`` imports it through the ordinary
+    pack pipeline (inactive workflows, snapshot versions, skip-with-reason).
+    """
+
+    __tablename__ = "pack_registries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    url: Mapped[str] = mapped_column(String(2000), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ok|error
+    last_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # import summary or {"error": ...}

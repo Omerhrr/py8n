@@ -73,6 +73,7 @@ from .api.insights import router as insights_router  # noqa: E402
 from .api.keys import router as keys_router  # noqa: E402 (v41)
 from .api.node_defs import router as node_defs_router  # noqa: E402
 from .api.packs import router as packs_router  # noqa: E402 (v39)
+from .api.registries import router as registries_router  # noqa: E402 (v43)
 from .api.schedules import router as schedules_router  # noqa: E402
 from .api.settings import router as settings_router  # noqa: E402
 from .api.templates import router as templates_router  # noqa: E402
@@ -87,16 +88,18 @@ API = "/api/v1"
 # chat, app/dashboard runtimes, artifact content, embedded dataset SQL) stay
 # reachable - see auth.is_public_path. In the default open mode this is a
 # no-op (anonymous still works, tokens just scope what they touch).
-from .auth import enforce_auth  # noqa: E402
+from .auth import enforce_auth, enforce_key_scopes  # noqa: E402 (scopes v43)
 
-ENFORCED = [Depends(enforce_auth)]
+# v43: enforce_key_scopes rides every enforced router so read-only API
+# keys are rejected with 403 on mutating methods (JWT users unaffected).
+ENFORCED = [Depends(enforce_auth), Depends(enforce_key_scopes)]
 
 app.include_router(workflows_router, prefix=API, dependencies=ENFORCED)
 app.include_router(agents_router, prefix=API, dependencies=ENFORCED)  # v34
 app.include_router(executions_router, prefix=API, dependencies=ENFORCED)
 app.include_router(schedules_router, prefix=API, dependencies=ENFORCED)
 app.include_router(webhooks_router, prefix=API)
-app.include_router(chat_router, prefix=API)
+app.include_router(chat_router, prefix=API, dependencies=[Depends(enforce_key_scopes)])  # v43: chat runs workflows, so read-only keys are gated
 app.include_router(auth_router, prefix=API)  # v37: register/login/me/status
 app.include_router(artifacts_router, prefix=API, dependencies=ENFORCED)
 app.include_router(datasets_router, prefix=API, dependencies=ENFORCED)
@@ -112,6 +115,7 @@ app.include_router(node_defs_router, prefix=API, dependencies=ENFORCED)
 app.include_router(templates_router, prefix=API, dependencies=ENFORCED)
 app.include_router(packs_router, prefix=API, dependencies=ENFORCED)  # v39
 app.include_router(keys_router, prefix=API, dependencies=ENFORCED)  # v41
+app.include_router(registries_router, prefix=API, dependencies=ENFORCED)  # v43
 app.include_router(ws_router)  # /ws/...
 
 

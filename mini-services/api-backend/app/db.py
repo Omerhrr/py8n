@@ -56,5 +56,13 @@ async def init_db() -> None:
                 cols = {c["name"] for c in insp.get_columns(table)}
                 if "owner_id" not in cols:
                     sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN owner_id VARCHAR(36)"))
+            # v43: vault hardening + key scopes + pack registries
+            cred_cols = {c["name"] for c in insp.get_columns("credentials")}
+            if "rotated_at" not in cred_cols:
+                sync_conn.execute(text("ALTER TABLE credentials ADD COLUMN rotated_at TIMESTAMP"))
+            key_cols = {c["name"] for c in insp.get_columns("api_keys")}
+            if "scopes" not in key_cols:
+                # NULL scopes = legacy unrestricted key (pre-v43 rows keep access)
+                sync_conn.execute(text("ALTER TABLE api_keys ADD COLUMN scopes JSON"))
 
         await conn.run_sync(_add_missing_columns)

@@ -17,6 +17,7 @@ reads on the live server would otherwise race (v4 lesson).
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
@@ -24,11 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
-from ..models import Credential, Workflow
+from ..models import Credential, CredentialEvent, Workflow
 from ..schemas import (
     CredentialCreate,
     CredentialDetail,
+    CredentialEventOut,
     CredentialOut,
+    CredentialRotate,
     CredentialTestRequest,
     CredentialTestResult,
     CredentialUpdate,
@@ -52,10 +55,25 @@ SECRET_FIELDS: dict[str, set[str]] = {
 KEEP_MARKER = "__keep__"
 
 
+def _log_event(db: AsyncSession, cred: Credential, action: str, detail: dict | None = None) -> None:
+    """Append a vault audit row (v43). Detail carries FIELD NAMES only -
+    callers must never put secret values in here. Caller owns the commit."""
+    db.add(
+        CredentialEvent(
+            credential_id=cred.id,
+            owner_id=cred.owner_id,
+            credential_name=cred.name,
+            action=action,
+            detail=detail or {},
+        )
+    )
+
+
 def _out(cred: Credential, data: dict) -> CredentialOut:
     return CredentialOut(
         id=cred.id, name=cred.name, type=cred.type,
         masked_hint=mask_hint(data), created_at=cred.created_at,
+        rotated_at=cred.rotated_at,
     )
 
 
@@ -65,7 +83,8 @@ def _detail(cred: Credential, data: dict) -> CredentialDetail:
     visible = {k: ("" if k in secrets else v) for k, v in data.items()}
     return CredentialDetail(
         id=cred.id, name=cred.name, type=cred.type,
-        masked_hint=mask_hint(data), created_at=cred.created_at, data=visible,
+        masked_hint=mask_hint(data), created_at=cred.created_at,
+        rotated_at=cred.rotated_at, data=visible,
     )
 
 
@@ -80,6 +99,7 @@ async def create_credential(body: CredentialCreate, user=Depends(get_optional_us
     db.add(cred)
     await db.flush()
     await db.refresh(cred)
+    _log_event(db, cred, "created", {"type": cred.type, "fields": sorted(body.data.keys())})
     await db.commit()  # explicit: teardown commit runs after the response
     return _out(cred, body.data)
 
@@ -118,6 +138,8 @@ async def update_credential(
         name = body.name.strip()
         if not name:
             raise HTTPException(status_code=400, detail="Credential name cannot be empty")
+        if name[:200] != cred.name:
+            _log_event(db, cred, "renamed", {"from": cred.name, "to": name[:200]})
         cred.name = name[:200]
     if body.data is not None:
         if not isinstance(body.data, dict) or not body.data:
@@ -128,10 +150,63 @@ async def update_credential(
             k: (data.get(k, "") if v == KEEP_MARKER else v)
             for k, v in body.data.items()
         }
+        _log_event(db, cred, "updated", {"fields": sorted(body.data.keys())})
         data = merged
         cred.data_encrypted = encrypt_payload(data)
     await db.commit()
     return _out(cred, data)
+
+
+@router.post("/{credential_id}/rotate", response_model=CredentialOut)
+async def rotate_credential(
+    credential_id: str, body: CredentialRotate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
+):
+    """v43 secret rotation - replace ONLY the provided fields; every other
+    field (endpoints, usernames, header names) carries over untouched, so a
+    leaked key can be swapped without re-entering the whole config. The
+    rotated_at stamp and the audit row record field names, never values."""
+    cred = await db.get(Credential, credential_id)
+    if cred is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
+
+    if not isinstance(body.secrets, dict) or not body.secrets:
+        raise HTTPException(status_code=400, detail="Provide at least one field to rotate")
+    data = decrypt_payload(cred.data_encrypted)
+    changed = sorted(k for k in body.secrets if data.get(k) != body.secrets[k])
+    data.update(body.secrets)
+    cred.data_encrypted = encrypt_payload(data)
+    cred.rotated_at = datetime.now(timezone.utc)
+    _log_event(db, cred, "rotated", {"fields": sorted(body.secrets.keys()), "changed": changed})
+    await db.commit()
+    await db.refresh(cred)
+    return _out(cred, data)
+
+
+@router.get("/{credential_id}/events", response_model=list[CredentialEventOut])
+async def credential_events(
+    credential_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)
+):
+    """Vault audit trail for one credential, newest first (capped at 200)."""
+    cred = await db.get(Credential, credential_id)
+    if cred is None:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    own_or_404(cred.owner_id, user)  # v37
+    rows = (
+        await db.execute(
+            select(CredentialEvent)
+            .where(CredentialEvent.credential_id == credential_id)
+            .order_by(CredentialEvent.created_at.desc(), CredentialEvent.id.desc())
+            .limit(200)
+        )
+    ).scalars().all()
+    return [
+        CredentialEventOut(
+            id=r.id, action=r.action, credential_name=r.credential_name,
+            detail=r.detail or {}, created_at=r.created_at,
+        )
+        for r in rows
+    ]
 
 
 @router.post("/{credential_id}/test", response_model=CredentialTestResult)
@@ -155,7 +230,8 @@ async def test_credential(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    from datetime import datetime, timezone
+    _log_event(db, cred, "tested", {"ok": bool(result.get("ok")), "message": str(result.get("message", ""))[:200]})
+    await db.commit()
 
     return CredentialTestResult(
         ok=bool(result.get("ok")),
@@ -225,5 +301,6 @@ async def delete_credential(
             status_code=409,
             detail=f"Credential is used by {usage.workflow_count} workflow(s): {names}{more}. Delete with force=true to break the link.",
         )
+    _log_event(db, cred, "deleted", {"fields": sorted(decrypt_payload(cred.data_encrypted).keys())})
     await db.delete(cred)
     await db.commit()  # explicit: teardown commit runs after the response

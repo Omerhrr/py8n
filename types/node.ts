@@ -289,6 +289,15 @@ export interface Credential {
   type: string
   masked_hint: string
   created_at: string
+  rotated_at: string | null
+}
+
+export interface CredentialEvent {
+  id: string
+  action: string
+  credential_name: string
+  detail: Record<string, any>
+  created_at: string
 }
 
 export interface CredentialTestResult {

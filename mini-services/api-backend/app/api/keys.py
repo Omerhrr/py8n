@@ -8,8 +8,13 @@ creation; storage keeps only a sha256 hash plus a display prefix.
 
 Endpoints (all under /keys, enforced like the rest of the build surface):
   GET    /keys        list the caller's keys (masked)
-  POST   /keys        mint a key {name} -> {key: "py8n_..."} (shown once)
+  POST   /keys        mint a key {name, scopes?} -> {key: "py8n_..."} (shown once)
   DELETE /keys/{id}   revoke (stamps revoked_at; history stays)
+
+v43 scopes: a key carries ["read", "write"] (default) or ["read"] - a
+read-only key is rejected with 403 on any non-safe method (see
+``enforce_key_scopes`` in auth.py). Pre-v43 keys (scopes NULL) stay
+unrestricted.
 """
 
 from __future__ import annotations
@@ -31,10 +36,16 @@ router = APIRouter(prefix="/keys", tags=["keys"])
 
 KEY_PREFIX = "py8n_"
 _PREFIX_DISPLAY_LEN = 12  # e.g. py8n_ab12cd34
+ALLOWED_SCOPES = ("read", "write")
+DEFAULT_SCOPES = ["read", "write"]
 
 
 class KeyCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    scopes: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_SCOPES),
+        description='Key scopes: ["read", "write"] (default) or ["read"] for a read-only key',
+    )
 
 
 def _out(row: ApiKey) -> dict:
@@ -46,6 +57,8 @@ def _out(row: ApiKey) -> dict:
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
         "revoked": row.revoked_at is not None,
         "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+        "scopes": row.scopes or list(DEFAULT_SCOPES),  # NULL = legacy unrestricted
+        "read_only": "write" not in (row.scopes or DEFAULT_SCOPES),
     }
 
 
@@ -67,12 +80,22 @@ async def list_keys(user=Depends(get_optional_user), db: AsyncSession = Depends(
 async def create_key(body: KeyCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     if user is None:
         raise HTTPException(status_code=401, detail="Register or sign in before creating API keys")
+    scopes = list(dict.fromkeys(body.scopes))  # de-dup, keep order
+    if not scopes:
+        raise HTTPException(status_code=400, detail="Key needs at least one scope")
+    unknown = [s for s in scopes if s not in ALLOWED_SCOPES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown scope(s): {', '.join(unknown)}. Allowed: {', '.join(ALLOWED_SCOPES)}",
+        )
     full = KEY_PREFIX + secrets.token_urlsafe(24)
     row = ApiKey(
         owner_id=user.id,
         name=body.name.strip()[:120],
         prefix=full[:_PREFIX_DISPLAY_LEN],
         key_hash=hashlib.sha256(full.encode()).hexdigest(),
+        scopes=scopes,
     )
     db.add(row)
     await db.commit()

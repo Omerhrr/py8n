@@ -190,6 +190,9 @@ async def get_optional_user(request: Request, db: AsyncSession = Depends(get_db)
         user = await db.get(User, row.owner_id)
         if user is None:
             return None
+        # v43: scopes ride request.state so enforce_key_scopes can gate
+        # writes; NULL scopes = legacy pre-v43 key, treated as unrestricted.
+        request.state.py8n_key_scopes = list(row.scopes) if row.scopes else None
         return user
 
     return None
@@ -206,6 +209,26 @@ def enforce_auth(request: Request, user=Depends(get_optional_user)) -> None:
     if is_public_path(request.url.path):
         return
     raise HTTPException(status_code=401, detail="Authentication required")
+
+
+def enforce_key_scopes(request: Request, user=Depends(get_optional_user)) -> None:
+    """Router-level dependency (v43): gate API-key callers by their scopes.
+
+    A key whose scopes lack "write" may only use safe methods (GET/HEAD/
+    OPTIONS) - every mutating call (create, update, delete, run, trigger)
+    gets a 403. JWT sessions and anonymous traffic are unaffected; pre-v43
+    keys (scopes NULL) are unrestricted. get_optional_user is cached per
+    request, so the user resolution happens exactly once.
+    """
+    scopes = getattr(request.state, "py8n_key_scopes", None)
+    if scopes is None or "write" in scopes:
+        return
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail="This API key is read-only (scope: read); use a key with write access for this action",
+    )
 
 
 # ----------------------------------------------------------------------

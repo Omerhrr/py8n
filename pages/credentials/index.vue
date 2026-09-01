@@ -3,9 +3,10 @@ import { ref, computed, onMounted } from 'vue'
 import {
   KeyRound, Plus, Loader2, Pencil, Trash2, Zap, ShieldCheck, ShieldX,
   CheckCircle2, XCircle, Globe, Lock, Mail, MessageSquare, Sparkles, CircleDot,
+  RefreshCw, History,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
-import type { Credential, CredentialTestResult, CredentialUsage } from '~/types/node'
+import type { Credential, CredentialEvent, CredentialTestResult, CredentialUsage } from '~/types/node'
 
 const store = usePy8nStore()
 const { api } = useApi()
@@ -217,6 +218,95 @@ async function removeCred(cred: Credential) {
   }
 }
 
+// ------------------------------------------------------------------ rotation + audit (v43)
+const rotating = ref<Credential | null>(null)
+const rotateData = ref<Record<string, string>>({})
+const rotateSaving = ref(false)
+const rotateError = ref('')
+const rotateDone = ref('')
+
+function openRotate(cred: Credential) {
+  rotating.value = cred
+  rotateError.value = ''
+  rotateData.value = {}
+  for (const f of typeMeta(cred.type).fields) {
+    if (f.secret) rotateData.value[f.key] = ''
+  }
+}
+
+async function submitRotate() {
+  if (!rotating.value) return
+  const secrets: Record<string, string> = {}
+  for (const [k, v] of Object.entries(rotateData.value)) {
+    if (v !== '') secrets[k] = v
+  }
+  if (!Object.keys(secrets).length) {
+    rotateError.value = 'Type at least one new secret value'
+    return
+  }
+  rotateSaving.value = true
+  rotateError.value = ''
+  try {
+    await api.post(`/credentials/${rotating.value.id}/rotate`, { secrets })
+    rotateDone.value = `Rotated ${Object.keys(secrets).join(', ')} on "${rotating.value.name}"`
+    rotating.value = null
+    await store.loadCredentials()
+    void toggleAuditReload()
+  } catch (e: any) {
+    rotateError.value = e?.data?.detail || e?.message || 'Rotation failed'
+  } finally {
+    rotateSaving.value = false
+  }
+}
+
+// audit trail: fetched per credential on first expand, refreshed after rotations
+const auditOpen = ref<Record<string, boolean>>({})
+const auditEvents = ref<Record<string, CredentialEvent[]>>({})
+const auditLoading = ref<Record<string, boolean>>({})
+
+const ACTION_STYLE: Record<string, string> = {
+  created: 'bg-emerald-500/10 text-emerald-400',
+  rotated: 'bg-amber-500/10 text-amber-400',
+  updated: 'bg-sky-500/10 text-sky-400',
+  renamed: 'bg-violet-500/10 text-violet-400',
+  tested: 'bg-cyan-500/10 text-cyan-400',
+  used: 'bg-zinc-700/40 text-zinc-300',
+  deleted: 'bg-rose-500/10 text-rose-400',
+}
+
+function eventLine(e: CredentialEvent): string {
+  const d = e.detail || {}
+  if (e.action === 'created') return `${d.type || 'credential'}: ${(d.fields || []).join(', ')}`
+  if (e.action === 'rotated') return `fields ${(d.fields || []).join(', ')}${(d.changed || []).length ? '' : ' (no change)'}`
+  if (e.action === 'updated') return `fields ${(d.fields || []).join(', ')}`
+  if (e.action === 'renamed') return `${d.from || '?'} -> ${d.to || '?'}`
+  if (e.action === 'tested') return d.ok ? `probe ok${d.message ? `: ${d.message}` : ''}` : `probe failed${d.message ? `: ${d.message}` : ''}`
+  if (e.action === 'used') return d.workflow_name ? `workflow "${d.workflow_name}"` : 'workflow run'
+  if (e.action === 'deleted') return `fields ${(d.fields || []).join(', ')}`
+  return ''
+}
+
+async function toggleAudit(cred: Credential) {
+  auditOpen.value = { ...auditOpen.value, [cred.id]: !auditOpen.value[cred.id] }
+  if (auditOpen.value[cred.id] && !auditEvents.value[cred.id]) await loadAudit(cred.id)
+}
+
+async function toggleAuditReload() {
+  // after a rotation: refresh any open trail (credentials list reloaded)
+  const id = Object.keys(auditOpen.value).find((k) => auditOpen.value[k])
+  if (id) await loadAudit(id)
+}
+
+async function loadAudit(id: string) {
+  auditLoading.value = { ...auditLoading.value, [id]: true }
+  try {
+    auditEvents.value = { ...auditEvents.value, [id]: await api.get<CredentialEvent[]>(`/credentials/${id}/events`) }
+  } catch { /* deleted mid-flight - ignore */ }
+  finally {
+    auditLoading.value = { ...auditLoading.value, [id]: false }
+  }
+}
+
 // ------------------------------------------------------------------ helpers
 function relTime(iso: string) {
   const s = (Date.now() - new Date(iso).getTime()) / 1000
@@ -344,6 +434,10 @@ onMounted(async () => {
                 <span class="font-mono">{{ cred.masked_hint }}</span>
                 <span>·</span>
                 <span>created {{ relTime(cred.created_at) }}</span>
+                <template v-if="cred.rotated_at">
+                  <span>·</span>
+                  <span class="text-amber-400/80">rotated {{ relTime(cred.rotated_at) }}</span>
+                </template>
                 <span>·</span>
                 <span class="truncate">{{ typeMeta(cred.type).blurb }}</span>
               </div>
@@ -366,6 +460,22 @@ onMounted(async () => {
 
             <!-- actions -->
             <div class="flex shrink-0 items-center gap-1.5">
+              <button
+                class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-amber-500/40 hover:text-amber-300 disabled:opacity-50"
+                title="Replace secret values without touching the rest of the config"
+                @click="openRotate(cred)"
+              >
+                <RefreshCw class="h-3.5 w-3.5" />
+                Rotate
+              </button>
+              <button
+                class="rounded-xl border border-zinc-800 bg-zinc-900 p-2 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-100"
+                :class="auditOpen[cred.id] ? 'border-zinc-600 text-zinc-100' : ''"
+                title="Audit trail"
+                @click="toggleAudit(cred)"
+              >
+                <History class="h-3.5 w-3.5" />
+              </button>
               <button
                 class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-50"
                 :disabled="testing[cred.id]"
@@ -391,6 +501,25 @@ onMounted(async () => {
                 <Trash2 class="h-3.5 w-3.5" />
               </button>
             </div>
+          </div>
+
+          <!-- audit trail (expandable) -->
+          <div v-if="auditOpen[cred.id]" class="mt-3 border-t border-zinc-800/70 pt-3">
+            <div v-if="auditLoading[cred.id]" class="flex items-center gap-2 px-1 py-2 text-xs text-zinc-500">
+              <Loader2 class="h-3.5 w-3.5 animate-spin" /> Loading audit trail…
+            </div>
+            <div v-else-if="!(auditEvents[cred.id] || []).length" class="px-1 py-1 text-xs text-zinc-600">No audit events yet</div>
+            <ol v-else class="space-y-1.5">
+              <li v-for="ev in auditEvents[cred.id]" :key="ev.id" class="flex items-start gap-2 text-xs">
+                <span
+                  class="w-16 shrink-0 rounded-md px-1.5 py-0.5 text-center text-[10px] font-semibold uppercase tracking-wide"
+                  :class="ACTION_STYLE[ev.action] || 'bg-zinc-800 text-zinc-400'"
+                >{{ ev.action }}</span>
+                <span class="min-w-0 flex-1 truncate text-zinc-400">{{ eventLine(ev) }}</span>
+                <span class="shrink-0 tabular-nums text-zinc-600">{{ relTime(ev.created_at) }}</span>
+              </li>
+            </ol>
+            <p class="mt-2 px-1 text-[10px] text-zinc-600">Secret values are never recorded - only field names and workflow references.</p>
           </div>
         </div>
       </div>
@@ -485,5 +614,74 @@ onMounted(async () => {
         </div>
       </div>
     </Teleport>
+
+    <!-- rotate modal (v43) -->
+    <Teleport to="body">
+      <div
+        v-if="rotating"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        @click.self="rotating = null"
+      >
+        <div class="w-full max-w-md rounded-2xl border border-amber-500/30 bg-zinc-950 shadow-2xl">
+          <div class="border-b border-zinc-800/80 px-5 py-4">
+            <h2 class="flex items-center gap-2 text-sm font-bold">
+              <RefreshCw class="h-4 w-4 text-amber-400" />
+              Rotate "{{ rotating.name }}"
+            </h2>
+            <p class="mt-0.5 text-[11px] text-zinc-500">Only the fields you fill in are replaced - everything else (URLs, usernames, header names) carries over. The old value stops working the moment you save.</p>
+          </div>
+
+          <div class="space-y-3.5 px-5 py-4">
+            <label v-for="f in typeMeta(rotating.type).fields.filter((x) => x.secret)" :key="f.key" class="block">
+              <span class="mb-1 block text-xs font-medium text-zinc-400">{{ f.label }}</span>
+              <input
+                v-model="rotateData[f.key]"
+                type="password"
+                autocomplete="off"
+                class="w-full rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm outline-none transition placeholder:text-zinc-600 focus:border-amber-500/60"
+                placeholder="leave blank to keep the current value"
+              />
+            </label>
+            <p v-if="rotateError" class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{{ rotateError }}</p>
+          </div>
+
+          <div class="flex justify-end gap-2 border-t border-zinc-800/80 px-5 py-3.5">
+            <button
+              class="rounded-xl border border-zinc-800 px-3.5 py-2 text-sm font-medium text-zinc-400 transition hover:text-zinc-100"
+              @click="rotating = null"
+            >
+              Cancel
+            </button>
+            <button
+              class="flex items-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-2 text-sm font-semibold text-zinc-950 shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 disabled:opacity-50"
+              :disabled="rotateSaving"
+              @click="submitRotate"
+            >
+              <Loader2 v-if="rotateSaving" class="h-3.5 w-3.5 animate-spin" />
+              <RefreshCw v-else class="h-3.5 w-3.5" />
+              Rotate secret
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- rotation success toast -->
+    <Teleport to="body">
+      <Transition name="fade">
+        <div
+          v-if="rotateDone"
+          class="fixed bottom-6 right-6 z-50 flex items-center gap-2 rounded-xl border border-emerald-500/40 bg-zinc-950 px-4 py-3 text-sm text-emerald-300 shadow-2xl"
+        >
+          <CheckCircle2 class="h-4 w-4" /> {{ rotateDone }}
+          <button class="ml-2 text-xs text-zinc-500 hover:text-zinc-200" @click="rotateDone = ''">dismiss</button>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>
+
+<style scoped>
+.fade-enter-active, .fade-leave-active { transition: opacity 0.25s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
+</style>

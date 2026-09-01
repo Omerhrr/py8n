@@ -58,12 +58,16 @@ async def decrypt_credential(context, credential_id: str) -> dict:
 
     Creates a short-lived engine/session so it works both inside the FastAPI
     event loop and inside Celery workers (which run fresh event loops per task).
+    Every successful resolution writes a ``used`` row to the vault audit trail
+    (v43) - the audit is the point of the vault, so it records the workflow
+    that touched the secret, never the secret itself.
     """
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     from ..config import settings as cfg
     from ..models import Credential as CredentialModel
+    from ..models import CredentialEvent
 
     engine = create_async_engine(cfg.database_url)
     try:
@@ -72,6 +76,20 @@ async def decrypt_credential(context, credential_id: str) -> dict:
             row = (
                 await session.execute(select(CredentialModel).where(CredentialModel.id == credential_id))
             ).scalar_one_or_none()
+            if row is not None:
+                session.add(
+                    CredentialEvent(
+                        credential_id=credential_id,
+                        owner_id=row.owner_id,
+                        credential_name=row.name,
+                        action="used",
+                        detail={
+                            "workflow_id": getattr(context, "workflow_id", None),
+                            "workflow_name": getattr(context, "workflow_name", None),
+                        },
+                    )
+                )
+                await session.commit()
     finally:
         await engine.dispose()
 
