@@ -56,7 +56,8 @@ class PackDataset(BaseModel):
 
     name: str
     description: str = ""
-    schema_json: list = Field(default_factory=list, alias="schema")
+    # wire key is "schema"; the python name avoids shadowing BaseModel.schema_json
+    schema_def: list = Field(default_factory=list, alias="schema")
     rows: list = Field(default_factory=list)
 
 

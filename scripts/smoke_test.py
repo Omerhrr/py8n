@@ -65,6 +65,19 @@ def sse_chat_frames(wf_id: str, message: str, session_id: str, attempts: int = 4
     raise last_exc if last_exc else RuntimeError("SSE chat retries exhausted")
 
 
+def bump_agent_iterations(wf_id: str, cap: int = 9) -> None:
+    """Installed data-analyst copies ship max_iterations=6; live-LLM runs
+    sometimes spend them all exploring datasets before answering. Raise the
+    cap on the throwaway smoke copy so the section is deterministic."""
+    status, wf = req("GET", f"/workflows/{wf_id}")
+    assert status == 200, wf
+    for node in wf["graph"].get("nodes", []):
+        if node.get("type") == "ai_agent":
+            node.setdefault("parameters", {})["max_iterations"] = cap
+    status, _ = req("PUT", f"/workflows/{wf_id}", {"graph": wf["graph"]})
+    assert status == 200, status
+
+
 async def ws_test(execution_id: str, expect_nodes: int) -> list:
     import websockets
 
@@ -1164,7 +1177,7 @@ def main() -> None:
         assert status in (200, 202), body
         exec_id = body["execution_id"]
         detail = None
-        for _ in range(120):
+        for _ in range(900):
             status, detail = req("GET", f"/executions/{exec_id}")
             assert status == 200
             if detail["status"] != "running":
@@ -1456,7 +1469,7 @@ def main() -> None:
         status, run1 = req("POST", f"/workflows/{wfm['id']}/run", {"payload": {}})
         assert status in (200, 202), run1
         d1 = None
-        for _ in range(120):
+        for _ in range(900):
             status, d1 = req("GET", f"/executions/{run1['execution_id']}")
             if d1["status"] != "running":
                 break
@@ -1470,7 +1483,7 @@ def main() -> None:
         status, r2res = req("POST", f"/workflows/{wfm['id']}/run", {"payload": {}})
         exec2 = r2res["execution_id"]
         d2 = None
-        for _ in range(120):
+        for _ in range(900):
             status, d2 = req("GET", f"/executions/{exec2}")
             if d2["status"] != "running":
                 break
@@ -2273,7 +2286,7 @@ def main() -> None:
         assert status in (200, 202), run33
         exec33 = run33["execution_id"] if isinstance(run33, dict) else run33
         rows33 = None
-        for _ in range(120):
+        for _ in range(900):
             status, ex33 = req("GET", f"/executions/{exec33}")
             assert status == 200, ex33
             if ex33.get("status") != "running":
@@ -2368,6 +2381,7 @@ def main() -> None:
         assert status == 201, wf36
         status, act = req("POST", f"/workflows/{wf36['id']}/activate", {})
         assert status == 200, act
+        bump_agent_iterations(wf36["id"])
         frames = sse_chat_frames(wf36["id"], "How many rows do I have? Reply with the number only.", f"smoke36-{tag36}")
         names = [e for e, _ in frames]
         assert names[0] == "start" and names[-1] == "done", names
@@ -2601,6 +2615,7 @@ def main() -> None:
     assert status == 201, wf40
     status, act40 = req("POST", f"/workflows/{wf40['id']}/activate")
     assert status == 200, act40
+    bump_agent_iterations(wf40["id"])
     sid40 = f"smoke40-{tag40}"
     time.sleep(30)  # the LLM gateway quota refills slowly - breathe before streaming
     frames40 = sse_chat_frames(wf40["id"], f"Query the view named smoke40_stations_{tag40} and reply with the SUM of the power column across all stations. Reply with the number only.", sid40)

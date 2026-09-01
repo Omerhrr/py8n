@@ -910,3 +910,55 @@ Work Log:
 
 Stage Summary:
 - Py8n v39: the estate became portable - any set of workflows plus live dataset snapshots bundles into one py8n-pack JSON, gets an honest dry-run preview (validity, collisions, renames) and imports back as inactive resources with per-item skip reasons; per-card export, bulk export dialog and pack-aware import all on the dashboard; 165/165 pytest + full smoke v27 -> v39 + browser E2E with a real export/import roundtrip; backend live at 1.39.0 - next candidates: dataset row previews inside the agent trace, API keys for machine access, pack files for the readymade gallery (ship v33 automations as importable packs)
+
+---
+Task ID: 51 (v40 feature wave - dataset row previews in the agent trace)
+Agent: main (Super Z)
+Task: "proceed with this: dataset row previews inside the agent trace, API keys, gallery packs" (triple wave, part 1)
+
+Work Log:
+- Session start: found an auto-committed UUID-message commit (e51ef80) holding the v39 worklog entry + cleanup script - amended to a proper message and pushed (00e3c77)
+- REFACTOR: AgentNode._run_tool returns the STRUCTURED value now (was: pre-truncated JSON string); the loop does result = self._truncate(value) itself, so one value feeds BOTH the model feedback (unchanged bytes) and the new trace preview. knowledge/dataset/code/http/workflow kinds all return native types; http error dict no longer double-truncated
+- NEW: AgentNode._data_preview (classmethod + MAX_PREVIEW_ROWS=3 / COLS=8 / CELL=60): only dataset-shaped payloads ({columns: [...], rows: [...]}) qualify; code-tool dicts {"result","stdout"} deliberately return None; cells str()[:60]; totals fall back to len(rows) when row_count is missing or garbage
+- EMIT: agent_tool_result frames gain "data" ONLY when a preview exists (error results never carry it); the /chat/{id}/stream bridge whitelist grew "data"
+- FRONTEND (pages/agents/index.vue): DataPreview interface; handleFrame passes data through; the tool_result chip renders a real mini table (thead uppercase zinc-500, bordered rows, 16rem truncated cells) with a "N of M rows - X of Y columns" footer when the caps bite; non-dataset results keep the pretty JSON pre
+- TESTS test_v40_features.py (3, suite 168/168): health pin; THE stream test - scripted agent with a REAL dataset tool (4-row cities dataset registered as a duckdb view): phases intact, tool_result frame carries data{columns=[city,temp], total_rows=4, rows_shown=3, rows[0]=["lima","19"]} AND the string preview AND the model still got its JSON feedback (TOOL RESULT message contains oslo); _data_preview shape unit test (None for str/code-dict/missing-columns, caps, cell truncation, garbage row_count fallback)
+- SMOKE v40 section: installs the data-analyst TEMPLATE (a bare hand-rolled prompt lets the model freehand an answer without tools - the template's system prompt actually forces tool use), queries a 3-row stations dataset, asserts the tool_result frame carries data with rows; GOTCHA: the model picks its own SQL (SELECT * vs SUM(power)) - assert the PREVIEW shape, not the query shape
+- Version 1.40.0, footer v1.40; v39 pin relaxed; v39 pack py8n_version assertion made version-agnostic (stamps whatever instance built it)
+
+Stage Summary:
+- v40: dataset tool results now land in the live agent trace as actual ROWS - a mini table with shown-of-total footer replaces the JSON blob; model feedback byte-identical; 168/168 pytest - full smoke + browser E2E deferred: the shared LLM gateway quota (429) burned out mid-session
+
+---
+Task ID: 52 (v41 feature wave - API keys for machine access)
+Agent: main (Super Z)
+Task: triple wave, part 2
+
+Work Log:
+- MODEL: api_keys table (id, owner_id, name, prefix "py8n_xxxxxxxx" for display, key_hash sha256-hex indexed, created_at, last_used_at, revoked_at) - the full key exists ONLY in the creation response; high-entropy random key makes sha256 (vs PBKDF2) the right call
+- AUTH: get_optional_user now has TWO credential channels - Bearer JWT (unchanged) and X-API-Key; a valid key authenticates AS ITS OWNER (same owner scoping as the owner's JWT: /auth/me resolves, created rows stamped owner_id, lists filtered); unknown/fake/revoked keys fall through to anonymous; last_used_at touched with a 60s throttle to keep write load sane; GOTCHA (38th-time): sqlite datetimes are naive - naive-utc arithmetic or "can't subtract offset-naive and offset-aware"
+- API (/keys, ENFORCED): GET list (masked, own rows only, [] for anonymous), POST create (401 anonymous, full key ONCE), DELETE = soft revoke (stamps revoked_at, idempotent 204, foreign keys 404 via own_or_404)
+- FRONTEND: pages/keys.vue (how-it-works strip with X-API-Key + PY8N_REQUIRE_AUTH copy, create dialog, key-shown-once reveal with copy button + TRY-IT curl snippet, table with prefix/created/last-used/ACTIVE-Revoked badges, revoke with confirm); sidebar "API keys" entry (KeySquare icon); footer v1.41
+- TESTS test_v41_features.py (4, suite 172/172): pin; lifecycle (anonymous create 401, prefix == key[:12], masked list, key resolves /auth/me, keyed workflow carries owner stamp, garbage key -> anonymous, revoke -> 401, idempotent revoke, row stays flagged); cross-user scoping (alice's key sees alice's wf, bob cannot revoke alice's key - 404); enforced mode (PY8N_REQUIRE_AUTH=true flipped in-test: anonymous 401, key 200 + can create, health stays public)
+- Live-DB hygiene: api_keys table created on the dev DB via init_db; E2E cleanup revokes keys + deletes the keyed workflow
+
+Stage Summary:
+- v41: machines got keys - mint once / shown once / revoke anytime; scripts and CI now talk to Py8n with the same scoping as their owner even in enforced mode; 172/172 pytest + browser E2E (real key created via the UI reveal, verified with X-API-Key /auth/me + owner-stamped workflow creation)
+
+---
+Task ID: 53 (v42 feature wave - the gallery ships as packs)
+Agent: main (Super Z)
+Task: triple wave, part 3
+
+Work Log:
+- BACKEND (app/api/templates.py): _gallery_pack(entries) builds a standard py8n-pack from template dicts (manifest.source="py8n-gallery" + template_ids + node_types); GET /templates/{id}/pack wraps one; GET /templates/gallery/pack bundles ALL 17 - declared BEFORE the parameterized routes so "gallery" is never eaten as an id; import needs ZERO new code (a gallery pack is just a pack -> /packs/inspect + /packs/import as-is); design note: v33 automations demo the dataset engine by GENERATING datasets at run time (dataset_write nodes), so there is nothing static to bundle by design
+- FRONTEND (pages/templates/index.vue): per-card Download button (icon-only, next to Install) -> py8n-{slug}.py8n.json; header "Export gallery" button -> py8n-gallery.py8n.json with spinner state
+- TESTS test_v42_features.py (4, suite 176/176): pin; single-template roundtrip (pack -> inspect valid -> import -> inactive wf with the template's node count); gallery pack (workflow_count == catalog length, all graphs pass inspect, subset import lands inactive); unknown template 404 + gallery/pack never captured as an id
+- SMOKE: v41 keys section (register -> mint -> X-API-Key /auth/me -> keyed workflow owner-stamped -> fake key 401 -> revoke -> 401) + v42 packs section (gallery manifest covers the whole catalog, data-analyst pack imports inactive); helper sse_chat_frames added: retries the stream on 429/502 error frames AND terminal timeout frames (throttle-slow LLM runs out the deadline) with 60s backoff x4; poll loops widened 12s -> 90s (throttled LLM calls take 31s+ with bridge retries); bump_agent_iterations raises the data-analyst copy's cap to 9 (the model sometimes spends 6 exploring)
+- PRODUCT RESILIENCE: the llm bridge now retries gateway 429/502/503 with 4s/9s/18s backoff (single choke point - every workflow, agent and smoke run benefits); backend restarted for the smoke with PY8N_WEBHOOK_WAIT_SECONDS=180 (the 25s default stream deadline cannot fit a throttled 9-iteration agent run; the flow keeps running past the deadline but the STREAM ends)
+- Version 1.42.0, footer v1.42; v41 pin relaxed; smoke's v36/v40 sections install data-analyst copies and harden their prompts/caps
+- E2E (browser): keys page full pass (create dialog -> 401-error UX when anonymous -> register-injected session -> key created -> shown-once reveal with copy + curl -> list with prefix + ACTIVE badge -> machine auth verified via curl /auth/me + owner-stamped workflow); gallery full pass (download buttons on every card, Export gallery produced a real 17-template py8n-gallery.py8n.json); screenshots download/e2e-v41-{key-created,keys-list}.png + e2e-v42-gallery.png
+- GOTCHAS: stale Vite HMR overlay showed an already-fixed syntax error (reload clears it); hidden file inputs need classList.remove('hidden') before agent-browser upload; find text cannot match text split across icon+span nodes - use snapshot refs; the shared LLM gateway 429s for long windows after heavy smoke traffic - space the real-LLM sections, let the bridge + smoke helpers absorb the bursts
+
+Stage Summary:
+- v42: the readymade gallery became portable - any template or the whole 17-automation catalog downloads as a standard py8n-pack and imports anywhere through the existing pack pipeline; plus platform-grade resilience: bridge-level gateway retries and a properly sized stream deadline; 176/176 pytest, browser E2E green for the keys page and gallery exports
