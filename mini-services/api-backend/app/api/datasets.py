@@ -9,6 +9,7 @@ POST   /datasets/query           run DuckDB SQL across ALL datasets (views)
 GET    /datasets/{id}            metadata (by id or name)
 GET    /datasets/{id}/rows       paginated rows
 GET    /datasets/{id}/profile    per-column profiling stats
+GET    /datasets/{id}/export     download as csv/xlsx/json/parquet (v45)
 POST   /datasets/{id}/rows       append rows
 PUT    /datasets/{id}            rename / re-describe
 DELETE /datasets/{id}            drop metadata + parquet file
@@ -24,7 +25,7 @@ import io
 import json
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -209,6 +210,27 @@ async def get_profile(dataset_id: str, user=Depends(get_optional_user), db: Asyn
     row = await _get_or_404(db, dataset_id, user)
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(row.id))
     return ds_svc.profile_df(df)
+
+
+@router.get("/{dataset_id}/export")
+async def export_dataset(
+    dataset_id: str,
+    fmt: str = Query("csv", description="csv|xlsx|json|parquet"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Download the dataset as a file (v45) - owner-scoped, size-capped."""
+    row = await _get_or_404(db, dataset_id, user)
+    try:
+        data, content_type, ext = ds_svc.export_dataset_bytes(row, fmt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"{ds_svc.view_name(row.name)}.{ext}"
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{dataset_id}/rows", response_model=DatasetOut)

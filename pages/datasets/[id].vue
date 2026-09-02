@@ -2,11 +2,11 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import {
   Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
-  Play, BarChart3, Table2, X, History, Undo2, Plus, Eye,
+  Play, BarChart3, Table2, X, History, Undo2, Plus, Eye, Download,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
-const { api } = useApi()
+const { api, download } = useApi()
 const route = useRoute()
 const ref_ = computed(() => String(route.params.id))
 
@@ -50,6 +50,23 @@ const loadingRows = ref(false)
 const profile = ref<any>(null)
 const loadingProfile = ref(false)
 
+// v45: dataset export
+const exportOpen = ref(false)
+const exporting = ref<string | null>(null)
+const EXPORT_FORMATS = ['csv', 'xlsx', 'json', 'parquet'] as const
+async function exportDataset(fmt: string) {
+  if (!meta.value) return
+  exporting.value = fmt
+  try {
+    await download(`/datasets/${meta.value.id}/export?fmt=${fmt}`, `${meta.value.name}.${fmt === 'parquet' ? 'parquet' : fmt}`)
+    exportOpen.value = false
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Export failed'
+  } finally {
+    exporting.value = null
+  }
+}
+
 // sql console
 const sql = ref('')
 const running = ref(false)
@@ -80,6 +97,15 @@ async function loadRows() {
   } finally {
     loadingRows.value = false
   }
+}
+
+// v45: correlation lookup for the profile panel
+function corrFor(name: string): Record<string, number> | null {
+  const row = (profile.value?.correlation || []).find((r: any) => r.column === name)
+  if (!row) return null
+  const others: Record<string, number> = { ...row.correlations }
+  delete others[name]
+  return Object.keys(others).length ? others : null
 }
 
 async function loadProfile() {
@@ -278,6 +304,32 @@ const dtypeColor: Record<string, string> = {
           <span class="hidden items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 sm:flex">
             <Table2 class="h-3.5 w-3.5 text-sky-400" /> <b class="text-zinc-100">{{ meta.schema_json.length }}</b> cols
           </span>
+          <!-- v45: export -->
+          <div class="relative">
+            <button
+              class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-zinc-400 transition hover:border-sky-500/40 hover:text-sky-400"
+              title="Export dataset"
+              @click="exportOpen = !exportOpen"
+            >
+              <Loader2 v-if="exporting" class="h-3.5 w-3.5 animate-spin" />
+              <Download v-else class="h-3.5 w-3.5" />
+              <span class="hidden sm:inline">Export</span>
+            </button>
+            <div
+              v-if="exportOpen"
+              class="absolute right-0 z-20 mt-1 w-36 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 shadow-xl shadow-black/40"
+            >
+              <button
+                v-for="fmt in EXPORT_FORMATS"
+                :key="fmt"
+                class="flex w-full items-center justify-between px-3 py-2 text-xs text-zinc-300 transition hover:bg-zinc-800/80 hover:text-sky-300"
+                @click="exportDataset(fmt)"
+              >
+                <span class="uppercase">{{ fmt }}</span>
+                <Loader2 v-if="exporting === fmt" class="h-3 w-3 animate-spin" />
+              </button>
+            </div>
+          </div>
           <button
             class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-1.5 text-zinc-500 transition hover:border-amber-500/40 hover:text-amber-400"
             title="Delete dataset"
@@ -434,6 +486,13 @@ const dtypeColor: Record<string, string> = {
               <Loader2 v-if="loadingProfile" class="ml-auto h-3.5 w-3.5 animate-spin text-zinc-500" />
             </div>
             <div v-if="profile" class="divide-y divide-zinc-800/40">
+              <!-- v45: dataset-level stats -->
+              <div class="grid grid-cols-2 gap-x-3 gap-y-1 bg-zinc-900/60 px-4 py-3 text-[11px] text-zinc-400">
+                <span>completeness <b class="text-zinc-200">{{ profile.completeness_pct }}%</b></span>
+                <span>dup rows <b class="text-zinc-200">{{ profile.duplicate_rows }}</b></span>
+                <span>constant cols <b class="text-zinc-200">{{ profile.constant_columns.length || 0 }}</b></span>
+                <span>correlations <b class="text-zinc-200">{{ profile.correlation.length }}</b></span>
+              </div>
               <div v-for="c in profile.columns" :key="c.name" class="px-4 py-3">
                 <div class="flex items-center justify-between gap-2">
                   <p class="truncate font-mono text-xs font-semibold text-zinc-200">{{ c.name }}</p>
@@ -443,10 +502,19 @@ const dtypeColor: Record<string, string> = {
                   >{{ c.dtype }}</span>
                 </div>
                 <p class="mt-1 text-[11px] text-zinc-500">
-                  {{ c.non_null }} non-null · {{ c.nulls }} empty · {{ c.unique }} unique
+                  {{ c.non_null }} non-null ({{ c.null_pct }}% empty) · {{ c.unique }} unique
                 </p>
                 <p v-if="c.min !== undefined" class="mt-1 text-[11px] text-zinc-400">
                   min <b class="text-zinc-200">{{ fmtCell(c.min) }}</b> · max <b class="text-zinc-200">{{ fmtCell(c.max) }}</b> · mean <b class="text-zinc-200">{{ Number(c.mean ?? 0).toFixed(2) }}</b>
+                </p>
+                <p v-if="c.median !== undefined" class="mt-1 text-[11px] text-zinc-500">
+                  median <b class="text-zinc-300">{{ Number(c.median).toFixed(2) }}</b> · q25 <b class="text-zinc-300">{{ Number(c.q25).toFixed(2) }}</b> · q75 <b class="text-zinc-300">{{ Number(c.q75).toFixed(2) }}</b> · std <b class="text-zinc-300">{{ Number(c.std ?? 0).toFixed(2) }}</b>
+                </p>
+                <p v-if="c.outliers_iqr" class="mt-1 text-[11px] text-amber-400">
+                  ⚠ {{ c.outliers_iqr }} IQR outlier{{ c.outliers_iqr === 1 ? '' : 's' }} outside [{{ Number(c.outlier_lower).toFixed(1) }}, {{ Number(c.outlier_upper).toFixed(1) }}]
+                </p>
+                <p v-if="c.parsed_as_datetime" class="mt-1 text-[11px] text-sky-400">
+                  spans {{ c.span_days }} days ({{ c.datetime_min?.slice(0, 10) }} → {{ c.datetime_max?.slice(0, 10) }})
                 </p>
                 <div v-if="c.top_values?.length" class="mt-1.5 flex flex-wrap gap-1">
                   <span
@@ -454,6 +522,14 @@ const dtypeColor: Record<string, string> = {
                     :key="t.value"
                     class="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-300"
                   >{{ t.value }} <span class="text-zinc-500">×{{ t.count }}</span></span>
+                </div>
+                <!-- v45: correlation row -->
+                <div v-if="corrFor(c.name)" class="mt-1.5 flex flex-wrap gap-1">
+                  <span
+                    v-for="(v, other) in corrFor(c.name)"
+                    :key="other"
+                    class="rounded bg-zinc-800/60 px-1.5 py-0.5 text-[10px] text-zinc-400"
+                  >↔ {{ other }} <b class="text-zinc-200">{{ v }}</b></span>
                 </div>
               </div>
             </div>

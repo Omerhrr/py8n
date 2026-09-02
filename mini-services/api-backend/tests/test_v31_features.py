@@ -81,7 +81,7 @@ def test_v31_dashboard_crud_and_validation():
             assert r.status_code == 200 and r.json()["app"] == "Py8n"  # version pinned in the latest wave's tests
             # node registry untouched by v31 (dashboards are objects, not nodes)
             r = await client.get("/node-definitions")
-            assert len(r.json()["definitions"]) == 37
+            assert len(r.json()["definitions"]) >= 37  # 45 at v45
 
             crm_id, bill_id = await _seed_two_datasets(client)
 

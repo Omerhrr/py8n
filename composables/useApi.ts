@@ -73,6 +73,33 @@ export function useApi() {
     },
   }
 
+  // v45: authenticated file download (dataset exports). Fetches the bytes
+  // with the Bearer header (raw <a href> can't carry it) and hands them to
+  // the browser as a named download.
+  async function download(path: string, filename: string): Promise<void> {
+    const auth = useAuthStore()
+    const headers: Record<string, string> = {}
+    if (auth.token) headers.Authorization = `Bearer ${auth.token}`
+    const res = await fetch(httpUrl(path), { headers })
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        detail = body?.detail || detail
+      } catch {}
+      throw new Error(detail)
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   function wsUrl(executionId: string): string {
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
     const url = mode === 'gateway'
@@ -96,5 +123,5 @@ export function useApi() {
     return `${PREFIX}${p}`
   }
 
-  return { api, wsUrl, srcUrl, mode }
+  return { api, wsUrl, srcUrl, download, mode }
 }

@@ -421,6 +421,108 @@ async def replace_rows(db: AsyncSession, ds: Dataset, items: list[dict]) -> int:
     return len(fresh)
 
 
+def _row_key(row: pd.Series, key_columns: list[str]) -> tuple:
+    """Composite upsert key: hashable tuple of stringified key-column values."""
+    return tuple(str(row[c]) for c in key_columns)
+
+
+async def upsert_rows(
+    db: AsyncSession, ds: Dataset, items: list[dict], key_columns: list[str]
+) -> dict:
+    """Merge-on-key write (v45): fresh rows replace existing rows with the
+    SAME composite key and are appended otherwise - classic upsert semantics.
+
+    Returns ``{"written": fresh rows, "updated": existing rows replaced,
+    "inserted": brand-new keys}``. The result is snapshot-versioned like
+    every other write (source="upsert"), so an upsert is undoable.
+    """
+    if not items:
+        return {"written": 0, "updated": 0, "inserted": 0}
+    if not key_columns:
+        raise ValueError("upsert needs key_columns")
+    existing = read_parquet_df(parquet_path(ds.id)) if ds.row_count else pd.DataFrame()
+    fresh = normalize_df(pd.DataFrame(items))
+
+    missing = [c for c in key_columns if c not in fresh.columns]
+    if missing:
+        raise ValueError(f"upsert key column(s) {missing} not present in the incoming rows")
+    if existing.empty:
+        write_parquet(fresh, parquet_path(ds.id))
+        ds.schema_json = schema_of(fresh)
+        ds.row_count = int(len(fresh))
+        await snapshot_version(db, ds, source="upsert")
+        return {"written": int(len(fresh)), "updated": 0, "inserted": int(len(fresh))}
+
+    missing_existing = [c for c in key_columns if c not in existing.columns]
+    if missing_existing:
+        raise ValueError(f"upsert key column(s) {missing_existing} not present in the existing dataset")
+
+    fresh_keys = {_row_key(row, key_columns) for _, row in fresh.iterrows()}
+    keep_mask = existing[key_columns].apply(lambda r: _row_key(r, key_columns), axis=1).isin(fresh_keys)
+    updated = int(keep_mask.sum())
+    survivors = existing.loc[~keep_mask]
+    combined = pd.concat([survivors, fresh], ignore_index=True)
+    combined = normalize_df(combined)
+    write_parquet(combined, parquet_path(ds.id))
+    ds.schema_json = schema_of(combined)
+    ds.row_count = int(len(combined))
+    await snapshot_version(db, ds, source="upsert")
+    return {
+        "written": int(len(fresh)),
+        "updated": updated,
+        "inserted": int(len(fresh)) - updated,
+    }
+
+
+# ----------------------------------------------------------------- export (v45)
+MAX_EXPORT_ROWS = 200_000  # guardrail: profiling-grade exports, not warehouse dumps
+
+EXPORT_CONTENT_TYPES = {
+    "csv": "text/csv",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "json": "application/json",
+    "parquet": "application/octet-stream",
+}
+
+
+def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
+    """Serialize a dataset for download (v45) - (bytes, content_type, ext).
+
+    csv is written with a BOM so Excel opens it UTF-8-clean; json is the
+    record array; parquet streams the stored file back verbatim.
+    """
+    fmt = (fmt or "csv").strip().lower()
+    if fmt not in EXPORT_CONTENT_TYPES:
+        raise ValueError(f"unsupported export format {fmt!r} (use csv|xlsx|json|parquet)")
+    path = parquet_path(ds.id)
+    if ds.row_count and ds.row_count > MAX_EXPORT_ROWS:
+        raise ValueError(f"dataset has {ds.row_count} rows - export cap is {MAX_EXPORT_ROWS}")
+    df = read_parquet_df(path)
+    if fmt == "parquet":
+        return path.read_bytes() if path.exists() else b"", EXPORT_CONTENT_TYPES["parquet"], "parquet"
+    if len(df) == 0:
+        empty = {"csv": b"", "xlsx": b"", "json": b"[]"}[fmt]
+        return empty, EXPORT_CONTENT_TYPES[fmt], fmt
+    if fmt == "csv":
+        return (
+            df.to_csv(index=False).encode("utf-8-sig"),
+            EXPORT_CONTENT_TYPES["csv"],
+            "csv",
+        )
+    if fmt == "xlsx":
+        import io
+
+        buf = io.BytesIO()
+        with pd.ExcelWriter(buf, engine="openpyxl") as writer:  # type: ignore[assignment]
+            df.to_excel(writer, index=False, sheet_name="data")
+        return buf.getvalue(), EXPORT_CONTENT_TYPES["xlsx"], "xlsx"
+    return (
+        json.dumps(jsonable_rows(df), ensure_ascii=False, default=str).encode("utf-8"),
+        EXPORT_CONTENT_TYPES["json"],
+        "json",
+    )
+
+
 def delete_file(ds: Dataset) -> None:
     path = parquet_path(ds.id)
     if path.exists():
@@ -505,9 +607,22 @@ async def run_sql(db: AsyncSession, sql: str, owner_id: str | None = None) -> di
 
 
 # ----------------------------------------------------------------- profiling
+CORRELATION_COLUMN_CAP = 15  # matrix width cap - keeps the payload sane
+OUTLIER_SAMPLE_CAP = 10  # bad/outlier example rows kept per column
+
+
 def profile_df(df: pd.DataFrame) -> dict:
-    """Per-column profile: counts, ranges for numerics, top values for text."""
+    """Per-column profile, v45 "deep" edition.
+
+    Backward-compatible with the v27 shape (name/dtype/non_null/nulls/unique,
+    min/max/mean for numerics, top_values for low-cardinality text) and adds:
+    null_pct / unique_pct, std/median/quartiles, zeros & negatives, IQR
+    outlier bounds + counts, text length stats, datetime spans, plus
+    dataset-level duplicate counts, correlation matrix, constant and
+    id-like column flags.
+    """
     columns = []
+    numeric_names: list[str] = []
     for col in df.columns:
         s = df[col]
         entry: dict = {
@@ -517,19 +632,92 @@ def profile_df(df: pd.DataFrame) -> dict:
             "nulls": int(s.isna().sum()),
             "unique": int(s.nunique(dropna=True)),
         }
+        total = max(int(len(s)), 1)
+        entry["null_pct"] = round(entry["nulls"] / total * 100, 2)
+        entry["unique_pct"] = round(entry["unique"] / total * 100, 2)
         if entry["dtype"] in ("integer", "number"):
+            numeric_names.append(col)
             nums = pd.to_numeric(s, errors="coerce").dropna()
             if len(nums):
+                q1, med, q3 = nums.quantile([0.25, 0.5, 0.75])
+                iqr = float(q3 - q1)
+                lo, hi = float(q1 - 1.5 * iqr), float(q3 + 1.5 * iqr)
+                outliers = nums[(nums < lo) | (nums > hi)]
                 stats = json.loads(
                     pd.DataFrame(
-                        [{"min": nums.min(), "max": nums.max(), "mean": nums.mean()}]
+                        [{
+                            "min": nums.min(), "max": nums.max(), "mean": nums.mean(),
+                            "std": nums.std(), "median": med, "q25": q1, "q75": q3,
+                            "zeros": int((nums == 0).sum()), "negatives": int((nums < 0).sum()),
+                            "outliers_iqr": int(len(outliers)),
+                            "outlier_lower": lo if iqr > 0 else None,
+                            "outlier_upper": hi if iqr > 0 else None,
+                        }]
                     ).to_json(orient="records")
                 )[0]
+                stats["outlier_sample"] = jsonable_rows(df.loc[outliers.index[:OUTLIER_SAMPLE_CAP]])
                 entry.update(stats)
-        elif entry["dtype"] == "text" and entry["unique"] <= 50:
+        elif entry["dtype"] == "datetime":
+            dts = pd.to_datetime(s, errors="coerce").dropna()
+            if len(dts):
+                span = dts.max() - dts.min()
+                entry["datetime_min"] = dts.min().isoformat()
+                entry["datetime_max"] = dts.max().isoformat()
+                entry["span_days"] = round(span.total_seconds() / 86400, 2)
+        elif entry["dtype"] == "text":
+            lengths = s.dropna().astype(str).str.len()
+            if len(lengths):
+                entry["avg_length"] = round(float(lengths.mean()), 2)
+                entry["max_length"] = int(lengths.max())
+            # datetime-shaped strings (ISO timestamps stored as text via JSON
+            # ingestion) still deserve time-coverage stats - flag them when
+            # almost every value parses cleanly.
+            if entry["non_null"] >= 2 and entry["unique"] > 1:
+                try:
+                    parsed = pd.to_datetime(s.dropna().astype(str), errors="coerce")
+                    parse_rate = float(parsed.notna().mean()) if len(parsed) else 0.0
+                except (ValueError, TypeError):  # pragma: no cover - coerce shouldn't raise
+                    parse_rate = 0.0
+                if parse_rate >= 0.9:
+                    good = parsed.dropna()
+                    entry["parsed_as_datetime"] = True
+                    entry["datetime_min"] = good.min().isoformat()
+                    entry["datetime_max"] = good.max().isoformat()
+                    entry["span_days"] = round((good.max() - good.min()).total_seconds() / 86400, 2)
+        if entry["dtype"] == "text" and entry["unique"] <= 50:
             tops = s.value_counts(dropna=True).head(5)
             entry["top_values"] = [
                 {"value": str(v), "count": int(c)} for v, c in tops.items()
             ]
         columns.append(entry)
-    return {"row_count": int(len(df)), "columns": columns}
+
+    numeric_names = numeric_names[:CORRELATION_COLUMN_CAP]
+    correlation: list[dict] = []
+    if len(numeric_names) >= 2:
+        corr = df[numeric_names].apply(pd.to_numeric, errors="coerce").corr(method="pearson")
+        for name in numeric_names:
+            row = {"column": name, "correlations": {}}
+            for other in numeric_names:
+                v = corr.loc[name, other]
+                row["correlations"][other] = None if pd.isna(v) else round(float(v), 3)
+            correlation.append(row)
+
+    duplicate_rows = int(df.duplicated().sum()) if len(df) else 0
+    constant_columns = [
+        c["name"] for c in columns if c["unique"] <= 1 and c["non_null"] > 0
+    ]
+    id_like_columns = [
+        c["name"] for c in columns if c["non_null"] > 0 and c["unique"] == c["non_null"] and len(df) >= 3
+    ]
+    filled = int(sum(c["non_null"] for c in columns))
+    cells = int(sum(c["non_null"] + c["nulls"] for c in columns)) or 1
+    return {
+        "row_count": int(len(df)),
+        "column_count": int(len(df.columns)),
+        "duplicate_rows": duplicate_rows,
+        "completeness_pct": round(filled / cells * 100, 2),
+        "constant_columns": constant_columns,
+        "id_like_columns": id_like_columns,
+        "correlation": correlation,
+        "columns": columns,
+    }

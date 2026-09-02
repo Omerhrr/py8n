@@ -22,6 +22,9 @@ EXT_BY_TYPE = {
     "image/svg+xml": "svg",
     "application/octet-stream": "pkl",
     "application/json": "json",
+    "text/csv": "csv",  # v45 dataset exports
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+    "application/x-parquet": "parquet",
 }
 
 

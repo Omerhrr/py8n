@@ -352,7 +352,7 @@ def test_v22_node_definitions():
             res = await client.get("/node-definitions")
             assert res.status_code == 200, res.text
             defs = {d["type"]: d for d in res.json()["definitions"]}
-            assert len(defs) == 37
+            assert len(defs) >= 37  # count grows every wave (45 at v45)
             for t in ("error_trigger", "stop_and_error", "sort", "limit", "remove_duplicates"):
                 assert t in defs, t
             # error trigger is a source-only trigger node

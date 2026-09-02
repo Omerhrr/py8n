@@ -6,18 +6,25 @@ from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
 from .nodes.data import (
     AggregateNode,
+    AnalyzeNode,  # v45
     CSVNode,
+    CastColumnsNode,  # v45
     CompareDatasetsNode,
+    DataQualityNode,  # v45
     FilterNode,
+    HandleNullsNode,  # v45
+    JoinNode,  # v45
     LimitNode,
     MergeNode,
+    PivotNode,  # v45
     RemoveDuplicatesNode,
     SortNode,
     SplitOutNode,
     SummarizeNode,
     SwitchNode,
+    UnpivotNode,  # v45
 )
-from .nodes.datasets import DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27
+from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
 from .nodes.datascience import ChartNode, ModelTrainNode, PythonTransformNode  # v28
 from .nodes.documents import DocumentExtractNode  # v32
 from .nodes.integrations import EmailSendNode, SlackMessageNode
@@ -62,6 +69,14 @@ for _cls in (
     DatasetReadNode,      # v27: pull rows from a stored dataset
     DatasetWriteNode,     # v27: push items into a dataset (append/replace)
     SqlQueryNode,         # v27: DuckDB SQL across all datasets
+    DatasetExportNode,    # v45: dataset → downloadable csv/xlsx/json/parquet artifact
+    JoinNode,             # v45: pandas-backed inner/left/right/outer/anti join
+    PivotNode,            # v45: rows → matrix
+    UnpivotNode,          # v45: matrix → tidy rows (melt)
+    CastColumnsNode,      # v45: per-column dtype casting
+    HandleNullsNode,      # v45: drop rows with nulls / fill strategies
+    DataQualityNode,      # v45: expectation checks (nulls/unique/range/schema…)
+    AnalyzeNode,          # v45: stats / correlation / outliers / distribution / trend
     PythonTransformNode,  # v28: pandas/numpy code over the input items
     ChartNode,            # v28: matplotlib chart -> PNG artifact
     ModelTrainNode,       # v28: sklearn training -> metrics + model artifact

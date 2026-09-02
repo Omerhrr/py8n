@@ -71,11 +71,15 @@ class DatasetReadNode(BaseNode):
 
 
 class DatasetWriteNode(BaseNode):
-    """Writes the incoming items into a dataset (append or replace)."""
+    """Writes the incoming items into a dataset (append / replace / upsert)."""
 
     type = "dataset_write"
     name = "Dataset Write"
-    description = "Writes the incoming items into a dataset - appends by default, or replaces all rows."
+    description = (
+        "Writes the incoming items into a dataset - appends by default, replaces all rows, "
+        "or upserts: fresh rows REPLACE existing rows sharing the key_columns values and "
+        "new keys are appended (v45)."
+    )
     category = "actions"
     icon = "hard-drive-download"
     color = "#a3e635"
@@ -84,7 +88,12 @@ class DatasetWriteNode(BaseNode):
         dataset: str = Field(default="", description="Target dataset name (created when missing)")
         mode: str = Field(
             default="append",
-            json_schema_extra={"widget": "select", "options": ["append", "replace"]},
+            json_schema_extra={"widget": "select", "options": ["append", "replace", "upsert"]},
+        )
+        key_columns: list[str] = Field(
+            default_factory=list,
+            description="Upsert key column(s) (JSON array, required for mode=upsert), e.g. [\"email\"]",
+            json_schema_extra={"widget": "code", "rows": 3, "language": "json", "hint": '["email"]'},
         )
         create_if_missing: bool = Field(default=True, description="Create the dataset on first write")
 
@@ -99,6 +108,8 @@ class DatasetWriteNode(BaseNode):
             raise NodeExecutionError(f"Dataset Write needs object items - {len(items) - len(rows)} non-object item(s) dropped would lose data; shape upstream instead")
         if not p.dataset or not p.dataset.strip():
             raise NodeExecutionError("A target dataset name is required")
+        if p.mode == "upsert" and not p.key_columns:
+            raise NodeExecutionError("Dataset Write mode=upsert needs key_columns (the column(s) that identify a row)")
 
         async with AsyncSessionLocal() as session:
             ds = await ds_svc.get_dataset(session, p.dataset.strip(), owner_id=context.owner_id)
@@ -110,24 +121,37 @@ class DatasetWriteNode(BaseNode):
                 ds = await ds_svc.create_from_df(session, p.dataset.strip(), pd.DataFrame(), source="workflow")
                 await session.flush()
             created = ds.row_count == 0 and len(rows) > 0
+            updated = inserted = 0
             if p.mode == "replace":
                 if not rows:
                     raise NodeExecutionError("Refusing to replace a dataset with zero items")
                 written = await ds_svc.replace_rows(session, ds, rows)
+            elif p.mode == "upsert":
+                if rows:
+                    missing = [c for c in p.key_columns if c not in rows[0]]
+                    if missing:
+                        raise NodeExecutionError(f"Upsert key column(s) {missing} not present in the incoming items")
+                stats = await ds_svc.upsert_rows(session, ds, rows, [str(c) for c in p.key_columns])
+                written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
             else:
                 written = await ds_svc.append_rows(session, ds, rows)
             total = ds.row_count
             name = ds.name
             await session.commit()
 
-        return self._single({
+        payload = {
             "items": rows if written else [],
             "dataset": name,
             "mode": p.mode,
             "written": written,
             "row_count": total,
             "created": created,
-        })
+        }
+        if p.mode == "upsert":
+            payload["updated"] = updated
+            payload["inserted"] = inserted
+            payload["key_columns"] = [str(c) for c in p.key_columns]
+        return self._single(payload)
 
 
 class SqlQueryNode(BaseNode):
@@ -160,3 +184,61 @@ class SqlQueryNode(BaseNode):
             except ValueError as exc:
                 raise NodeExecutionError(str(exc)) from exc
         return self._single({"items": result["rows"], "row_count": result["row_count"], "columns": result["columns"], "duration_ms": result["duration_ms"], "views": result["views"]})
+
+
+class DatasetExportNode(BaseNode):
+    """v45: exports a stored dataset as a downloadable artifact."""
+
+    type = "dataset_export"
+    name = "Dataset Export"
+    description = (
+        "Exports a stored dataset (by name or id) as a downloadable file artifact - "
+        "csv (Excel-friendly UTF-8), xlsx, json or parquet."
+    )
+    category = "actions"
+    icon = "download"
+    color = "#fbbf24"
+
+    class ParamsModel(BaseModel):
+        dataset: str = Field(default="", description="Dataset name (or id)")
+        fmt: str = Field(
+            default="csv",
+            description="Export format",
+            json_schema_extra={"widget": "select", "options": ["csv", "xlsx", "json", "parquet"]},
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import artifacts as art_svc
+        from ...services import datasets as ds_svc
+
+        p = self.params  # type: DatasetExportNode.ParamsModel
+        meta = await _resolve_dataset(p.dataset, owner_id=context.owner_id)
+        if meta is None:
+            raise NodeExecutionError(f"Dataset {p.dataset!r} not found")
+        async with AsyncSessionLocal() as session:
+            ds = await ds_svc.get_dataset(session, p.dataset.strip(), owner_id=context.owner_id)
+            if ds is None:
+                raise NodeExecutionError(f"Dataset {p.dataset!r} not found")
+            try:
+                data, content_type, ext = ds_svc.export_dataset_bytes(ds, p.fmt)
+            except ValueError as exc:
+                raise NodeExecutionError(str(exc)) from exc
+            saved = await art_svc.save_artifact(
+                session,
+                kind="file",
+                data=data,
+                content_type=content_type,
+                meta={"dataset": ds.name, "format": p.fmt, "rows": ds.row_count, "node": self.name},
+                filename=f"{ds_svc.view_name(ds.name)}.{ext}",
+            )
+            await session.commit()
+        return self._single({
+            "dataset": meta["name"],
+            "format": p.fmt,
+            "rows": meta["row_count"],
+            "artifact_id": saved.id,
+            "artifact_url": f"/api/v1/artifacts/{saved.id}/content",
+            "filename": saved.filename,
+            "size_bytes": saved.size_bytes,
+        })

@@ -378,7 +378,7 @@ def test_v32_document_extract_node():
         async with _client() as client:
             res = await client.get("/node-definitions")
             types = [d["type"] for d in res.json()["definitions"]]
-            assert len(types) == 37, f"expected 37 visible types, got {len(types)}"
+            assert len(types) >= 37, f"expected 37+ visible types, got {len(types)}"  # 45 at v45
             doc_def = next(d for d in res.json()["definitions"] if d["type"] == "document_extract")
             assert doc_def["icon"] == "file-text" and doc_def["category"] == "actions"
             props = doc_def["parameters_schema"]["properties"]

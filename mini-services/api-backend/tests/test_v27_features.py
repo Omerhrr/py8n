@@ -97,16 +97,16 @@ def test_v27_definitions():
             assert res.status_code == 200
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 37, f"expected 37 visible types, got {len(types)}"
+            assert len(types) >= 37, f"expected 37+ visible types, got {len(types)}"  # 45 at v45
             by = {d["type"]: d for d in defs}
             for t in ("dataset_read", "dataset_write", "sql_query"):
                 assert t in types, t
             props = {t: set(by[t]["parameters_schema"]["properties"].keys()) for t in by if t.startswith(("dataset", "sql"))}
             assert props["dataset_read"] == {"dataset", "limit"}
-            assert props["dataset_write"] == {"dataset", "mode", "create_if_missing"}
+            assert props["dataset_write"] == {"dataset", "mode", "key_columns", "create_if_missing"}  # key_columns: v45 upsert
             assert props["sql_query"] == {"sql"}
             assert by["dataset_read"]["defaults"]["limit"] == 200
-            assert by["dataset_write"]["parameters_schema"]["properties"]["mode"].get("options") == ["append", "replace"]
+            assert by["dataset_write"]["parameters_schema"]["properties"]["mode"].get("options") == ["append", "replace", "upsert"]  # upsert: v45
 
     try:
         asyncio.run(_go())

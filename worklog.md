@@ -1035,3 +1035,29 @@ Work Log:
 
 Stage Summary:
 - Py8n v44.1: the full audit estate lands - the unauthenticated-SQL surface, the committed-token RCE backdoor and the namespace-only code sandbox are closed with layered defenses, multi-tenant ownership reaches every engine-internal service call, and the frontend loses its data-loss/wrong-record/leak bugs; 241/241 pytest + Nuxt build green; known residuals (deliberate): Caddyfile XTransformPort gateway contract is platform infra, the llm-bridge keeps its bootstrap token for the same reason, and a timed-out snippet still occupies its thread until it finishes (Python has no thread kill - container isolation is the documented backstop); REMINDER: the PAT in the session should be rotated - it appears in chat history
+
+---
+Task ID: 57 (v45 deep data estate I - engineering & analysis)
+Agent: main (Super Z)
+Task: "our data engineering, data science, data analysis, and app, is too basic, wont have much use in production, lets deepen it, also let it have full capability" - wave 1 of 2
+
+Work Log:
+- Three parallel Explore agents mapped the current data stack; wave 1 targets data ENGINEERING + ANALYSIS depth (wave 2 = data science + apps, Task 58)
+- NEW NODES (8, all pandas-backed with the standard items-in/items-out wire format so they compose with everything):
+  * join - true pandas.merge between Input A (main) and Input B (secondary): inner/left/right/outer/ANTI, m:N-safe (unlike compare_datasets' first-match), dot-path keys JSON-canonicalized into temp key columns, colliding B columns get suffix_right, merge indicator drives matched/left_only/right_only counts, empty-side short-circuits keep semantics correct where pandas would crash
+  * pivot (pivot_table rows->matrix, 8 agg funcs, count fills 0) + unpivot (melt back to tidy with var_name/value_name)
+  * cast_columns - per-column casting to integer|number|boolean|text|datetime with optional strptime format, on_error coerce (Int64 nullable / null) or raise with column-named errors
+  * handle_nulls - drop (subset-capable) or fill with zero|empty|mean|median|mode|constant
+  * data_quality - expectation checks not_null|unique|range|non_negative|allowed_values|regex|min_rows|max_rows|SCHEMA (dtype drift + missing columns), per-check failed counts + sample bad rows, on_fail warn (structured report for IF-routing) or error (fails the run - quality gates pipelines)
+  * analyze - six modes: descriptive (mean/std/quartiles), correlation (pearson matrix, 15-col cap), outliers (IQR multiplier or z-score cutoff + bounds + sample rows), distribution (bins via pd.cut), value_counts (with pct), trend (timestamp resample hour/day/week/month x count/sum/avg/median + period-over-period growth)
+  * dataset_export - dataset -> artifact (csv utf-8-sig for Excel / xlsx via openpyxl / json / parquet verbatim) with 200k-row cap; artifacts EXT_BY_TYPE learned csv/xlsx/parquet extensions
+- SummarizeNode deepened (backward-compatible): count_distinct, median, std, first, last, concat (cap 100) + HAVING clauses on aggregate labels (> >= < <= == !=) + sort_by/sort_dir + limit
+- dataset_write gains mode=upsert backed by services.datasets.upsert_rows (composite str-tuple keys, existing rows with matching keys REPLACED, new keys appended, written/updated/inserted counts, versioned source=upsert so it is undoable); key_columns required, validated against incoming items
+- profile_df v2: backward-compatible keys preserved (v27 test pins them) + null_pct/unique_pct, std/median/q25/q75, zeros/negatives, IQR outlier bounds + count + sample rows, text length stats, DATETIME SHAPE DETECTION on text columns (>=90% parse rate -> parsed_as_datetime + span_days - JSON ingestion stores ISO timestamps as text), dataset-level duplicate_rows/completeness_pct/constant_columns/id_like_columns + pearson correlation matrix (15-col cap)
+- GET /datasets/{id}/export?fmt= (owner-scoped direct download with Content-Disposition; 400 on bad format); composables/useApi.ts gains download() (Bearer-aware blob fetch + object-URL anchor - raw <a href> cannot carry the JWT in enforced mode)
+- Dataset page: export dropdown (4 formats), dataset-level profile strip (completeness/dups/constant/correlations), per-column quantiles + IQR outlier warnings + datetime spans + correlation chips
+- VERSION: 1.45.0 (config.py + AppSidebar; v44 health pin relaxed to >=)
+- TESTS: 241 -> 251 (test_v45_features.py: definitions incl. input handles + strict version pin, summarize deep ops with having/sort/limit math, join inner/left/anti over split_out inputs incl. m:N duplicate keys, pivot<->unpivot round trip, cast+nulls pipeline with coerce + mean-fill math, data quality warn report (3 failing checks) + error gate, all five analyze modes incl. spike-outlier detection, upsert update/insert/no-key-error against real parquet, export node + endpoint incl. BOM + xlsx + bad-format-400, profile v2 deep stats); GOTCHA: 9 old test files pinned the 37-node count - relaxed to >= 37 per wave convention, exact pin (45) moved to v45; GOTCHA: pivot index==pivot_on raises "Grouper not 1-dimensional" - test uses two dimensions
+
+Stage Summary:
+- Py8n v1.45.0: the engineering + analysis estate deepens - no-code joins/pivots/casts/null-handling/quality-gates/statistics land as first-class nodes, datasets gain merge-on-key writes, downloadable exports and a production-grade profile; 251/251 pytest + Nuxt build green; wave 2 (Task 58) takes data science (model registry, predict, preprocessing pipelines, more algorithms) + apps (new components, filters, form->workflow actions) next
