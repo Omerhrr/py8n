@@ -2,12 +2,40 @@
 // Shared dashboard board renderer (v31) - used by the builder's live preview
 // and the public /d/{slug} page. Input: the RENDERED component payload from
 // POST /dashboards/{ref}/preview or GET /dashboards/{slug}/runtime.
-import { computed } from 'vue'
+import { computed, useAttrs } from 'vue'
 
 const props = defineProps<{
   components: any[]
   accent?: string // tailwind gradient classes for bars
+  // v47 cross-filtering - only the public /d/{slug} page passes these (and a
+  // @segment-click listener); the builder passes neither, so rendering there
+  // stays byte-identical to v46.
+  groupBys?: Record<string, string> // chart id -> group_by column, learned from the board config
+  activeFilters?: Record<string, string[]> // active cross-filters, for the active-segment highlight
 }>()
+
+// Optional parent callback: @segment-click="..." on the component tag. Read
+// from attrs (not defineEmits) so the handler stays optional - without it no
+// segment is clickable and every branch renders exactly as before.
+const attrs = useAttrs() as Record<string, any>
+
+function segCol(comp: any): string | null {
+  return comp.group_by || props.groupBys?.[comp.id] || null
+}
+
+function segClickable(comp: any): boolean {
+  return typeof attrs.onSegmentClick === 'function' && comp.type === 'chart' && !!segCol(comp)
+}
+
+function segActive(comp: any, label: string): boolean {
+  const col = segCol(comp)
+  return !!col && (props.activeFilters?.[col] || []).includes(label)
+}
+
+function onSeg(comp: any, label: string) {
+  if (!label || !segClickable(comp)) return
+  ;(attrs.onSegmentClick as (chart: any, label: string) => void)(comp, label)
+}
 
 const ACCENT = computed(() => props.accent || 'from-cyan-500/80 to-cyan-400/50')
 
@@ -46,16 +74,24 @@ function pieStyle(c: any) {
   return { background: `conic-gradient(${stops.join(', ')})`, total }
 }
 
-// line chart → svg polyline points
-function linePoints(c: any, w = 320, h = 120, pad = 6) {
+// line chart → per-point svg coordinates (shared by the polyline and the
+// v47 cross-filter click targets)
+function linePointList(c: any, w = 320, h = 120, pad = 6) {
   const vals = c.values || []
   const n = vals.length
   const max = chartMaxes.value[c.id] || 1
-  if (!n) return { pts: '', area: '' }
+  if (!n) return []
   const x = (i: number) => pad + (i * (w - pad * 2)) / Math.max(1, n - 1)
   const y = (v: number) => h - pad - (v / max) * (h - pad * 2)
-  const pts = vals.map((v: number, i: number) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ')
-  const area = `${pad},${h - pad} ${pts} ${x(n - 1).toFixed(1)},${h - pad}`
+  return vals.map((v: number, i: number) => ({ x: x(i).toFixed(1), y: y(v).toFixed(1) }))
+}
+
+// line chart → svg polyline points
+function linePoints(c: any, w = 320, h = 120, pad = 6) {
+  const list = linePointList(c, w, h, pad)
+  if (!list.length) return { pts: '', area: '' }
+  const pts = list.map((p) => `${p.x},${p.y}`).join(' ')
+  const area = `${pad},${h - pad} ${pts} ${list[list.length - 1].x},${h - pad}`
   return { pts, area }
 }
 
@@ -101,7 +137,14 @@ function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8)
         <!-- bar -->
         <div v-if="comp.chart_type === 'bar' && comp.labels.length" class="mt-3">
           <div class="space-y-2">
-            <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-2">
+            <div
+              v-for="(label, i) in comp.labels"
+              :key="label"
+              class="flex items-center gap-2"
+              :class="segClickable(comp) ? (segActive(comp, label) ? 'cursor-pointer rounded-lg bg-cyan-500/10 ring-1 ring-cyan-500/40' : 'cursor-pointer rounded-lg hover:bg-zinc-800/40') : ''"
+              :title="segClickable(comp) ? `filter by ${segCol(comp)} = ${label}` : undefined"
+              @click="onSeg(comp, label)"
+            >
               <span class="w-24 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
               <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-800/60">
                 <div class="h-full rounded-md bg-gradient-to-r" :class="ACCENT" :style="{ width: `${Math.max(4, (comp.values[i] / (chartMaxes[comp.id] || 1)) * 100)}%` }" />
@@ -116,6 +159,18 @@ function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8)
           <svg viewBox="0 0 320 120" class="h-32 w-full" preserveAspectRatio="none">
             <polygon :points="linePoints(comp).area" fill="url(#lg)" opacity="0.25" />
             <polyline :points="linePoints(comp).pts" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
+            <!-- v47: per-point click targets when the chart is cross-filterable -->
+            <template v-if="segClickable(comp)">
+              <circle
+                v-for="(p, i) in linePointList(comp)"
+                :key="`pt${i}`"
+                :cx="p.x" :cy="p.y" r="4.5"
+                :fill="segActive(comp, comp.labels[i]) ? '#22d3ee' : '#06b6d4'"
+                fill-opacity="0.9"
+                class="cursor-pointer"
+                @click="onSeg(comp, comp.labels[i])"
+              />
+            </template>
             <defs>
               <linearGradient id="lg" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="0%" stop-color="#06b6d4" />
@@ -135,7 +190,14 @@ function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8)
             <div class="absolute rounded-full bg-zinc-900" :class="comp.chart_type === 'donut' ? 'inset-[18px]' : 'inset-[10px]'" />
           </div>
           <div class="min-w-0 flex-1 space-y-1">
-            <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-1.5 text-[11px]">
+            <div
+              v-for="(label, i) in comp.labels"
+              :key="label"
+              class="flex items-center gap-1.5 text-[11px]"
+              :class="segClickable(comp) ? (segActive(comp, label) ? 'cursor-pointer rounded-md bg-cyan-500/10 px-1 ring-1 ring-cyan-500/40' : 'cursor-pointer rounded-md px-1 hover:bg-zinc-800/40') : ''"
+              :title="segClickable(comp) ? `filter by ${segCol(comp)} = ${label}` : undefined"
+              @click="onSeg(comp, label)"
+            >
               <span class="h-2 w-2 shrink-0 rounded-full" :style="{ background: ['#06b6d4', '#8b5cf6', '#f59e0b', '#10b981', '#ef4444', '#3b82f6', '#ec4899', '#84cc16'][i % 8] }" />
               <span class="min-w-0 flex-1 truncate text-zinc-400">{{ label }}</span>
               <span class="tabular-nums text-zinc-500">{{ comp.values[i] }} ({{ Math.round((comp.values[i] / (pieStyle(comp).total || 1)) * 100) }}%)</span>

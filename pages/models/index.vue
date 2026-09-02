@@ -1,7 +1,8 @@
 <script setup lang="ts">
-// v46: the ML model registry - versioned, activatable, deletable.
+// v46: the ML model registry - versioned, activatable, deletable. v47 adds
+// the PSI drift check (GET /models/{ref}/drift) rendered inline per row.
 import { ref, onMounted } from 'vue'
-import { Network, Loader2, Trash2, CheckCircle2, RefreshCw, ChevronDown } from 'lucide-vue-next'
+import { Network, Loader2, Trash2, CheckCircle2, RefreshCw, ChevronDown, Activity, Play } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 const { api } = useApi()
@@ -18,7 +19,19 @@ interface ModelRow {
   dataset_name: string | null
   row_count: number
   active: boolean
+  has_reference_stats: boolean  // v47: drift scoring needs training-time reference stats
   created_at: string | null
+}
+
+interface DriftReport {
+  drift_detected: boolean
+  threshold: number
+  overall_psi: number | null
+  max_feature: string | null
+  rows: number
+  features: { feature: string; type: string | null; psi: number | null; status: string; missing_in_batch?: boolean }[]
+  model: { id: string; name: string; version: number }
+  dataset: { id: string; name: string; rows: number }
 }
 
 const models = ref<ModelRow[]>([])
@@ -93,6 +106,68 @@ async function remove(m: ModelRow) {
   }
 }
 
+// ------------------------------------------------------------------ v47 drift
+// One panel open at a time (like the expanded details). The dataset list is
+// fetched once, lazily, on the first Drift panel; 409s surface the server's
+// detail message ("no reference stats" / "dataset is empty").
+const driftOpenId = ref<string | null>(null)
+const driftDatasets = ref<{ id: string; name: string }[]>([])
+const driftDatasetsLoaded = ref(false)
+const driftSel = ref('')
+const driftThreshold = ref(0.25)
+const driftReport = ref<DriftReport | null>(null)
+const driftLoading = ref(false)
+const driftError = ref<string | null>(null)
+
+const DRIFT_STATUS_STYLE: Record<string, string> = {
+  stable: 'bg-emerald-500/15 text-emerald-400',
+  moderate: 'bg-amber-500/15 text-amber-400',
+  drifted: 'bg-red-500/15 text-red-400',
+  missing: 'bg-zinc-800 text-zinc-400',
+}
+
+function fmtPsi(v: number | null | undefined): string {
+  return v === null || v === undefined ? '-' : Number(v).toFixed(4)
+}
+
+async function openDrift(m: ModelRow) {
+  if (driftOpenId.value === m.id) {
+    driftOpenId.value = null
+    return
+  }
+  driftOpenId.value = m.id
+  driftReport.value = null
+  driftError.value = null
+  driftSel.value = ''
+  driftThreshold.value = 0.25
+  if (!driftDatasetsLoaded.value) {
+    try {
+      const rows = await api.get<any[]>('/datasets')
+      driftDatasets.value = rows.map((d) => ({ id: d.id, name: d.name }))
+      driftDatasetsLoaded.value = true
+    } catch (e: any) {
+      driftError.value = e?.data?.detail || e?.message || 'Failed to load datasets'
+    }
+  }
+}
+
+async function runDrift(m: ModelRow) {
+  if (!driftSel.value) return
+  driftLoading.value = true
+  driftError.value = null
+  try {
+    const th = Number.isFinite(driftThreshold.value) ? driftThreshold.value : 0.25
+    driftReport.value = await api.get<DriftReport>(
+      `/models/${m.id}/drift?dataset_id=${encodeURIComponent(driftSel.value)}&threshold=${th}`,
+    )
+  } catch (e: any) {
+    driftReport.value = null
+    driftError.value = e?.data?.detail || e?.message || 'Drift check failed'
+  } finally {
+    driftLoading.value = false
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -156,6 +231,16 @@ onMounted(load)
             </div>
             <div class="flex items-center gap-1.5">
               <button
+                v-if="m.has_reference_stats"
+                class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 transition hover:border-fuchsia-500/40 hover:text-fuchsia-300"
+                :class="driftOpenId === m.id && 'border-fuchsia-500/50 text-fuchsia-300'"
+                title="PSI drift check against a batch dataset"
+                @click="openDrift(m)"
+              >
+                <Activity class="h-3.5 w-3.5" /> Drift
+              </button>
+              <span v-else class="max-w-[140px] text-[10px] leading-tight text-zinc-600" title="This version predates reference stats">retrain to capture reference stats</span>
+              <button
                 class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-1.5 text-zinc-500 transition hover:text-zinc-200"
                 title="Details"
                 @click="expanded = expanded === m.id ? null : m.id"
@@ -192,6 +277,75 @@ onMounted(load)
             <p class="mt-3 text-[11px] font-bold uppercase tracking-wider text-zinc-500">Features ({{ m.features.length }})</p>
             <div class="mt-1.5 flex flex-wrap gap-1.5">
               <span v-for="f in m.features" :key="f" class="rounded bg-zinc-800/60 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">{{ f }}</span>
+            </div>
+          </div>
+
+          <!-- v47: PSI drift check panel -->
+          <div v-if="driftOpenId === m.id" class="border-t border-zinc-800/80 bg-zinc-950/40 px-4 py-3">
+            <p class="text-[11px] font-bold uppercase tracking-wider text-zinc-500">Drift check - PSI vs training reference</p>
+            <div class="mt-2 flex flex-wrap items-end gap-2">
+              <div class="min-w-[180px] flex-1">
+                <label class="block text-[10px] uppercase tracking-wide text-zinc-600">Batch dataset</label>
+                <select v-model="driftSel" class="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none focus:border-fuchsia-500/60">
+                  <option value="" disabled>pick a dataset…</option>
+                  <option v-for="d in driftDatasets" :key="d.id" :value="d.id">{{ d.name }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-[10px] uppercase tracking-wide text-zinc-600">Threshold</label>
+                <input
+                  v-model.number="driftThreshold"
+                  type="number" min="0" step="0.05"
+                  class="mt-1 w-24 rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none focus:border-fuchsia-500/60"
+                />
+              </div>
+              <button
+                class="flex items-center gap-1.5 rounded-lg bg-fuchsia-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-fuchsia-400 disabled:opacity-40"
+                :disabled="!driftSel || driftLoading"
+                @click="runDrift(m)"
+              >
+                <Loader2 v-if="driftLoading" class="h-3.5 w-3.5 animate-spin" />
+                <Play v-else class="h-3.5 w-3.5" /> Run
+              </button>
+            </div>
+
+            <p v-if="driftError" class="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">{{ driftError }}</p>
+
+            <div v-if="driftReport" class="mt-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <span
+                  class="rounded-lg px-2 py-0.5 text-[10px] font-bold tracking-wide"
+                  :class="driftReport.drift_detected ? 'bg-red-500/15 text-red-400' : 'bg-emerald-500/15 text-emerald-400'"
+                >{{ driftReport.drift_detected ? 'DRIFTED' : 'STABLE' }}</span>
+                <span class="text-[11px] text-zinc-400">overall PSI <b class="tabular-nums text-zinc-200">{{ fmtPsi(driftReport.overall_psi) }}</b> <span class="text-zinc-600">(threshold {{ driftReport.threshold }})</span></span>
+                <span v-if="driftReport.max_feature" class="text-[11px] text-zinc-500">max: <span class="font-mono text-zinc-300">{{ driftReport.max_feature }}</span></span>
+                <span class="ml-auto text-[10px] text-zinc-600">{{ driftReport.dataset.name }} · {{ driftReport.rows.toLocaleString() }} rows</span>
+              </div>
+              <div class="mt-2 overflow-hidden rounded-xl border border-zinc-800">
+                <table class="w-full text-left text-xs">
+                  <thead>
+                    <tr class="border-b border-zinc-800/60 bg-zinc-900/60 text-[10px] uppercase tracking-wide text-zinc-500">
+                      <th class="px-3 py-2 font-medium">feature</th>
+                      <th class="px-3 py-2 font-medium">type</th>
+                      <th class="px-3 py-2 text-right font-medium">psi</th>
+                      <th class="px-3 py-2 font-medium">status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="f in driftReport.features" :key="f.feature" class="border-b border-zinc-800/40 last:border-0">
+                      <td class="px-3 py-1.5 font-mono text-zinc-300">{{ f.feature }}</td>
+                      <td class="px-3 py-1.5 text-zinc-500">{{ f.type || '-' }}</td>
+                      <td class="px-3 py-1.5 text-right tabular-nums text-zinc-300">{{ fmtPsi(f.psi) }}</td>
+                      <td class="px-3 py-1.5">
+                        <span class="rounded px-1.5 py-0.5 text-[10px] font-semibold" :class="DRIFT_STATUS_STYLE[f.status] || 'bg-zinc-800 text-zinc-400'">{{ f.status }}</span>
+                      </td>
+                    </tr>
+                    <tr v-if="!driftReport.features.length">
+                      <td colspan="4" class="px-3 py-4 text-center text-zinc-600">No scored features for this model.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </div>

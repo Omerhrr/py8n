@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import {
-  Loader2, ClipboardList, CircleAlert, CheckCircle2, Database, TriangleAlert, RotateCcw, Rocket,
+  Loader2, ClipboardList, CircleAlert, CheckCircle2, Database, TriangleAlert, RotateCcw, Rocket, Lock,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -28,8 +28,21 @@ interface FormDesc {
 
 const loading = ref(true)
 const notFound = ref(false)
+const forbidden = ref(false)
 const loadError = ref<string | null>(null)
 const fd = ref<FormDesc | null>(null)
+
+// v47 share tokens: the public form endpoints demand ?t=<token> once the
+// owner enables share protection - forward the token this page received.
+const shareTok = computed(() => {
+  const t = route.query.t
+  const raw = Array.isArray(t) ? (t[0] ?? '') : t
+  return raw ? String(raw) : ''
+})
+
+function tq(sep: '?' | '&' = '?'): string {
+  return shareTok.value ? `${sep}t=${encodeURIComponent(shareTok.value)}` : ''
+}
 
 const model = ref<Record<string, any>>({})
 const sending = ref(false)
@@ -49,12 +62,14 @@ function resetModel() {
 async function load() {
   loading.value = true
   notFound.value = false
+  forbidden.value = false
   loadError.value = null
   try {
-    fd.value = await api.get<FormDesc>(`/apps/${route.params.slug}/form`)
+    fd.value = await api.get<FormDesc>(`/apps/${route.params.slug}/form${tq()}`)
     resetModel()
   } catch (e: any) {
     if (e?.status === 404 || e?.statusCode === 404) notFound.value = true
+    else if (e?.status === 403 || e?.statusCode === 403) forbidden.value = true
     else loadError.value = e?.data?.detail || e?.message || 'Failed to load the form'
   } finally {
     loading.value = false
@@ -68,7 +83,7 @@ async function submit() {
   submitError.value = null
   warnings.value = []
   try {
-    const res = await api.post<any>(`/apps/${route.params.slug}/form-submit`, { record: model.value })
+    const res = await api.post<any>(`/apps/${route.params.slug}/form-submit${tq()}`, { record: model.value })
     warnings.value = res?.warnings || []
     workflowTriggered.value = res?.workflow_triggered === true
     sent.value = true
@@ -99,6 +114,15 @@ function submitAnother() {
       </span>
       <p class="mt-4 text-sm font-medium text-zinc-300">Form not found (or not published)</p>
       <p class="mt-1 text-xs text-zinc-500">Check the link, or ask the app builder to publish it first.</p>
+    </div>
+
+    <!-- v47: share-protected form opened without (or with a stale) token -->
+    <div v-else-if="forbidden" class="mt-10 text-center">
+      <span class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-900">
+        <Lock class="h-6 w-6 text-zinc-600" />
+      </span>
+      <p class="mt-4 text-sm font-medium text-zinc-300">This link requires a valid share token</p>
+      <p class="mt-1 text-xs text-zinc-500">Ask the app owner for a fresh link with ?t=… (regenerating revokes old ones).</p>
     </div>
 
     <p v-else-if="loadError" class="mt-10 max-w-md rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">{{ loadError }}</p>

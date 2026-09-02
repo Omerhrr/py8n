@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Gauge, Loader2, X, Rocket, Square, Save, RefreshCw, Plus, Trash2,
   ChevronDown, ChevronUp, ArrowUp, ArrowDown, Wand2, ExternalLink, BarChart3, Database, Type,
+  Share2, Copy, Check,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -32,6 +33,7 @@ interface Board {
   description: string
   config: { components?: ComponentDef[] }
   status: string
+  share_token: string | null  // v47: owner-facing share ACL
 }
 
 interface DatasetMeta {
@@ -243,6 +245,45 @@ async function togglePublish() {
   }
 }
 
+// ---------------------------------------------------------------- share (v47)
+// share_token lives on the board row - nothing persisted client-side; the
+// toggle PUT returns the fresh (or cleared) row.
+const shareOpen = ref(false)
+const shareBusy = ref(false)
+const shareCopied = ref(false)
+
+const shareProtected = computed(() => !!board.value?.share_token)
+
+function shareUrl(): string {
+  if (!board.value?.share_token) return ''
+  return `${window.location.origin}/d/${board.value.slug}?t=${board.value.share_token}`
+}
+
+async function toggleShare() {
+  if (!board.value) return
+  shareBusy.value = true
+  error.value = null
+  try {
+    board.value = await api.put<Board>(`/dashboards/${board.value.id}/share`, { enabled: !board.value.share_token })
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'Share toggle failed'
+  } finally {
+    shareBusy.value = false
+  }
+}
+
+async function copyShare() {
+  const url = shareUrl()
+  if (!url) return
+  try {
+    await navigator.clipboard.writeText(url)
+  } catch {
+    window.prompt('Copy the share link:', url)
+  }
+  shareCopied.value = true
+  setTimeout(() => (shareCopied.value = false), 2000)
+}
+
 const typeIcon: Record<string, any> = { stat: Gauge, chart: BarChart3, table: Database, text: Type }
 const typeColor: Record<string, string> = {
   stat: 'bg-cyan-500/10 text-cyan-400',
@@ -288,6 +329,13 @@ const typeColor: Record<string, string> = {
         >
           <Loader2 v-if="previewing" class="h-3.5 w-3.5 animate-spin" />
           <RefreshCw v-else class="h-3.5 w-3.5" /> Refresh preview
+        </button>
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600"
+          :title="board?.share_token ? 'Share protection is ON - links need the token' : 'Share protection is OFF'"
+          @click="shareOpen = true"
+        >
+          <Share2 class="h-3.5 w-3.5" /> <span class="hidden sm:inline">Share</span>
         </button>
         <button
           v-if="isPublished"
@@ -502,5 +550,58 @@ const typeColor: Record<string, string> = {
         </p>
       </section>
     </div>
+
+    <!-- v47 share dialog -->
+    <Teleport to="body">
+      <div v-if="shareOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" @click.self="shareOpen = false">
+        <div class="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
+          <div class="flex items-center justify-between">
+            <h2 class="flex items-center gap-2 text-sm font-bold"><Share2 class="h-4 w-4 text-cyan-400" /> Share dashboard</h2>
+            <button class="rounded-lg p-1 text-zinc-500 hover:text-zinc-200" @click="shareOpen = false"><X class="h-4 w-4" /></button>
+          </div>
+
+          <div class="mt-3 flex items-center gap-2">
+            <span
+              class="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase"
+              :class="shareProtected ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-400'"
+            >{{ shareProtected ? 'share protection on' : 'share protection off' }}</span>
+            <span class="text-[11px] text-zinc-500">{{ shareProtected ? 'the /d link needs the token (?t=…)' : 'the /d link is open to anyone' }}</span>
+          </div>
+
+          <button
+            class="mt-3 flex w-full items-center justify-center gap-1.5 rounded-xl py-2 text-xs font-semibold text-white transition disabled:opacity-40"
+            :class="shareProtected ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-emerald-500 shadow-lg shadow-emerald-500/20 hover:bg-emerald-400'"
+            :disabled="shareBusy"
+            @click="toggleShare"
+          >
+            <Loader2 v-if="shareBusy" class="h-3.5 w-3.5 animate-spin" />
+            {{ shareProtected ? 'Disable share link' : 'Enable share link' }}
+          </button>
+
+          <template v-if="shareProtected">
+            <label class="mt-3 block text-[10px] font-bold uppercase tracking-wide text-zinc-500">Share URL</label>
+            <div class="mt-1 flex gap-2">
+              <input
+                readonly
+                :value="shareUrl()"
+                class="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 font-mono text-[11px] text-zinc-300 outline-none"
+                @focus="($event.target as HTMLInputElement).select()"
+              />
+              <button
+                class="flex shrink-0 items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-cyan-500/40 hover:text-cyan-300"
+                @click="copyShare"
+              >
+                <Check v-if="shareCopied" class="h-3.5 w-3.5 text-emerald-400" />
+                <Copy v-else class="h-3.5 w-3.5" />
+                {{ shareCopied ? 'Copied' : 'Copy' }}
+              </button>
+            </div>
+          </template>
+          <p v-else-if="!isPublished" class="mt-2 text-[11px] text-zinc-600">Publish the board to open /d/{{ board?.slug }}.</p>
+
+          <p class="mt-3 text-[11px] leading-relaxed text-zinc-500">Regenerating (disable + enable) revokes old links.</p>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>

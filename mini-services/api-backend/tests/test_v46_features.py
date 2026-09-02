@@ -140,11 +140,11 @@ def test_v46_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] == "1.46.0"
+            assert res.json()["version"] >= "1.46.0", f"expected >= 1.46.0, got {res.json()['version']}"  # strict pin moved to v47
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 46, f"expected 46 visible types at v46, got {len(types)}"
+            assert len(types) >= 46, f"expected 46+ visible types at v46, got {len(types)}"  # 47 at v47
             by = {d["type"]: d for d in defs}
             assert "model_predict" in types
             props = set(by["model_predict"]["parameters_schema"]["properties"].keys())

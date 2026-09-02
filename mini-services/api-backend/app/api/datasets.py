@@ -306,6 +306,53 @@ async def list_versions(dataset_id: str, user=Depends(get_optional_user), db: As
     return out
 
 
+@router.get("/{dataset_id}/lineage")
+async def dataset_lineage(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v47: provenance timeline - every version with the workflow/execution/
+    node that produced it (NULL provenance = API/upload-side write). Workflow
+    names are resolved so the UI can show 'Ledger ETL v12' instead of a uuid."""
+    row = await _get_or_404(db, dataset_id, user)
+    versions = (
+        await db.execute(
+            select(DatasetVersion)
+            .where(DatasetVersion.dataset_id == row.id)
+            .order_by(DatasetVersion.version.asc())
+        )
+    ).scalars().all()
+    wf_ids = {v.workflow_id for v in versions if v.workflow_id}
+    wf_names: dict[str, str] = {}
+    if wf_ids:
+        from ..models import Workflow
+
+        wf_rows = (
+            await db.execute(select(Workflow.id, Workflow.name).where(Workflow.id.in_(wf_ids)))
+        ).all()
+        wf_names = {wid: name for wid, name in wf_rows}
+    steps = [
+        {
+            "version": v.version,
+            "row_count": v.row_count,
+            "source": v.source,
+            "note": v.note,
+            "created_at": v.created_at,
+            "workflow_id": v.workflow_id,
+            "workflow_name": wf_names.get(v.workflow_id) if v.workflow_id else None,
+            "execution_id": v.execution_id,
+            "node_name": v.node_name,
+            "origin": "workflow" if v.workflow_id else "surface",
+        }
+        for v in versions
+    ]
+    return {
+        "dataset_id": row.id,
+        "name": row.name,
+        "created_at": row.created_at,
+        "row_count": row.row_count,
+        "workflow_versions": sum(1 for s in steps if s["origin"] == "workflow"),
+        "steps": steps,
+    }
+
+
 @router.get("/{dataset_id}/versions/{version}/rows")
 async def version_rows(
     dataset_id: str,

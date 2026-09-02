@@ -112,32 +112,40 @@ class DatasetWriteNode(BaseNode):
             raise NodeExecutionError("Dataset Write mode=upsert needs key_columns (the column(s) that identify a row)")
 
         async with AsyncSessionLocal() as session:
-            ds = await ds_svc.get_dataset(session, p.dataset.strip(), owner_id=context.owner_id)
-            if ds is None:
-                if not p.create_if_missing:
-                    raise NodeExecutionError(f"Dataset {p.dataset!r} not found (create_if_missing is off)")
-                import pandas as pd
+            # v47 lineage: stamp every version this write produces with the
+            # producing workflow/execution/node (cleared on the way out)
+            prov_token = ds_svc.set_provenance(
+                context.workflow_id, context.execution_id, self.name,
+            )
+            try:
+                ds = await ds_svc.get_dataset(session, p.dataset.strip(), owner_id=context.owner_id)
+                if ds is None:
+                    if not p.create_if_missing:
+                        raise NodeExecutionError(f"Dataset {p.dataset!r} not found (create_if_missing is off)")
+                    import pandas as pd
 
-                ds = await ds_svc.create_from_df(session, p.dataset.strip(), pd.DataFrame(), source="workflow")
-                await session.flush()
-            created = ds.row_count == 0 and len(rows) > 0
-            updated = inserted = 0
-            if p.mode == "replace":
-                if not rows:
-                    raise NodeExecutionError("Refusing to replace a dataset with zero items")
-                written = await ds_svc.replace_rows(session, ds, rows)
-            elif p.mode == "upsert":
-                if rows:
-                    missing = [c for c in p.key_columns if c not in rows[0]]
-                    if missing:
-                        raise NodeExecutionError(f"Upsert key column(s) {missing} not present in the incoming items")
-                stats = await ds_svc.upsert_rows(session, ds, rows, [str(c) for c in p.key_columns])
-                written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
-            else:
-                written = await ds_svc.append_rows(session, ds, rows)
-            total = ds.row_count
-            name = ds.name
-            await session.commit()
+                    ds = await ds_svc.create_from_df(session, p.dataset.strip(), pd.DataFrame(), source="workflow")
+                    await session.flush()
+                created = ds.row_count == 0 and len(rows) > 0
+                updated = inserted = 0
+                if p.mode == "replace":
+                    if not rows:
+                        raise NodeExecutionError("Refusing to replace a dataset with zero items")
+                    written = await ds_svc.replace_rows(session, ds, rows)
+                elif p.mode == "upsert":
+                    if rows:
+                        missing = [c for c in p.key_columns if c not in rows[0]]
+                        if missing:
+                            raise NodeExecutionError(f"Upsert key column(s) {missing} not present in the incoming items")
+                    stats = await ds_svc.upsert_rows(session, ds, rows, [str(c) for c in p.key_columns])
+                    written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
+                else:
+                    written = await ds_svc.append_rows(session, ds, rows)
+                total = ds.row_count
+                name = ds.name
+                await session.commit()
+            finally:
+                ds_svc.reset_provenance(prov_token)
 
         payload = {
             "items": rows if written else [],

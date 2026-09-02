@@ -24,15 +24,17 @@ renderable, never 500).
 
 from __future__ import annotations
 
+import secrets
+
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
 from ..models import Dashboard, Dataset
-from ..schemas import DashboardCreate, DashboardOut, DashboardUpdate
+from ..schemas import DashboardCreate, DashboardOut, DashboardUpdate, ShareToggle
 from ..services import dashboards as db_svc
 from ..services import datasets as ds_svc
 
@@ -47,6 +49,7 @@ def _out(row: Dashboard) -> DashboardOut:
         description=row.description or "",
         config=row.config or {},
         status=row.status,
+        share_token=row.share_token,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -65,6 +68,29 @@ async def _runtime_or_404(db: AsyncSession, slug: str) -> Dashboard:
     if row is None or row.status != "published":
         raise HTTPException(status_code=404, detail="Dashboard not found (or not published)")
     return row
+
+
+def _share_gate(row: Dashboard, request: Request) -> None:
+    """v47 share-token ACL - same contract as apps._share_gate."""
+    expected = row.share_token
+    if not expected:
+        return
+    presented = request.query_params.get("t") or request.headers.get("x-share-token") or ""
+    if not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
+
+
+def _filters_from_request(request: Request) -> dict[str, list[str]]:
+    """v47 cross-filtering: ``?filter.COLUMN=value`` (repeatable, comma-split).
+
+    Same wire contract as the apps runtime, so one click on a chart segment
+    re-computes every component over the filtered frames."""
+    filters: dict[str, list[str]] = {}
+    for key, value in request.query_params.multi_items():
+        if key.startswith("filter.") and value.strip():
+            col = key[len("filter."):]
+            filters.setdefault(col, []).extend(v.strip() for v in value.split(",") if v.strip())
+    return filters
 
 
 def _refs(components: list[dict]) -> list[str]:
@@ -255,14 +281,24 @@ async def unpublish_dashboard(dash_ref: str, user=Depends(get_optional_user), db
 
 # ----------------------------------------------------------------- runtime
 @router.get("/{slug}/runtime")
-async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
+async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     components = (row.config or {}).get("components", [])
+    filters = _filters_from_request(request)  # v47: cross-filtering
     datasets = await _collect_datasets(db, _refs(components), strict=False)
     dataset_meta = [
         {"id": ds.id, "name": ds.name, "row_count": ds.row_count} for ds in datasets.values()
     ]
     frames = await _load_frames(datasets)
+    if filters:  # v47: filter BEFORE compute - charts/stats/tables all re-render
+        from ..services.apps import apply_filters
+
+        frames = {
+            ds_id: apply_filters(df, filters)
+            for ds_id, df in frames.items()
+            if isinstance(df, pd.DataFrame)
+        }
     return {
         "dashboard": {
             "name": row.name,
@@ -273,4 +309,16 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
         "datasets": dataset_meta,
         "components": db_svc.compute_config(components, frames),
         "refresh_seconds": (row.config or {}).get("refresh_seconds", 60),  # v46
+        "filters": filters,  # v47: echo for active-filter chips
     }
+
+
+@router.put("/{dash_ref}/share", response_model=DashboardOut)
+async def toggle_share(dash_ref: str, body: ShareToggle, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v47: enable (generate) or disable (clear) the public share token."""
+    row = await _get_or_404(db, dash_ref, user)
+    row.share_token = secrets.token_urlsafe(24) if body.enabled else None
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return _out(row)

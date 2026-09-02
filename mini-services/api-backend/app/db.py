@@ -68,5 +68,20 @@ async def init_db() -> None:
             ds_cols = {c["name"] for c in insp.get_columns("datasets")}
             if "tags" not in ds_cols:
                 sync_conn.execute(text("ALTER TABLE datasets ADD COLUMN tags JSON"))
+            # v47: model reference stats + share tokens + dataset lineage
+            tm_cols = {c["name"] for c in insp.get_columns("trained_models")}
+            if "reference_stats" not in tm_cols:
+                sync_conn.execute(text("ALTER TABLE trained_models ADD COLUMN reference_stats JSON DEFAULT ('{}')"))
+            for table in ("apps", "dashboards"):
+                cols = {c["name"] for c in insp.get_columns(table)}
+                if "share_token" not in cols:
+                    sync_conn.execute(text(f"ALTER TABLE {table} ADD COLUMN share_token VARCHAR(64)"))
+            dv_cols = {c["name"] for c in insp.get_columns("dataset_versions")}
+            if "workflow_id" not in dv_cols:
+                sync_conn.execute(text("ALTER TABLE dataset_versions ADD COLUMN workflow_id VARCHAR(36)"))
+            if "execution_id" not in dv_cols:
+                sync_conn.execute(text("ALTER TABLE dataset_versions ADD COLUMN execution_id VARCHAR(36)"))
+            if "node_name" not in dv_cols:
+                sync_conn.execute(text("ALTER TABLE dataset_versions ADD COLUMN node_name VARCHAR(200)"))
 
         await conn.run_sync(_add_missing_columns)

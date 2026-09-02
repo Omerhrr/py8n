@@ -40,6 +40,7 @@ import re
 import shutil
 import time
 import uuid
+from contextvars import ContextVar, Token
 from pathlib import Path
 
 import duckdb
@@ -302,6 +303,26 @@ async def create_from_df(
 # ----------------------------------------------------------------- versions (v44)
 MAX_DATASET_VERSIONS = 20  # per dataset; oldest snapshots beyond the cap are pruned
 
+# ----------------------------------------------------------------------
+# Write provenance (v47 lineage) - engine-side writes stamp the version
+# timeline with the producing workflow/execution/node. The ContextVar is
+# set by writing nodes (DatasetWriteNode) around their service calls and
+# stays NULL for API/upload-side writes, which have no engine context.
+# ----------------------------------------------------------------------
+_provenance: ContextVar[dict | None] = ContextVar("dataset_write_provenance", default=None)
+
+
+def set_provenance(workflow_id: str, execution_id: str, node_name: str) -> Token:
+    return _provenance.set({
+        "workflow_id": workflow_id,
+        "execution_id": execution_id,
+        "node_name": node_name,
+    })
+
+
+def reset_provenance(token: Token) -> None:
+    _provenance.reset(token)
+
 
 def versions_root() -> Path:
     path = datasets_dir() / "versions"
@@ -328,6 +349,7 @@ async def snapshot_version(
     beyond MAX_DATASET_VERSIONS are pruned together with their files.
     Caller owns the commit.
     """
+    prov = _provenance.get() or {}
     last = (
         await db.execute(
             select(DatasetVersion.version)
@@ -351,6 +373,9 @@ async def snapshot_version(
         row_count=int(ds.row_count or 0),
         source=source[:20],
         note=note[:300],
+        workflow_id=prov.get("workflow_id"),
+        execution_id=prov.get("execution_id"),
+        node_name=prov.get("node_name"),
     )
     db.add(row)
     await db.flush()

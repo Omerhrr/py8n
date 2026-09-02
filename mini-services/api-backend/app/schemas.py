@@ -356,6 +356,12 @@ class AppUpdate(BaseModel):
     config: dict | None = None
 
 
+class ShareToggle(BaseModel):
+    """v47: share-token ACL switch for apps and dashboards."""
+
+    enabled: bool
+
+
 class AppOut(BaseModel):
     id: str
     name: str
@@ -365,6 +371,7 @@ class AppOut(BaseModel):
     dataset_name: str | None = None
     config: dict = Field(default_factory=dict)
     status: str = "draft"
+    share_token: str | None = None  # v47: owner-facing; runtime payloads omit it
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -410,5 +417,6 @@ class DashboardOut(BaseModel):
     description: str = ""
     config: dict = Field(default_factory=dict)
     status: str = "draft"
+    share_token: str | None = None  # v47: owner-facing; runtime payloads omit it
     created_at: datetime | None = None
     updated_at: datetime | None = None

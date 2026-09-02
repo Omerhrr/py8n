@@ -2,7 +2,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import {
   Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
-  Play, BarChart3, Table2, X, History, Undo2, Plus, Eye, Download,
+  Play, BarChart3, Table2, X, History, Undo2, Plus, Eye, Download, GitBranch, ChevronDown,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -258,6 +258,56 @@ async function deleteVersion(v: DatasetVersionRow) {
   } finally {
     busyVersion.value = null
   }
+}
+
+// ------------------------------------------------------------------ lineage (v47)
+// Provenance timeline: every version with the workflow/execution/node that
+// produced it (origin 'surface' = API/upload-side writes). Lazy-loaded on
+// first expand, ascending by version like the versions endpoint.
+interface LineageStep {
+  version: number
+  row_count: number
+  source: string
+  note: string
+  created_at: string | null
+  workflow_id: string | null
+  workflow_name: string | null
+  execution_id: string | null
+  node_name: string | null
+  origin: 'workflow' | 'surface'
+}
+
+interface LineageResponse {
+  dataset_id: string
+  name: string
+  created_at: string | null
+  row_count: number
+  workflow_versions: number
+  steps: LineageStep[]
+}
+
+const lineage = ref<LineageResponse | null>(null)
+const lineageOpen = ref(false)
+const loadingLineage = ref(false)
+
+async function toggleLineage() {
+  lineageOpen.value = !lineageOpen.value
+  if (lineageOpen.value && !lineage.value && meta.value) {
+    loadingLineage.value = true
+    try {
+      lineage.value = await api.get<LineageResponse>(`/datasets/${meta.value.id}/lineage`)
+    } catch (e: any) {
+      error.value = e?.data?.detail || e?.message || 'Lineage failed'
+    } finally {
+      loadingLineage.value = false
+    }
+  }
+}
+
+function lineageOriginLabel(s: LineageStep): string {
+  return s.origin === 'workflow'
+    ? `${s.workflow_name || 'workflow'} · ${s.node_name || 'node'}`
+    : s.source
 }
 
 function fmtCell(v: any): string {
@@ -581,6 +631,42 @@ const dtypeColor: Record<string, string> = {
                     title="Delete snapshot"
                     @click="deleteVersion(v)"
                   ><Trash2 class="h-3.5 w-3.5" /></button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- v47: provenance lineage -->
+          <div class="mt-5 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+            <button class="flex w-full items-center justify-between border-b border-zinc-800/80 px-4 py-2.5 text-left" @click="toggleLineage">
+              <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+                <GitBranch class="h-3.5 w-3.5 text-cyan-400" /> Lineage
+              </h2>
+              <span class="flex items-center gap-2 text-[11px] text-zinc-500">
+                {{ lineage ? `${lineage.workflow_versions} workflow version${lineage.workflow_versions === 1 ? '' : 's'}` : 'provenance timeline' }}
+                <ChevronDown class="h-3.5 w-3.5 transition" :class="lineageOpen && 'rotate-180'" />
+              </span>
+            </button>
+            <div v-if="lineageOpen">
+              <div v-if="loadingLineage" class="flex items-center justify-center py-6 text-zinc-500">
+                <Loader2 class="h-4 w-4 animate-spin" />
+              </div>
+              <p v-else-if="!lineage?.steps.length" class="px-4 py-5 text-center text-xs text-zinc-500">No versions yet</p>
+              <div v-else class="max-h-80 divide-y divide-zinc-800/40 overflow-y-auto">
+                <div
+                  v-for="s in lineage.steps"
+                  :key="s.version"
+                  class="flex flex-wrap items-center gap-2 px-4 py-2.5"
+                  :class="s.origin === 'workflow' ? 'border-l-2 border-orange-500/50' : 'border-l-2 border-transparent'"
+                  :title="s.execution_id ? `execution ${s.execution_id}` : (s.note || s.source)"
+                >
+                  <span class="w-9 shrink-0 font-mono text-xs font-bold text-zinc-200">v{{ s.version }}</span>
+                  <span class="shrink-0 text-[11px] tabular-nums text-zinc-500">{{ s.row_count.toLocaleString() }} rows</span>
+                  <span
+                    class="min-w-0 flex-1 truncate text-[11px]"
+                    :class="s.origin === 'workflow' ? 'font-medium text-orange-300/90' : 'text-zinc-600'"
+                  >{{ lineageOriginLabel(s) }}</span>
+                  <span class="shrink-0 text-[11px] text-zinc-600">{{ fmtDate(s.created_at) }}</span>
                 </div>
               </div>
             </div>

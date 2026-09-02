@@ -302,6 +302,11 @@ class DatasetVersion(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str] = mapped_column(String(20), default="append")  # create|import|append|replace|restore|workflow
     note: Mapped[str] = mapped_column(String(300), default="")
+    # v47 lineage: which workflow/execution/node produced this version
+    # (NULL for API/dashboard-side writes - they carry no engine context).
+    workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    node_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
@@ -375,6 +380,9 @@ class TrainedModel(Base):
     target: Mapped[str] = mapped_column(String(120), default="")
     features: Mapped[list] = mapped_column(JSONVariant, default=list)
     metrics: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    # v47: per-feature training distributions captured at fit time (numeric
+    # quantiles / categorical counts) - the reference for drift scoring.
+    reference_stats: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     dataset_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     row_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -402,6 +410,9 @@ class App(Base):
     # {"components": [{id, type: stat|table|form|chart, ...type params}]}
     config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
+    # v47: when set, the public runtime surface (runtime/records/form-submit)
+    # requires this token via ?t= or X-Share-Token; NULL keeps legacy open access.
+    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -434,6 +445,8 @@ class Dashboard(Base):
     # {"components": [{id, type: stat|chart|table|text, ...type params}]}
     config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)  # draft|published
+    # v47: share token - same contract as apps.share_token.
+    share_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

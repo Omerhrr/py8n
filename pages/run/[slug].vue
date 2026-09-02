@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import {
-  Loader2, Search, Plus, Pencil, Trash2, X, CircleAlert, Rocket, Database, RefreshCw, ChevronLeft, ChevronRight, TriangleAlert,
+  Loader2, Search, Plus, Pencil, Trash2, X, CircleAlert, Rocket, Database, RefreshCw, ChevronLeft, ChevronRight, TriangleAlert, Lock,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -44,8 +44,22 @@ interface Runtime {
 
 const loading = ref(true)
 const notFound = ref(false)
+const forbidden = ref(false)
 const loadError = ref<string | null>(null)
 const rt = ref<Runtime | null>(null)
+
+// v47 share tokens: when the owner enables share protection the public
+// runtime endpoints demand ?t=<token> (or the X-Share-Token header) - the
+// token this page received in its own URL rides on every runtime call.
+const shareTok = computed(() => {
+  const t = route.query.t
+  const raw = Array.isArray(t) ? (t[0] ?? '') : t
+  return raw ? String(raw) : ''
+})
+
+function tq(sep: '?' | '&' = '?'): string {
+  return shareTok.value ? `${sep}t=${encodeURIComponent(shareTok.value)}` : ''
+}
 
 const rows = ref<any[]>([])
 const columns = ref<string[]>([])
@@ -105,13 +119,17 @@ function setFilter(col: string, value: string) {
   loadRuntime()
 }
 
-function filterQuery(): string {
+// v47: one query string for the runtime call - share token plus the v46
+// filter selections. (The old filterQuery() emitted "&filter.X=…" with no
+// leading "?", which left the params inside the URL path and 404ed.)
+function runtimeQuery(): string {
   const params = new URLSearchParams()
+  if (shareTok.value) params.set('t', shareTok.value)
   for (const [col, val] of Object.entries(filterSel.value)) {
     if (val) params.set(`filter.${col}`, val)
   }
   const qs = params.toString()
-  return qs ? `&${qs}` : ''
+  return qs ? `?${qs}` : ''
 }
 
 // v46: per-chart pie/donut style (any chart component, not just the first)
@@ -151,12 +169,14 @@ const pieStyle = computed(() => {
 async function loadRuntime() {
   loading.value = true
   notFound.value = false
+  forbidden.value = false
   loadError.value = null
   try {
-    rt.value = await api.get<Runtime>(`/apps/${route.params.slug}/runtime${filterQuery()}`)
+    rt.value = await api.get<Runtime>(`/apps/${route.params.slug}/runtime${runtimeQuery()}`)
     await loadRows()
   } catch (e: any) {
     if (e?.status === 404 || e?.statusCode === 404) notFound.value = true
+    else if (e?.status === 403 || e?.statusCode === 403) forbidden.value = true
     else loadError.value = e?.data?.detail || e?.message || 'Failed to load app'
   } finally {
     loading.value = false
@@ -167,7 +187,7 @@ async function loadRows() {
   if (!rt.value?.dataset) return
   loadingRows.value = true
   try {
-    const r = await api.get<any>(`/apps/${route.params.slug}/records?offset=0&limit=1000`)
+    const r = await api.get<any>(`/apps/${route.params.slug}/records?offset=0&limit=1000${tq('&')}`)
     rows.value = r.rows || []
     columns.value = r.columns || []
     if (page.value > totalPages.value) page.value = 1
@@ -230,9 +250,9 @@ async function submitForm() {
   try {
     let res: any
     if (editIndex.value === null) {
-      res = await api.post<any>(`/apps/${route.params.slug}/records`, { record: formModel.value })
+      res = await api.post<any>(`/apps/${route.params.slug}/records${tq()}`, { record: formModel.value })
     } else {
-      res = await api.patch<any>(`/apps/${route.params.slug}/records/${editIndex.value}`, { record: formModel.value })
+      res = await api.patch<any>(`/apps/${route.params.slug}/records/${editIndex.value}${tq()}`, { record: formModel.value })
     }
     lastWarnings.value = res?.warnings || []
     showModal.value = false
@@ -259,7 +279,7 @@ async function removeRow(index: number) {
   mutatingId.value = `del-${index}`
   actionError.value = null
   try {
-    await api.del(`/apps/${route.params.slug}/records/${index}`)
+    await api.del(`/apps/${route.params.slug}/records/${index}${tq()}`)
     await refreshAll()
   } catch (e: any) {
     actionError.value = e?.data?.detail || e?.message || 'Delete failed'
@@ -281,6 +301,15 @@ async function removeRow(index: number) {
       </span>
       <p class="mt-4 text-sm font-medium text-zinc-300">App not found (or not published)</p>
       <p class="mt-1 text-xs text-zinc-500">Check the link, or ask the builder to publish it first.</p>
+    </div>
+
+    <!-- v47: share-protected app opened without (or with a stale) token -->
+    <div v-else-if="forbidden" class="mt-24 text-center">
+      <span class="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-900">
+        <Lock class="h-6 w-6 text-zinc-600" />
+      </span>
+      <p class="mt-4 text-sm font-medium text-zinc-300">This link requires a valid share token</p>
+      <p class="mt-1 text-xs text-zinc-500">Ask the app owner for a fresh link with ?t=… (regenerating revokes old ones).</p>
     </div>
 
     <p v-else-if="loadError" class="mx-auto mt-10 max-w-2xl rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-2.5 text-sm text-amber-300">{{ loadError }}</p>

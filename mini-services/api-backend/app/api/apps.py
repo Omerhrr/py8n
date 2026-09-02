@@ -33,6 +33,8 @@ Every mutation commits explicitly (v4 lesson).
 
 from __future__ import annotations
 
+import secrets
+
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
@@ -42,7 +44,7 @@ from ..auth import get_optional_user, own_or_404, scope_rows
 from ..config import settings
 from ..db import get_db
 from ..models import App, Dataset, Workflow
-from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut
+from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut, ShareToggle
 from ..services import apps as app_svc
 from ..services import datasets as ds_svc
 from ..services import rules as rule_svc
@@ -60,6 +62,7 @@ def _out(row: App, dataset: Dataset | None = None) -> AppOut:
         dataset_name=dataset.name if dataset else None,
         config=row.config or {},
         status=row.status,
+        share_token=row.share_token,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -99,6 +102,18 @@ async def _runtime_or_404(db: AsyncSession, slug: str) -> App:
     if row is None or row.status != "published":
         raise HTTPException(status_code=404, detail="App not found (or not published)")
     return row
+
+
+def _share_gate(row: App | Dashboard, request: Request) -> None:
+    """v47 share-token ACL: when the owner has enabled share protection,
+    public callers must present the token via ``?t=`` or ``X-Share-Token``.
+    NULL token = legacy open access (backward compatible)."""
+    expected = getattr(row, "share_token", None)
+    if not expected:
+        return
+    presented = request.query_params.get("t") or request.headers.get("x-share-token") or ""
+    if not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
 
 
 def _form_comp(row: App) -> dict | None:
@@ -274,10 +289,27 @@ async def unpublish_app(app_ref: str, user=Depends(get_optional_user), db: Async
     return await _out_with_dataset(db, row)
 
 
+@router.put("/{app_ref}/share", response_model=AppOut)
+async def toggle_share(app_ref: str, body: ShareToggle, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v47: enable (generate) or disable (clear) the public share token.
+
+    Enabled  -> a fresh ``secrets.token_urlsafe`` token; the runtime surface
+    (runtime/records/form/form-submit) then demands it via ?t= or header.
+    Disabled -> NULL token, legacy open access restored. Regenerating the
+    token (disable + enable) revokes every previously shared link."""
+    row = await _get_or_404(db, app_ref, user)
+    row.share_token = secrets.token_urlsafe(24) if body.enabled else None
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return await _out_with_dataset(db, row)
+
+
 # ----------------------------------------------------------------- runtime
 @router.get("/{slug}/runtime")
 async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     dataset = await _dataset_for(db, row)
     components = (row.config or {}).get("components", [])
     filters = _filters_from_request(request)  # v46: ?filter.COLUMN=value
@@ -383,9 +415,10 @@ async def test_rules(app_ref: str, body: RulesTestIn, user=Depends(get_optional_
 
 # ----------------------------------------------------------------- forms (v30)
 @router.get("/{slug}/form")
-async def form_descriptor(slug: str, db: AsyncSession = Depends(get_db)):
+async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Standalone form descriptor for the public /f/{slug} page."""
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     form = _form_comp(row)
     if form is None:
         raise HTTPException(status_code=409, detail="App has no form component")
@@ -402,9 +435,10 @@ async def form_descriptor(slug: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{slug}/form-submit", status_code=201)
-async def form_submit(slug: str, body: AppRecordIn, db: AsyncSession = Depends(get_db)):
+async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Anonymous single-form submission - same pipeline as records POST."""
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     if _form_comp(row) is None:
         raise HTTPException(status_code=409, detail="App has no form component")
     dataset = await _dataset_for(db, row)
@@ -456,6 +490,7 @@ async def runtime_records(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     dataset = await _dataset_for(db, row)
     if dataset is None:
         return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": []}
@@ -473,8 +508,9 @@ async def runtime_records(
 
 
 @router.post("/{slug}/records", status_code=201)
-async def create_record(slug: str, body: AppRecordIn, db: AsyncSession = Depends(get_db)):
+async def create_record(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
@@ -497,10 +533,12 @@ async def edit_record(
     slug: str,
     index: int,
     body: AppRecordIn,
+    request: Request,
     user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
@@ -524,10 +562,12 @@ async def edit_record(
 async def remove_record(
     slug: str,
     index: int,
+    request: Request,
     user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
+    _share_gate(row, request)  # v47 share-token ACL
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:

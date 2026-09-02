@@ -610,7 +610,7 @@ class ModelTrainNode(BaseNode):
             filename="model.pkl",
         )
 
-        # ---- model registry (v46)
+        # ---- model registry (v46 + v47 reference stats)
         registry_row = None
         if p.register:
             from ...db import AsyncSessionLocal
@@ -623,6 +623,9 @@ class ModelTrainNode(BaseNode):
                 ds_name = input_data.get("dataset")
                 if not isinstance(ds_name, str):
                     ds_name = None
+            # v47: snapshot the training distributions so drift_check / the
+            # drift endpoint can PSI-score future batches against THIS version
+            reference_stats = model_svc.compute_reference_stats(data, feats)
             async with AsyncSessionLocal() as session:
                 row = await model_svc.register_model(
                     session,
@@ -637,6 +640,7 @@ class ModelTrainNode(BaseNode):
                     dataset_name=ds_name,
                     row_count=int(len(data)),
                     activate=True,
+                    reference_stats=reference_stats,
                 )
                 await session.commit()
                 registry_row = model_svc.model_out(row)
@@ -769,4 +773,83 @@ class ModelPredictNode(BaseNode):
                 "id": info["id"], "name": info["name"], "version": info["version"],
                 "algorithm": info["algorithm"], "task": info["task"],
             },
+        })
+
+
+class DriftCheckNode(BaseNode):
+    """v47: production drift gate - PSI-scores the input batch against the
+    reference distributions captured when the model version was trained.
+
+    Sits mid-pipeline (items pass through untouched) and emits a structured
+    drift report; ``on_drift=error`` fails the run so orchestrations can
+    hard-stop on data shift (the failure also fires execution_failed
+    notification rules), ``warn`` just annotates the payload for IF-routing.
+    """
+
+    type = "drift_check"
+    name = "Drift Check"
+    description = (
+        "Compares the input batch against a model's training-time reference "
+        "distributions using the Population Stability Index (PSI): flags "
+        "shifted features, warns or fails on drift, passes items through."
+    )
+    category = "ai"
+    icon = "activity"
+    color = "#f59e0b"
+
+    class ParamsModel(BaseModel):
+        model: str = Field(default="", description="Registry name (uses the ACTIVE version) or a registry row id")
+        threshold: float = Field(default=0.25, ge=0.01, le=10.0, description="PSI above this counts as drift (0.25 = significant)")
+        on_drift: str = Field(
+            default="warn",
+            description="warn = annotate the report and continue; error = fail the run",
+            json_schema_extra={"widget": "select", "options": ["warn", "error"]},
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import models as model_svc
+
+        p = self.params  # type: DriftCheckNode.ParamsModel
+        if not p.model or not p.model.strip():
+            raise NodeExecutionError("A model name or id is required")
+        async with AsyncSessionLocal() as session:
+            row = await model_svc.resolve_model(session, p.model.strip(), owner_id=getattr(context, "owner_id", None))
+            if row is None:
+                raise NodeExecutionError(f"Model {p.model!r} not found in the registry (or not owned by you)")
+            info = model_svc.model_out(row)
+        reference = info.get("reference_stats") or {}
+        if not reference:
+            raise NodeExecutionError(
+                f"Model {info['name']} v{info['version']} has no reference stats - "
+                "retrain it (model_train v47+) to capture training distributions"
+            )
+
+        items = _items(_working_data(context.current_input))
+        rows = [r for r in items if isinstance(r, dict)]
+        if not rows:
+            raise NodeExecutionError("Drift Check needs object items to score")
+        import pandas as pd
+
+        df = pd.DataFrame(rows)
+        report = model_svc.score_drift(
+            reference,
+            df,
+            info.get("features") or [],
+            threshold=p.threshold,
+        )
+        report["model"] = {"id": info["id"], "name": info["name"], "version": info["version"]}
+        report["mode"] = p.on_drift
+
+        if p.on_drift == "error" and report["drift_detected"]:
+            shifted = [f["feature"] for f in report["features"] if f["status"] in ("drifted", "missing")]
+            raise NodeExecutionError(
+                f"Drift detected against {info['name']} v{info['version']}: "
+                f"max PSI {report['overall_psi']} > threshold {p.threshold} (features: {shifted})"
+            )
+
+        return self._single({
+            "items": rows,  # pass through - a drift gate sits mid-pipeline
+            "drift_detected": report["drift_detected"],
+            "report": report,
         })
