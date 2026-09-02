@@ -35,6 +35,7 @@ v30 - forms get field options and records get business rules:
 
 from __future__ import annotations
 
+import json
 import re
 
 import pandas as pd
@@ -45,10 +46,11 @@ from ..models import App, Dataset
 from . import datasets as ds_svc
 from . import rules as rule_svc
 
-COMPONENT_TYPES = {"stat", "table", "form", "chart"}
-AGGS = {"count", "sum", "avg", "min", "max"}
-CHART_TYPES = {"bar", "pie"}
+COMPONENT_TYPES = {"stat", "table", "form", "chart", "kpi", "markdown", "filter"}  # v46: +kpi/markdown/filter
+AGGS = {"count", "sum", "avg", "min", "max", "count_distinct", "median"}  # v46: +count_distinct/median
+CHART_TYPES = {"bar", "pie", "line", "area", "donut", "scatter"}  # v46: +line/area/donut/scatter
 MAX_COMPONENTS = 24
+MAX_FILTER_OPTIONS = 200  # distinct options kept for filter components
 
 
 # ----------------------------------------------------------------- slugs
@@ -223,22 +225,55 @@ def validate_config(config: dict, schema: list[dict]) -> None:
             if not fields or not isinstance(fields, list):
                 raise ValueError(f"{ctx} ({cid}): form needs at least one field")
             validate_fields(fields, names, ctx, cid)
-        elif ctype == "chart":
-            ctype_chart = comp.get("chart_type", "bar")
-            if ctype_chart not in CHART_TYPES:
-                raise ValueError(f"{ctx} ({cid}): chart_type must be one of {sorted(CHART_TYPES)}")
-            group_by = comp.get("group_by")
-            if not group_by:
-                raise ValueError(f"{ctx} ({cid}): group_by is required")
-            if group_by not in names:
-                raise ValueError(f"{ctx} ({cid}): group_by {group_by!r} not in dataset schema")
+        elif ctype == "kpi":  # v46: a stat with presence
             agg = comp.get("agg", "count")
             if agg not in AGGS:
                 raise ValueError(f"{ctx} ({cid}): agg must be one of {sorted(AGGS)}")
             if agg != "count":
                 col = comp.get("column")
-                if not col or col not in names:
-                    raise ValueError(f"{ctx} ({cid}): agg={agg} requires a valid column")
+                if not col:
+                    raise ValueError(f"{ctx} ({cid}): agg={agg} requires a column")
+                if col not in names:
+                    raise ValueError(f"{ctx} ({cid}): column {col!r} not in dataset schema")
+        elif ctype == "markdown":  # v46
+            body = comp.get("body", "")
+            if not isinstance(body, str) or not body.strip():
+                raise ValueError(f"{ctx} ({cid}): markdown needs a body")
+            if len(body) > 5000:
+                raise ValueError(f"{ctx} ({cid}): markdown body too long (max 5000 chars)")
+        elif ctype == "filter":  # v46: dropdown that filters the whole app
+            col = comp.get("column")
+            if not col or col not in names:
+                raise ValueError(f"{ctx} ({cid}): filter needs a valid column")
+            if "multiple" in comp and not isinstance(comp["multiple"], bool):
+                raise ValueError(f"{ctx} ({cid}): multiple must be a boolean")
+        elif ctype == "chart":
+            ctype_chart = comp.get("chart_type", "bar")
+            if ctype_chart not in CHART_TYPES:
+                raise ValueError(f"{ctx} ({cid}): chart_type must be one of {sorted(CHART_TYPES)}")
+            if ctype_chart == "scatter":  # v46: x/y scatter instead of group_by
+                x_col = comp.get("x")
+                y_col = comp.get("y")
+                if not x_col or x_col not in names:
+                    raise ValueError(f"{ctx} ({cid}): scatter needs a valid x column")
+                if not y_col or y_col not in names:
+                    raise ValueError(f"{ctx} ({cid}): scatter needs a valid y column")
+                dtypes = {c["name"]: c.get("dtype") for c in schema}
+                if dtypes.get(y_col) not in ("integer", "number"):
+                    raise ValueError(f"{ctx} ({cid}): scatter y column must be numeric")
+            else:
+                group_by = comp.get("group_by")
+                if not group_by:
+                    raise ValueError(f"{ctx} ({cid}): group_by is required")
+                if group_by not in names:
+                    raise ValueError(f"{ctx} ({cid}): group_by {group_by!r} not in dataset schema")
+                agg = comp.get("agg", "count")
+                if agg not in AGGS:
+                    raise ValueError(f"{ctx} ({cid}): agg must be one of {sorted(AGGS)}")
+                if agg != "count":
+                    col = comp.get("column")
+                    if not col or col not in names:
+                        raise ValueError(f"{ctx} ({cid}): agg={agg} requires a valid column")
 
     # v30 - rules ride in the same config, validated against the schema
     rule_svc.validate_rules(config.get("rules"), schema)
@@ -349,6 +384,182 @@ def compute_chart(components: list[dict], df: pd.DataFrame) -> dict | None:
             "chart_type": comp.get("chart_type", "bar"),
         }
     return None
+
+
+# ----------------------------------------------------------------- v46 deep compute
+def markdown_to_safe_html(text: str) -> str:
+    """Tiny markdown-lite renderer with NO dependency and NO XSS surface.
+
+    The body is HTML-escaped FIRST, then a conservative subset of markdown
+    is layered on top: **bold**, *italic*, `code`, [text](http(s) links)
+    and line breaks. Everything else passes through as (escaped) text.
+    """
+    import html as _html
+
+    out = _html.escape(text or "", quote=True)
+    out = re.sub(r"\*\*([^*\n]+)\*\*", r"<strong>\1</strong>", out)
+    out = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", out)
+    out = re.sub(r"`([^`\n]+)`", r"<code>\1</code>", out)
+    out = re.sub(
+        r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)",
+        r'<a href="\2" target="_blank" rel="noopener noreferrer">\1</a>',
+        out,
+    )
+    out = out.replace("\r\n", "\n").replace("\n", "<br>")
+    return out
+
+
+def _agg_series(df: pd.DataFrame, agg: str, column: str | None):
+    """Aggregation over a frame → scalar (v46 aggs)."""
+    if agg == "count":
+        return int(len(df))
+    if column not in df.columns or not len(df):
+        return None
+    if agg == "count_distinct":
+        return int(df[column].nunique(dropna=True))
+    if agg == "median":
+        nums = pd.to_numeric(df[column], errors="coerce").dropna()
+        return round(float(nums.median()), 4) if len(nums) else None
+    nums = pd.to_numeric(df[column], errors="coerce").dropna()
+    if not len(nums):
+        return None
+    val = {"sum": nums.sum(), "avg": nums.mean(), "min": nums.min(), "max": nums.max()}[agg]
+    return round(float(val), 4)
+
+
+def apply_filters(df: pd.DataFrame, filters: dict | None) -> pd.DataFrame:
+    """Filter-component selections → filtered frame (string-loose matching)."""
+    if not filters:
+        return df
+    out = df
+    for col, raw in (filters or {}).items():
+        if col not in out.columns:
+            continue
+        values = raw if isinstance(raw, list) else [raw]
+        values = [str(v).strip().lower() for v in values if str(v).strip() != ""]
+        if not values:
+            continue
+        out = out[out[col].astype(str).str.strip().str.lower().isin(values)]
+    return out
+
+
+def compute_components(components: list[dict], df: pd.DataFrame, filters: dict | None = None) -> list[dict]:
+    """Render EVERY component server-side (v46) - one source of truth for the
+    builder preview and the runtime, ending the client-side drift.
+
+    Chart bucket caps: 8 slices for pie/donut, 12 bars/lines (v29 parity).
+    Filter options are distinct values capped at MAX_FILTER_OPTIONS.
+    """
+    fdf = apply_filters(df, filters)
+    rendered: list[dict] = []
+    for comp in components:
+        ctype = comp.get("type")
+        cid = comp.get("id", "")
+        if ctype in ("stat", "kpi"):
+            value = _agg_series(fdf, comp.get("agg", "count"), comp.get("column"))
+            rendered.append({
+                "id": cid, "type": ctype, "label": comp.get("label", ""),
+                "agg": comp.get("agg", "count"), "column": comp.get("column"),
+                "value": value,
+            })
+        elif ctype == "chart":
+            chart_type = comp.get("chart_type", "bar")
+            base = {"id": cid, "type": "chart", "title": comp.get("title", ""), "chart_type": chart_type}
+            if chart_type == "scatter":
+                x_col, y_col = comp.get("x"), comp.get("y")
+                if not len(fdf) or x_col not in fdf.columns or y_col not in fdf.columns:
+                    rendered.append({**base, "points": []})
+                    continue
+                pts = fdf[[x_col, y_col]].copy()
+                pts[y_col] = pd.to_numeric(pts[y_col], errors="coerce")
+                pts = pts.dropna().head(500)
+                points = [
+                    {"x": json.loads(json.dumps(row[x_col], default=str)), "y": round(float(row[y_col]), 4)}
+                    for _, row in pts.iterrows()
+                ]
+                rendered.append({**base, "x": x_col, "y": y_col, "points": points})
+                continue
+            group_by = comp.get("group_by")
+            if group_by not in fdf.columns or not len(fdf):
+                rendered.append({**base, "labels": [], "values": []})
+                continue
+            series = fdf[group_by].fillna("(blank)")
+            agg = comp.get("agg", "count")
+            cap = 8 if chart_type in ("pie", "donut") else 12
+            if agg == "count":
+                counts = series.value_counts()
+                labels = [str(v) for v in counts.index[:cap]]
+                values = [int(c) for c in counts.values[:cap]]
+            else:
+                col = comp.get("column")
+                if col not in fdf.columns:
+                    rendered.append({**base, "labels": [], "values": []})
+                    continue
+                nums = pd.to_numeric(fdf[col], errors="coerce")
+                if agg == "median":
+                    grouped = nums.groupby(series).median().dropna()
+                elif agg == "count_distinct":
+                    grouped = fdf[col].groupby(series).nunique().dropna()
+                else:
+                    grouped = nums.groupby(series).agg("mean" if agg == "avg" else agg).dropna()
+                labels = [str(v) for v in grouped.index[:cap]]
+                values = [round(float(v), 4) for v in grouped.values[:cap]]
+            if chart_type in ("line", "area"):
+                order = sorted(range(len(labels)), key=lambda i: labels[i])
+                labels = [labels[i] for i in order]
+                values = [values[i] for i in order]
+            rendered.append({**base, "labels": labels, "values": values})
+        elif ctype == "table":
+            cols = [c for c in comp.get("columns", []) if c in fdf.columns]
+            page_size = int(comp.get("page_size", 10))
+            rows = ds_svc.jsonable_rows(fdf[cols].head(page_size)) if cols else []
+            rendered.append({
+                "id": cid, "type": "table", "title": comp.get("title", ""),
+                "columns": cols, "rows": rows,
+                "row_count": len(rows), "total": int(len(fdf)),
+            })
+        elif ctype == "markdown":
+            rendered.append({
+                "id": cid, "type": "markdown", "title": comp.get("title", ""),
+                "html": markdown_to_safe_html(comp.get("body", "")),
+            })
+        elif ctype == "filter":
+            col = comp.get("column")
+            options: list[str] = []
+            if col in df.columns:
+                options = [str(v) for v in df[col].dropna().unique()[:MAX_FILTER_OPTIONS]]
+            rendered.append({
+                "id": cid, "type": "filter", "column": col,
+                "label": comp.get("label") or humanize(col or ""),
+                "multiple": bool(comp.get("multiple", False)),
+                "options": sorted(options),
+            })
+        elif ctype == "form":
+            rendered.append({
+                "id": cid, "type": "form", "title": comp.get("title", "Submit"),
+                "submit_label": comp.get("submit_label", "Submit"),
+                "fields": form_fields(comp),
+            })
+    return rendered
+
+
+def search_sort_df(df: pd.DataFrame, q: str | None, sort_by: str | None, sort_dir: str = "asc") -> pd.DataFrame:
+    """Runtime records search (all columns, case-insensitive substring) + sort."""
+    out = df
+    if q and q.strip():
+        needle = q.strip().lower()
+        mask = pd.Series(False, index=out.index)
+        for col in out.columns:
+            mask |= out[col].astype(str).str.lower().str.contains(needle, regex=False)
+        out = out[mask]
+    if sort_by and sort_by in out.columns and len(out):
+        ascending = sort_dir != "desc"
+        col = out[sort_by]
+        if col.dtype == object:
+            out = out.assign(__k=out[sort_by].astype(str)).sort_values("__k", ascending=ascending, key=lambda s: s.str.lower()).drop(columns="__k")
+        else:
+            out = out.sort_values(sort_by, ascending=ascending)
+    return out
 
 
 # ----------------------------------------------------------------- records

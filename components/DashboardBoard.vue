@@ -58,6 +58,22 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
   const area = `${pad},${h - pad} ${pts} ${x(n - 1).toFixed(1)},${h - pad}`
   return { pts, area }
 }
+
+// v46: scatter points → svg circle coordinates
+function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8) {
+  const points = c.points || []
+  if (!points.length) return []
+  const xs = points.map((p: any) => Number(p.x)).filter(Number.isFinite)
+  const ys = points.map((p: any) => Number(p.y)).filter(Number.isFinite)
+  const xMin = Math.min(...xs), xMax = Math.max(...xs)
+  const yMin = Math.min(...ys), yMax = Math.max(...ys)
+  const xRange = xMax - xMin || 1
+  const yRange = yMax - yMin || 1
+  return points.map((p: any) => ({
+    cx: (padL + ((Number(p.x) - xMin) / xRange) * (w - padL - 4)).toFixed(1),
+    cy: (padT + (1 - (Number(p.y) - yMin) / yRange) * (h - padT - padB)).toFixed(1),
+  }))
+}
 </script>
 
 <template>
@@ -83,7 +99,7 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
         </div>
 
         <!-- bar -->
-        <div v-if="comp.chart_type !== 'pie' && comp.labels.length" class="mt-3">
+        <div v-if="comp.chart_type === 'bar' && comp.labels.length" class="mt-3">
           <div class="space-y-2">
             <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-2">
               <span class="w-24 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
@@ -95,8 +111,8 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
           </div>
         </div>
 
-        <!-- line -->
-        <div v-else-if="comp.chart_type === 'line' && comp.labels.length" class="mt-3">
+        <!-- line / area (v46: area joins the line renderer) -->
+        <div v-else-if="(comp.chart_type === 'line' || comp.chart_type === 'area') && comp.labels.length" class="mt-3">
           <svg viewBox="0 0 320 120" class="h-32 w-full" preserveAspectRatio="none">
             <polygon :points="linePoints(comp).area" fill="url(#lg)" opacity="0.25" />
             <polyline :points="linePoints(comp).pts" fill="none" stroke="#06b6d4" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" />
@@ -113,10 +129,10 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
           </div>
         </div>
 
-        <!-- pie -->
-        <div v-else-if="comp.chart_type === 'pie' && comp.labels.length" class="mt-3 flex items-center gap-4">
+        <!-- pie / donut (v46: donut = pie with a deeper hole) -->
+        <div v-else-if="(comp.chart_type === 'pie' || comp.chart_type === 'donut') && comp.labels.length" class="mt-3 flex items-center gap-4">
           <div class="relative h-24 w-24 shrink-0 rounded-full" :style="pieStyle(comp)">
-            <div class="absolute inset-[10px] rounded-full bg-zinc-900" />
+            <div class="absolute rounded-full bg-zinc-900" :class="comp.chart_type === 'donut' ? 'inset-[18px]' : 'inset-[10px]'" />
           </div>
           <div class="min-w-0 flex-1 space-y-1">
             <div v-for="(label, i) in comp.labels" :key="label" class="flex items-center gap-1.5 text-[11px]">
@@ -124,6 +140,24 @@ function linePoints(c: any, w = 320, h = 120, pad = 6) {
               <span class="min-w-0 flex-1 truncate text-zinc-400">{{ label }}</span>
               <span class="tabular-nums text-zinc-500">{{ comp.values[i] }} ({{ Math.round((comp.values[i] / (pieStyle(comp).total || 1)) * 100) }}%)</span>
             </div>
+          </div>
+        </div>
+
+        <!-- scatter (v46): x/y points as SVG circles -->
+        <div v-else-if="comp.chart_type === 'scatter' && comp.points?.length" class="mt-3">
+          <svg viewBox="0 0 320 140" class="h-36 w-full" preserveAspectRatio="none">
+            <line x1="24" y1="128" x2="316" y2="128" stroke="#3f3f46" stroke-width="1" />
+            <line x1="24" y1="8" x2="24" y2="128" stroke="#3f3f46" stroke-width="1" />
+            <circle
+              v-for="(pt, i) in scatterPoints(comp)"
+              :key="i"
+              :cx="pt.cx" :cy="pt.cy" r="3.5"
+              fill="#06b6d4" fill-opacity="0.75"
+            />
+          </svg>
+          <div class="mt-1 flex justify-between text-[10px] text-zinc-500">
+            <span>{{ comp.x }}</span>
+            <span>{{ comp.y }}</span>
           </div>
         </div>
 

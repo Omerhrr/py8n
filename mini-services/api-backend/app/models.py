@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -349,6 +349,36 @@ class Artifact(Base):
     meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class TrainedModel(Base):
+    """Model registry (v46) - first-class, versioned ML models.
+
+    One row per trained version: name + version identify the model
+    (highest version = latest; exactly one ACTIVE version per name is what
+    model_predict scores with by default). The fitted pipeline (preprocessing
+    included - imputer/scaler/one-hot + estimator, plus the label encoder)
+    lives in the referenced artifact's pickle. owner scoping matches every
+    other v37 surface.
+    """
+
+    __tablename__ = "trained_models"
+    __table_args__ = (UniqueConstraint("name", "version", name="uq_model_name_version"), )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    algorithm: Mapped[str] = mapped_column(String(60), nullable=False)
+    task: Mapped[str] = mapped_column(String(20), nullable=False, default="classification")  # classification|regression
+    target: Mapped[str] = mapped_column(String(120), default="")
+    features: Mapped[list] = mapped_column(JSONVariant, default=list)
+    metrics: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    dataset_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

@@ -133,7 +133,7 @@ def test_v28_definitions():
             props = {t: set(by[t]["parameters_schema"]["properties"].keys()) for t in ("python_transform", "chart", "model_train")}
             assert props["python_transform"] == {"code", "timeout_seconds"}
             assert props["chart"] == {"chart_type", "x", "y", "title", "color"}
-            assert props["model_train"] == {"model", "target", "features", "test_size"}
+            assert props["model_train"] >= {"model", "target", "features", "test_size"}  # v46 added task/scale/cv/hyperparams/registry params
             assert by["chart"]["parameters_schema"]["properties"]["chart_type"]["options"] == ["bar", "line", "scatter", "hist", "pie"]
 
     try:
@@ -351,7 +351,8 @@ def test_v28_model_train_node():
             import pickle
 
             model = pickle.loads(res.content)
-            assert hasattr(model, "predict")
+            payload = model if isinstance(model, dict) and "pipeline" in model else {"pipeline": model}  # v46 wraps the pipeline
+            assert hasattr(payload["pipeline"], "predict")
 
             # classifier with text labels
             g2 = {
@@ -384,7 +385,8 @@ def test_v28_model_train_node():
                 r = await _run_and_wait(client, w, payload={"items": data})
                 assert r["status"] == "error", r.get("error")
                 err = r.get("error") or ""
-                assert ("at least 10" in err) or ("not found" in err) or ("numeric feature" in err)
+                # v46 adds the task-mismatch family of errors (text target + regressor)
+                assert ("at least 10" in err) or ("not found" in err) or ("numeric feature" in err) or ("is a regressor but the task is classification" in err)
 
     try:
         asyncio.run(_go())

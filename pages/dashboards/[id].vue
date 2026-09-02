@@ -54,7 +54,11 @@ const dirty = ref(false)
 const openComp = ref<string | null>(null)
 
 const AGGS = ['count', 'sum', 'avg', 'min', 'max']
-const CHART_TYPES = ['bar', 'line', 'pie']
+const CHART_TYPES = ['bar', 'line', 'area', 'pie', 'donut']  // v46: +area/donut
+
+// v46: configurable auto-refresh (10s..3600s, backend-validated)
+const refreshSeconds = ref(60)
+const refreshDirty = ref(false)
 
 async function load() {
   loading.value = true
@@ -66,6 +70,7 @@ async function load() {
     board.value = b
     datasets.value = d
     comps.value = JSON.parse(JSON.stringify(b.config?.components || []))
+    refreshSeconds.value = b.config?.refresh_seconds || 60
     dirty.value = false
     await refreshPreview()
   } catch (e: any) {
@@ -90,10 +95,14 @@ function colsOf(comp: ComponentDef, dtypes?: string[]) {
 }
 
 // ---------- component editing ----------
-let compSeq = 0
+// v46: collision-proof ids (Date.now ids could collide across sessions, the
+// same fix apps got in the v44.1 hardening wave)
 function uid(t: string) {
-  compSeq += 1
-  return `${t}_${Date.now().toString(36)}${compSeq}`
+  try {
+    return `${t}_${crypto.randomUUID()}`
+  } catch {
+    return `${t}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+  }
 }
 
 function addComp(type: ComponentDef['type']) {
@@ -159,10 +168,12 @@ async function saveConfig() {
   error.value = null
   try {
     const updated = await api.patch<Board>(`/dashboards/${board.value.id}`, {
-      config: { components: comps.value },
+      config: { components: comps.value, refresh_seconds: refreshSeconds.value },
     })
     board.value = updated
     comps.value = JSON.parse(JSON.stringify(updated.config?.components || []))
+    refreshSeconds.value = updated.config?.refresh_seconds || 60
+    refreshDirty.value = false
     dirty.value = false
     await refreshPreview()
   } catch (e: any) {
@@ -388,6 +399,7 @@ const typeColor: Record<string, string> = {
                     <select v-model="c.chart_type" class="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" @change="dirty = true">
                       <option v-for="t in CHART_TYPES" :key="t" :value="t">{{ t }}</option>
                     </select>
+                    <p class="mt-1 text-[9px] text-zinc-600">v46 adds area (line renderer) and donut (pie renderer)</p>
                   </div>
                   <div>
                     <label class="block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Group by</label>
@@ -451,6 +463,18 @@ const typeColor: Record<string, string> = {
           <p v-if="comps.length === 0" class="rounded-2xl border border-dashed border-zinc-800 px-4 py-8 text-center text-xs text-zinc-600">
             Empty board - add a stat, chart, table or text component above.
           </p>
+        </div>
+
+        <!-- refresh interval (v46) -->
+        <div class="mt-4 flex items-center gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/40 px-3 py-2.5">
+          <label class="text-[11px] text-zinc-400">Auto-refresh on the live page</label>
+          <input
+            v-model.number="refreshSeconds"
+            type="number" min="10" max="3600"
+            class="w-20 rounded-lg border border-zinc-800 bg-zinc-950/60 px-2 py-1 text-xs outline-none focus:border-violet-500/60"
+            @input="dirty = true"
+          />
+          <span class="text-[11px] text-zinc-600">seconds (10-3600)</span>
         </div>
 
         <!-- save bar -->

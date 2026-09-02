@@ -36,7 +36,7 @@ from ..models import Dashboard, Dataset
 from . import datasets as ds_svc
 
 COMPONENT_TYPES = {"stat", "chart", "table", "text"}
-CHART_TYPES = {"bar", "line", "pie"}
+CHART_TYPES = {"bar", "line", "pie", "area", "donut"}  # v46: +area/donut (rendered like line/pie)
 AGGS = {"count", "sum", "avg", "min", "max"}
 MAX_COMPONENTS = 32
 PIE_SLICES = 8
@@ -201,6 +201,10 @@ def validate_config(config: dict, datasets: dict[str, list[dict]]) -> None:
     """
     if not isinstance(config, dict) or not isinstance(config.get("components"), list):
         raise ValueError("config.components must be a list")
+    # v46: configurable auto-refresh (10s..3600s; default 60s)
+    refresh = config.get("refresh_seconds", 60)
+    if not isinstance(refresh, int) or not 10 <= refresh <= 3600:
+        raise ValueError("config.refresh_seconds must be an integer between 10 and 3600")
     comps = config["components"]
     if len(comps) > MAX_COMPONENTS:
         raise ValueError(f"too many components (max {MAX_COMPONENTS})")

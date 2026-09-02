@@ -29,7 +29,9 @@ async function load() {
 
 function schedule() {
   if (timer) clearInterval(timer)
-  timer = setInterval(load, 60_000) // auto-refresh every 60s
+  // v46: refresh interval is configurable in the builder (10s..3600s, default 60s)
+  const seconds = Math.min(3600, Math.max(10, rt.value?.refresh_seconds || 60))
+  timer = setInterval(load, seconds * 1000)
 }
 onMounted(() => { load(); schedule() })
 onBeforeUnmount(() => { if (timer) clearInterval(timer) })

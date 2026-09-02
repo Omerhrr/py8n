@@ -272,4 +272,5 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
         },
         "datasets": dataset_meta,
         "components": db_svc.compute_config(components, frames),
+        "refresh_seconds": (row.config or {}).get("refresh_seconds", 60),  # v46
     }

@@ -109,12 +109,12 @@ def test_v45_definitions():
         async with _client() as client:
             res = await client.get("/health")
             assert res.status_code == 200
-            assert res.json()["version"] == "1.45.0", f"expected strict pin 1.45.0, got {res.json()['version']}"
+            assert res.json()["version"] >= "1.45.0", f"expected >= 1.45.0, got {res.json()['version']}"  # strict pin moved to v46
             res = await client.get("/node-definitions")
             assert res.status_code == 200
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 45, f"expected 45 visible types at v45, got {len(types)}"
+            assert len(types) >= 45, f"expected 45+ visible types, got {len(types)}"  # 46 at v46
             by = {d["type"]: d for d in defs}
             for t in ("join", "pivot", "unpivot", "cast_columns", "handle_nulls", "data_quality", "analyze", "dataset_export"):
                 assert t in types, t

@@ -25,7 +25,7 @@ from .nodes.data import (
     UnpivotNode,  # v45
 )
 from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
-from .nodes.datascience import ChartNode, ModelTrainNode, PythonTransformNode  # v28
+from .nodes.datascience import ChartNode, ModelPredictNode, ModelTrainNode, PythonTransformNode  # v28 + v46 predict
 from .nodes.documents import DocumentExtractNode  # v32
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
@@ -80,6 +80,7 @@ for _cls in (
     PythonTransformNode,  # v28: pandas/numpy code over the input items
     ChartNode,            # v28: matplotlib chart -> PNG artifact
     ModelTrainNode,       # v28: sklearn training -> metrics + model artifact
+    ModelPredictNode,     # v46: batch scoring against the model registry
     DocumentExtractNode,  # v32: PDF/OCR/Word/Excel/CSV/JSON -> text + items
     LoopOverItemsNode,
     SetVariableNode,

@@ -35,6 +35,7 @@ const model = ref<Record<string, any>>({})
 const sending = ref(false)
 const submitError = ref<string | null>(null)
 const warnings = ref<string[]>([])
+const workflowTriggered = ref(false)
 const sent = ref(false)
 
 const fields = computed<FormField[]>(() => fd.value?.form.fields || [])
@@ -69,6 +70,7 @@ async function submit() {
   try {
     const res = await api.post<any>(`/apps/${route.params.slug}/form-submit`, { record: model.value })
     warnings.value = res?.warnings || []
+    workflowTriggered.value = res?.workflow_triggered === true
     sent.value = true
   } catch (e: any) {
     submitError.value = e?.data?.detail || e?.message || 'Submit failed'
@@ -121,6 +123,7 @@ function submitAnother() {
         <div v-if="sent" class="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-6 text-center">
           <CheckCircle2 class="mx-auto h-8 w-8 text-emerald-400" />
           <p class="mt-3 text-sm font-semibold text-emerald-300">Response recorded</p>
+          <p v-if="workflowTriggered" class="mt-1.5 text-xs text-emerald-400/80">The app's automation was triggered with your response.</p>
           <p v-if="warnings.length" class="mt-2 flex items-start justify-center gap-1.5 text-xs text-yellow-300">
             <TriangleAlert class="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>with warnings: {{ warnings.join(' · ') }}</span>

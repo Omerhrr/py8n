@@ -34,14 +34,14 @@ Every mutation commits explicitly (v4 lesson).
 from __future__ import annotations
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..config import settings
 from ..db import get_db
-from ..models import App, Dataset
+from ..models import App, Dataset, Workflow
 from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut
 from ..services import apps as app_svc
 from ..services import datasets as ds_svc
@@ -109,6 +109,24 @@ def _form_comp(row: App) -> dict | None:
     return None
 
 
+async def _validate_workflow_ref(db: AsyncSession, workflow_id: str | None) -> None:
+    """v46: config.workflow_id must reference an existing workflow."""
+    if not workflow_id:
+        return
+    if await db.get(Workflow, workflow_id) is None:
+        raise HTTPException(status_code=404, detail="config.workflow_id: workflow not found")
+
+
+def _filters_from_request(request: Request) -> dict[str, list[str]]:
+    """?filter.COLUMN=value (repeatable, comma-split) → filter dict (v46)."""
+    filters: dict[str, list[str]] = {}
+    for key, value in request.query_params.multi_items():
+        if key.startswith("filter.") and value.strip():
+            col = key[len("filter."):]
+            filters.setdefault(col, []).extend(v.strip() for v in value.split(",") if v.strip())
+    return filters
+
+
 # ----------------------------------------------------------------- admin
 @router.get("", response_model=list[AppOut])
 async def list_apps(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
@@ -143,6 +161,7 @@ async def create_app(body: AppCreate, user=Depends(get_optional_user), db: Async
             app_svc.validate_config(config, dataset.schema_json or [])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await _validate_workflow_ref(db, (config or {}).get("workflow_id"))  # v46
 
     row = App(
         name=name,
@@ -195,6 +214,7 @@ async def update_app(app_ref: str, body: AppUpdate, user=Depends(get_optional_us
             app_svc.validate_config(body.config, (dataset.schema_json if dataset else []) or [])
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await _validate_workflow_ref(db, (body.config or {}).get("workflow_id"))  # v46
         row.config = body.config
 
     db.add(row)
@@ -236,6 +256,7 @@ async def publish_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSe
         app_svc.validate_config(row.config or {}, dataset.schema_json or [])
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
+    await _validate_workflow_ref(db, (row.config or {}).get("workflow_id"))  # v46
     row.status = "published"
     db.add(row)
     await db.commit()
@@ -255,10 +276,11 @@ async def unpublish_app(app_ref: str, user=Depends(get_optional_user), db: Async
 
 # ----------------------------------------------------------------- runtime
 @router.get("/{slug}/runtime")
-async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
+async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
     dataset = await _dataset_for(db, row)
     components = (row.config or {}).get("components", [])
+    filters = _filters_from_request(request)  # v46: ?filter.COLUMN=value
     payload: dict = {
         "app": {
             "name": row.name,
@@ -270,6 +292,8 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
         "dataset": None,
         "stats": {},
         "chart": None,
+        "components": [],  # v46: every component rendered server-side
+        "filters": filters,
     }
     if dataset is not None:
         df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
@@ -279,9 +303,37 @@ async def runtime(slug: str, db: AsyncSession = Depends(get_db)):
             "schema_json": dataset.schema_json or [],
             "row_count": dataset.row_count,
         }
-        payload["stats"] = app_svc.compute_stats(components, df)
-        payload["chart"] = app_svc.compute_chart(components, df)
+        rendered = app_svc.compute_components(components, df, filters)
+        payload["components"] = rendered
+        # v29 backward-compatible keys (stats dict + first chart)
+        payload["stats"] = {c["id"]: c["value"] for c in rendered if c["type"] in ("stat", "kpi")}
+        payload["chart"] = next((c for c in rendered if c["type"] == "chart" and c.get("chart_type") != "scatter"), None)
     return payload
+
+
+@router.post("/{app_ref}/preview")
+async def preview_config(
+    app_ref: str,
+    body: dict,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """v46: server-side builder preview - compute the posted components over
+    the bound dataset (same code path as the runtime, zero drift)."""
+    row = await _get_or_404(db, app_ref, user)
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="Bind a dataset first")
+    components = body.get("components")
+    if components is None:
+        components = (row.config or {}).get("components", [])
+    try:
+        app_svc.validate_config({"components": components}, dataset.schema_json or [])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+    rendered = app_svc.compute_components(components, df, body.get("filters"))
+    return {"components": rendered}
 
 
 # ----------------------------------------------------------------- rules (v30)
@@ -369,14 +421,38 @@ async def form_submit(slug: str, body: AppRecordIn, db: AsyncSession = Depends(g
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
-    return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"]}
+
+    # v46: form → workflow action - the app's bound workflow runs with the
+    # submitted record as payload. Fire-and-forget: a broken workflow never
+    # fails the submission itself (the record is already safely stored).
+    workflow_triggered = False
+    workflow_id = (row.config or {}).get("workflow_id")
+    if workflow_id:
+        try:
+            from ..services.dispatcher import dispatch_execution
+
+            wf = await db.get(Workflow, workflow_id)
+            if wf is not None:
+                await dispatch_execution(
+                    workflow_id,
+                    trigger_type="app_form",
+                    trigger_payload={"source": "app", "app": row.slug, "app_name": row.name, "record": result["record"]},
+                )
+                workflow_triggered = True
+        except Exception:  # noqa: BLE001 - dispatch must never break the submit
+            workflow_triggered = False
+    return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"], "workflow_triggered": workflow_triggered}
 
 
 @router.get("/{slug}/records")
 async def runtime_records(
     slug: str,
+    request: Request,
     offset: int = Query(0, ge=0),
     limit: int = Query(100, ge=1, le=1000),
+    q: str = Query("", description="Search across all columns (case-insensitive)", max_length=200),
+    sort_by: str = Query("", description="Column to sort by", max_length=120),
+    sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
@@ -384,10 +460,12 @@ async def runtime_records(
     if dataset is None:
         return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": []}
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+    df = app_svc.search_sort_df(df, q, sort_by, sort_dir)  # v46: server-side search+sort
     page = df.iloc[offset : offset + limit]
     return {
         "rows": ds_svc.jsonable_rows(page),
         "row_count": int(len(df)),
+        "total_unfiltered": dataset.row_count,
         "offset": offset,
         "limit": limit,
         "columns": [c["name"] for c in (dataset.schema_json or [])],

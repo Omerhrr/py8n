@@ -37,6 +37,9 @@ interface Runtime {
   dataset: { id: string; name: string; schema_json: { name: string; dtype: string }[]; row_count: number } | null
   stats: Record<string, number | null>
   chart: { labels: string[]; values: number[]; title: string; chart_type: string } | null
+  // v46: every component rendered server-side + active filters
+  components?: any[]
+  filters?: Record<string, string[]>
 }
 
 const loading = ref(true)
@@ -91,6 +94,43 @@ const tableColumns = computed(() => {
 
 const chartMax = computed(() => Math.max(1, ...(rt.value?.chart?.values || [1])))
 
+// v46: server-rendered components + filter selections
+const renderedComps = computed<any[]>(() => rt.value?.components || [])
+const filterComps = computed<any[]>(() => renderedComps.value.filter((c) => c.type === 'filter'))
+const filterSel = ref<Record<string, string>>({})
+
+function setFilter(col: string, value: string) {
+  if (value) filterSel.value[col] = value
+  else delete filterSel.value[col]
+  loadRuntime()
+}
+
+function filterQuery(): string {
+  const params = new URLSearchParams()
+  for (const [col, val] of Object.entries(filterSel.value)) {
+    if (val) params.set(`filter.${col}`, val)
+  }
+  const qs = params.toString()
+  return qs ? `&${qs}` : ''
+}
+
+// v46: per-chart pie/donut style (any chart component, not just the first)
+function compPieStyle(c: any) {
+  const labels = c.labels || []
+  const values = c.values || []
+  const total = values.reduce((a: number, b: number) => a + b, 0) || 1
+  const palette = ['#8b5cf6', '#0ea5e9', '#10b981', '#f59e0b', '#ef4444', '#14b8a6', '#a855f7', '#64748b']
+  let acc = 0
+  const stops: string[] = []
+  values.forEach((v: number, i: number) => {
+    const from = (acc / total) * 360
+    acc += v
+    const to = (acc / total) * 360
+    stops.push(`${palette[i % palette.length]} ${from}deg ${to}deg`)
+  })
+  return { background: `conic-gradient(${stops.join(', ')})`, total, palette, labels }
+}
+
 // conic-gradient pie style
 const pieStyle = computed(() => {
   const labels = rt.value?.chart?.labels || []
@@ -113,7 +153,7 @@ async function loadRuntime() {
   notFound.value = false
   loadError.value = null
   try {
-    rt.value = await api.get<Runtime>(`/apps/${route.params.slug}/runtime`)
+    rt.value = await api.get<Runtime>(`/apps/${route.params.slug}/runtime${filterQuery()}`)
     await loadRows()
   } catch (e: any) {
     if (e?.status === 404 || e?.statusCode === 404) notFound.value = true
@@ -281,42 +321,83 @@ async function removeRow(index: number) {
           <span><b>Saved with warnings:</b> {{ lastWarnings.join(' · ') }}</span>
         </p>
 
-        <!-- stats -->
-        <div v-if="statsComps.length" class="mt-5 grid gap-3 sm:grid-cols-3">
-          <div v-for="comp in statsComps" :key="comp.id" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-            <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ comp.label || comp.id }}</p>
-            <p class="mt-1 text-2xl font-bold">{{ rt.stats[comp.id] === null || rt.stats[comp.id] === undefined ? '-' : rt.stats[comp.id] }}</p>
+        <!-- filter bar (v46) -->
+        <div v-if="filterComps.length" class="mt-5 flex flex-wrap items-end gap-3 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+          <div v-for="fc in filterComps" :key="fc.id">
+            <label class="block text-[10px] uppercase tracking-wide text-zinc-500">{{ fc.label }}</label>
+            <select
+              class="mt-1 rounded-lg border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60"
+              :value="filterSel[fc.column] || ''"
+              @change="setFilter(fc.column, ($event.target as HTMLSelectElement).value)"
+            >
+              <option value="">All</option>
+              <option v-for="o in fc.options" :key="o" :value="o">{{ o }}</option>
+            </select>
           </div>
+          <span v-if="Object.keys(filterSel).length" class="ml-auto text-[10px] text-zinc-500">
+            filters active · stats and charts below are filtered
+          </span>
         </div>
 
-        <!-- chart -->
-        <div v-if="chartComp && rt.chart" class="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
-          <p class="text-sm font-semibold text-zinc-200">{{ rt.chart.title || chartComp.title || 'Chart' }}</p>
-          <div v-if="rt.chart.labels.length" class="mt-3">
-            <!-- bar -->
-            <div v-if="rt.chart.chart_type !== 'pie'" class="space-y-2">
-              <div v-for="(label, i) in rt.chart.labels" :key="label" class="flex items-center gap-2">
-                <span class="w-28 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
-                <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-900">
-                  <div class="h-full rounded-md bg-gradient-to-r from-violet-500/80 to-violet-400/60" :style="{ width: `${Math.max(4, (rt!.chart!.values[i] / chartMax) * 100)}%` }" />
-                </div>
-                <span class="w-10 text-right text-[11px] tabular-nums text-zinc-400">{{ rt.chart.values[i] }}</span>
-              </div>
-            </div>
-            <!-- pie -->
-            <div v-else class="flex flex-wrap items-center gap-6">
-              <div class="h-36 w-36 shrink-0 rounded-full" :style="{ background: pieStyle.background }" />
-              <div class="space-y-1.5">
-                <div v-for="(label, i) in pieStyle.labels" :key="label" class="flex items-center gap-2 text-xs">
-                  <span class="h-2.5 w-2.5 rounded-sm" :style="{ background: pieStyle.palette[i % pieStyle.palette.length] }" />
-                  <span class="text-zinc-300">{{ label }}</span>
-                  <span class="tabular-nums text-zinc-500">{{ rt.chart.values[i] }} ({{ Math.round((rt.chart.values[i] / pieStyle.total) * 100) }}%)</span>
-                </div>
-              </div>
-            </div>
+        <!-- stats + kpis + markdown + charts: every component rendered server-side (v46) -->
+        <template v-for="c in renderedComps" :key="c.id">
+          <!-- stat / kpi -->
+          <div v-if="c.type === 'stat' || c.type === 'kpi'" class="mt-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+            <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ c.label || c.id }}</p>
+            <p class="mt-1 text-2xl font-bold">{{ c.value === null || c.value === undefined ? '-' : c.value }}</p>
           </div>
-          <p v-else class="mt-2 text-[11px] text-zinc-600">No data to chart yet.</p>
-        </div>
+
+          <!-- markdown -->
+          <div v-else-if="c.type === 'markdown'" class="mt-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+            <p v-if="c.title" class="text-sm font-semibold text-zinc-200">{{ c.title }}</p>
+            <!-- body is HTML-escaped server-side before markdown transforms -->
+            <div class="mt-1 text-xs leading-relaxed text-zinc-400 [&_a]:text-sky-400 [&_a]:underline [&_code]:rounded [&_code]:bg-zinc-800 [&_code]:px-1 [&_strong]:text-zinc-200" v-html="c.html" />
+          </div>
+
+          <!-- chart -->
+          <div v-else-if="c.type === 'chart'" class="mt-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-sm font-semibold text-zinc-200">{{ c.title || 'Chart' }}</p>
+              <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] uppercase text-zinc-400">{{ c.chart_type }}</span>
+            </div>
+            <template v-if="c.chart_type === 'scatter'">
+              <p v-if="!c.points?.length" class="mt-2 text-[11px] text-zinc-600">No data to chart yet.</p>
+              <div v-else class="mt-3 flex h-32 items-end gap-1">
+                <div
+                  v-for="(pt, pi) in c.points.slice(0, 60)"
+                  :key="pi"
+                  class="w-2 rounded-t bg-gradient-to-t from-violet-500/60 to-violet-400"
+                  :style="{ height: `${Math.max(6, (pt.y / Math.max(...c.points.map((p: any) => p.y || 1))) * 100)}%` }"
+                  :title="`${c.x}: ${pt.x} · ${c.y}: ${pt.y}`"
+                />
+              </div>
+            </template>
+            <div v-else-if="c.labels?.length" class="mt-3">
+              <!-- bar / line / area -->
+              <div v-if="c.chart_type !== 'pie' && c.chart_type !== 'donut'" class="space-y-2">
+                <div v-for="(label, i) in c.labels" :key="label" class="flex items-center gap-2">
+                  <span class="w-28 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
+                  <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-900">
+                    <div class="h-full rounded-md bg-gradient-to-r from-violet-500/80 to-violet-400/60" :style="{ width: `${Math.max(4, (c.values[i] / Math.max(...c.values)) * 100)}%` }" />
+                  </div>
+                  <span class="w-10 text-right text-[11px] tabular-nums text-zinc-400">{{ c.values[i] }}</span>
+                </div>
+              </div>
+              <!-- pie / donut -->
+              <div v-else class="flex flex-wrap items-center gap-6">
+                <div class="h-36 w-36 shrink-0 rounded-full" :style="{ background: compPieStyle(c).background }" />
+                <div class="space-y-1.5">
+                  <div v-for="(label, i) in c.labels" :key="label" class="flex items-center gap-2 text-xs">
+                    <span class="h-2.5 w-2.5 rounded-sm" :style="{ background: compPieStyle(c).palette[i % compPieStyle(c).palette.length] }" />
+                    <span class="text-zinc-300">{{ label }}</span>
+                    <span class="tabular-nums text-zinc-500">{{ c.values[i] }} ({{ Math.round((c.values[i] / (compPieStyle(c).total || 1)) * 100) }}%)</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <p v-else class="mt-2 text-[11px] text-zinc-600">No data to chart yet.</p>
+          </div>
+        </template>
 
         <!-- table -->
         <div v-if="tableComp" class="mt-4 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">

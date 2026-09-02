@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Save, Rocket, ExternalLink, Database, Plus, Trash2, X, RefreshCw,
   Gauge, Table2, ClipboardList, BarChart3, ArrowLeft, Unlink, CircleAlert,
-  ShieldCheck, Link2, TriangleAlert, PlusCircle, XCircle,
+  ShieldCheck, Link2, TriangleAlert, PlusCircle, XCircle, TrendingUp, Filter,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -35,7 +35,7 @@ interface AppRule {
 
 interface AppComponent {
   id: string
-  type: 'stat' | 'table' | 'form' | 'chart'
+  type: 'stat' | 'table' | 'form' | 'chart' | 'kpi' | 'markdown' | 'filter'
   label?: string
   title?: string
   agg?: string
@@ -46,6 +46,10 @@ interface AppComponent {
   submit_label?: string
   chart_type?: string
   group_by?: string
+  x?: string
+  y?: string
+  body?: string
+  multiple?: boolean
 }
 
 interface AppDetail {
@@ -86,7 +90,36 @@ const editingDesc = ref('')
 const isPublished = computed(() => appRow.value?.status === 'published')
 const dirty = ref(false)
 
-function touch() { dirty.value = true }
+function touch() {
+  dirty.value = true
+  schedulePreview()  // v46: debounced server preview refresh
+}
+
+// ---------------------------------------------------------------- v46 server preview
+const previewComps = ref<any[]>([])
+const previewLoading = ref(false)
+const previewError = ref<string | null>(null)
+let previewTimer: ReturnType<typeof setTimeout> | null = null
+
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(loadPreview, 700)
+}
+
+async function loadPreview() {
+  if (!appRow.value || !bindId.value || isPublished.value) return
+  previewLoading.value = true
+  previewError.value = null
+  try {
+    const body = await api.post<{ components: any[] }>(`/apps/${appRow.value.id}/preview`, { components: comps.value })
+    previewComps.value = body.components || []
+  } catch (e: any) {
+    previewError.value = e?.data?.detail || e?.message || 'Preview failed'
+    previewComps.value = []
+  } finally {
+    previewLoading.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -103,6 +136,7 @@ async function load() {
     rules.value = (a.config?.rules || []).map((r) => JSON.parse(JSON.stringify(r)))
     rulesDirty.value = false
     if (a.dataset_id) await loadBound(a.dataset_id)
+    loadPreview()  // v46: initial server preview
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Failed to load app'
   } finally {
@@ -226,12 +260,15 @@ async function togglePublish() {
 }
 
 // ---------------------------------------------------------------- components
-const TYPE_ICONS: Record<string, any> = { stat: Gauge, table: Table2, form: ClipboardList, chart: BarChart3 }
+const TYPE_ICONS: Record<string, any> = { stat: Gauge, table: Table2, form: ClipboardList, chart: BarChart3, kpi: TrendingUp, markdown: FileText, filter: Filter }
 const TYPE_COLORS: Record<string, string> = {
   stat: 'bg-sky-500/15 text-sky-400',
   table: 'bg-lime-500/15 text-lime-400',
   form: 'bg-amber-500/15 text-amber-400',
   chart: 'bg-violet-500/15 text-violet-400',
+  kpi: 'bg-cyan-500/15 text-cyan-400',
+  markdown: 'bg-zinc-500/15 text-zinc-300',
+  filter: 'bg-rose-500/15 text-rose-400',
 }
 
 // Collision-proof id for new components/rules. A session counter resets on
@@ -253,10 +290,16 @@ function addComponent(type: AppComponent['type']) {
   const text = schema.value.filter((c) => c.dtype === 'text').map((c) => c.name)
   if (type === 'stat') {
     comps2.push({ id: genId('stat'), type, label: 'New stat', agg: numeric.length ? 'avg' : 'count', column: numeric[0] })
+  } else if (type === 'kpi') {
+    comps2.push({ id: genId('kpi'), type, label: 'New KPI', agg: numeric.length ? 'sum' : 'count', column: numeric[0] })
   } else if (type === 'table') {
     comps2.push({ id: genId('table'), type, title: 'Records', columns: cols.slice(0, 8), page_size: 10 })
   } else if (type === 'form') {
     comps2.push({ id: genId('form'), type, title: 'Add record', fields: cols.slice(0, 6), submit_label: 'Create' })
+  } else if (type === 'markdown') {
+    comps2.push({ id: genId('md'), type, title: 'Note', body: '## Heading\n**bold**, *italic*, `code` and [links](https://example.com)' })
+  } else if (type === 'filter') {
+    comps2.push({ id: genId('filter'), type, column: text[0] || cols[0], label: 'Filter' })
   } else {
     comps2.push({ id: genId('chart'), type, title: 'Breakdown', chart_type: 'bar', group_by: text[0] || cols[0], agg: 'count' })
   }
@@ -683,21 +726,71 @@ function dtypeOf(col: string) {
                     </div>
                   </template>
 
+                  <!-- kpi editors (v46: stat with the extended aggs) -->
+                  <template v-else-if="comp.type === 'kpi'">
+                    <input v-model="comp.label" placeholder="Label" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @input="touch" />
+                    <div class="flex gap-2">
+                      <select v-model="comp.agg" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                        <option value="count">count</option><option value="count_distinct">count distinct</option><option value="sum">sum</option><option value="avg">avg</option><option value="median">median</option><option value="min">min</option><option value="max">max</option>
+                      </select>
+                      <select v-if="comp.agg !== 'count'" v-model="comp.column" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                        <option value="" disabled>column…</option>
+                        <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
+                      </select>
+                    </div>
+                  </template>
+
+                  <!-- markdown editors (v46) -->
+                  <template v-else-if="comp.type === 'markdown'">
+                    <input v-model="comp.title" placeholder="Title (optional)" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @input="touch" />
+                    <textarea
+                      v-model="comp.body"
+                      rows="5"
+                      placeholder="**bold**, *italic*, `code`, [links](https://…)"
+                      class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-violet-500/60"
+                      :disabled="isPublished"
+                      @input="touch"
+                    />
+                    <p class="text-[10px] text-zinc-600">Markdown-lite: **bold** · *italic* · `code` · [text](https://link) · line breaks. HTML is escaped.</p>
+                  </template>
+
+                  <!-- filter editors (v46) -->
+                  <template v-else-if="comp.type === 'filter'">
+                    <input v-model="comp.label" placeholder="Label" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @input="touch" />
+                    <select v-model="comp.column" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                      <option value="" disabled>filter on column…</option>
+                      <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
+                    </select>
+                    <label class="flex items-center gap-2 text-[11px] text-zinc-500">
+                      <input v-model="comp.multiple" type="checkbox" class="accent-rose-400" :disabled="isPublished" @change="touch" /> allow multiple selections
+                    </label>
+                  </template>
+
                   <!-- chart editors -->
-                  <template v-else>
+                  <template v-else-if="comp.type === 'chart'">
                     <input v-model="comp.title" placeholder="Title" class="w-full rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @input="touch" />
                     <div class="flex gap-2">
                       <select v-model="comp.chart_type" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
-                        <option value="bar">bar</option><option value="pie">pie</option>
+                        <option value="bar">bar</option><option value="line">line</option><option value="area">area</option><option value="pie">pie</option><option value="donut">donut</option><option value="scatter">scatter</option>
                       </select>
-                      <select v-model="comp.group_by" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                      <select v-if="comp.chart_type !== 'scatter'" v-model="comp.group_by" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
                         <option value="" disabled>group by…</option>
                         <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
                       </select>
                     </div>
-                    <div class="flex gap-2">
+                    <div v-if="comp.chart_type === 'scatter'" class="flex gap-2">
+                      <select v-model="comp.x" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                        <option value="" disabled>x column…</option>
+                        <option v-for="c in schema" :key="c.name" :value="c.name">{{ c.name }}</option>
+                      </select>
+                      <select v-model="comp.y" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
+                        <option value="" disabled>y (numeric)…</option>
+                        <option v-for="c in schema.filter((c) => c.dtype === 'integer' || c.dtype === 'number')" :key="c.name" :value="c.name">{{ c.name }}</option>
+                      </select>
+                    </div>
+                    <div v-if="comp.chart_type !== 'scatter'" class="flex gap-2">
                       <select v-model="comp.agg" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
-                        <option value="count">count</option><option value="sum">sum</option><option value="avg">avg</option><option value="min">min</option><option value="max">max</option>
+                        <option value="count">count</option><option value="count_distinct">count distinct</option><option value="sum">sum</option><option value="avg">avg</option><option value="median">median</option><option value="min">min</option><option value="max">max</option>
                       </select>
                       <select v-if="comp.agg !== 'count'" v-model="comp.column" class="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1.5 text-xs outline-none focus:border-violet-500/60" :disabled="isPublished" @change="touch">
                         <option value="" disabled>column…</option>
@@ -710,7 +803,7 @@ function dtypeOf(col: string) {
             </div>
 
             <div v-if="!isPublished" class="mt-3 grid grid-cols-4 gap-1.5">
-              <button v-for="t in (['stat', 'table', 'form', 'chart'] as const)" :key="t"
+              <button v-for="t in (['stat', 'kpi', 'chart', 'table', 'form', 'markdown', 'filter'] as const)" :key="t"
                 class="flex flex-col items-center gap-1 rounded-xl border border-dashed border-zinc-800 py-2 text-[10px] text-zinc-500 transition hover:border-violet-500/50 hover:text-violet-300"
                 @click="addComponent(t)"
               >
@@ -869,75 +962,117 @@ function dtypeOf(col: string) {
             <p class="mt-2">Bind a dataset to see the live preview.</p>
           </div>
           <template v-else>
-            <!-- stats -->
-            <div class="mt-3 grid gap-3 sm:grid-cols-3">
-              <div
-                v-for="comp in comps.filter((c) => c.type === 'stat')"
-                :key="comp.id"
-                class="rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4"
+            <!-- v46: server-rendered preview - same compute path as the runtime -->
+            <div class="mt-3 flex items-center justify-between">
+              <span class="text-[10px] text-zinc-600">computed server-side (zero drift with the published app)</span>
+              <button
+                class="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2 py-1 text-[10px] text-zinc-400 transition hover:border-violet-500/40 hover:text-violet-300"
+                :disabled="previewLoading"
+                @click="loadPreview"
               >
-                <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ comp.label || comp.id }}</p>
-                <p class="mt-1 text-2xl font-bold text-zinc-100">{{ statValue(comp) }}</p>
-              </div>
+                <Loader2 v-if="previewLoading" class="h-3 w-3 animate-spin" />
+                <RefreshCw v-else class="h-3 w-3" /> Refresh
+              </button>
             </div>
+            <p v-if="previewError" class="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-300">{{ previewError }}</p>
 
-            <!-- chart -->
-            <div v-if="chartComp" class="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
-              <p class="text-xs font-semibold text-zinc-300">{{ chartComp.title || 'Chart' }}</p>
-              <div v-if="chartData.labels.length" class="mt-3 space-y-2">
-                <div v-for="(label, i) in chartData.labels" :key="label" class="flex items-center gap-2">
-                  <span class="w-28 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
-                  <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-900">
+            <template v-for="c in previewComps" :key="c.id">
+              <!-- stat / kpi -->
+              <div v-if="c.type === 'stat' || c.type === 'kpi'" class="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
+                <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ c.label || c.id }}</p>
+                <p class="mt-1 text-2xl font-bold text-zinc-100">{{ c.value === null || c.value === undefined ? '-' : c.value }}</p>
+              </div>
+
+              <!-- markdown -->
+              <div v-else-if="c.type === 'markdown'" class="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
+                <p v-if="c.title" class="text-xs font-semibold text-zinc-300">{{ c.title }}</p>
+                <!-- body is HTML-escaped server-side before markdown transforms -->
+                <div class="mt-1 text-xs leading-relaxed text-zinc-400" v-html="c.html" />
+              </div>
+
+              <!-- filter -->
+              <div v-else-if="c.type === 'filter'" class="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
+                <p class="text-[11px] uppercase tracking-wide text-zinc-500">{{ c.label }} <span class="ml-1 text-zinc-600">· on {{ c.column }} (filters at runtime)</span></p>
+                <div class="mt-2 flex flex-wrap gap-1">
+                  <span v-for="o in c.options.slice(0, 12)" :key="o" class="rounded bg-zinc-800/80 px-1.5 py-0.5 text-[10px] text-zinc-400">{{ o }}</span>
+                  <span v-if="c.options.length > 12" class="text-[10px] text-zinc-600">+{{ c.options.length - 12 }} more</span>
+                </div>
+              </div>
+
+              <!-- chart -->
+              <div v-else-if="c.type === 'chart'" class="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
+                <div class="flex items-center justify-between">
+                  <p class="text-xs font-semibold text-zinc-300">{{ c.title || 'Chart' }}</p>
+                  <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] uppercase text-zinc-400">{{ c.chart_type }}</span>
+                </div>
+                <!-- scatter -->
+                <div v-if="c.chart_type === 'scatter'" class="mt-3">
+                  <p v-if="!c.points?.length" class="text-[11px] text-zinc-600">No data to chart yet.</p>
+                  <div v-else class="flex h-32 items-end gap-1">
                     <div
-                      class="h-full rounded-md bg-gradient-to-r from-violet-500/80 to-violet-400/60"
-                      :style="{ width: `${Math.max(4, (chartData.values[i] / Math.max(...chartData.values)) * 100)}%` }"
+                      v-for="(pt, pi) in c.points.slice(0, 60)"
+                      :key="pi"
+                      class="w-2 rounded-t bg-gradient-to-t from-violet-500/60 to-violet-400"
+                      :style="{ height: `${Math.max(6, (pt.y / Math.max(...c.points.map((p: any) => p.y || 1))) * 100)}%` }"
+                      :title="`${c.x}: ${pt.x} · ${c.y}: ${pt.y}`"
                     />
                   </div>
-                  <span class="w-10 text-right text-[11px] tabular-nums text-zinc-400">{{ chartData.values[i] }}</span>
                 </div>
+                <!-- labels/values -->
+                <template v-else>
+                  <div v-if="c.labels?.length" class="mt-3 space-y-2">
+                    <div v-for="(label, i) in c.labels" :key="label" class="flex items-center gap-2">
+                      <span class="w-28 shrink-0 truncate text-[11px] text-zinc-400">{{ label }}</span>
+                      <div class="h-4 flex-1 overflow-hidden rounded-md bg-zinc-900">
+                        <div
+                          class="h-full rounded-md bg-gradient-to-r from-violet-500/80 to-violet-400/60"
+                          :style="{ width: `${Math.max(4, (c.values[i] / Math.max(...c.values)) * 100)}%` }"
+                        />
+                      </div>
+                      <span class="w-10 text-right text-[11px] tabular-nums text-zinc-400">{{ c.values[i] }}</span>
+                    </div>
+                  </div>
+                  <p v-else class="mt-2 text-[11px] text-zinc-600">No data to group yet.</p>
+                </template>
               </div>
-              <p v-else class="mt-2 text-[11px] text-zinc-600">No data to group yet.</p>
-            </div>
 
-            <!-- table -->
-            <div v-if="tableComp" class="mt-4 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-950/60">
-              <p class="border-b border-zinc-800/80 px-4 py-2.5 text-xs font-semibold text-zinc-300">{{ tableComp.title || 'Records' }}</p>
-              <div class="overflow-x-auto">
-                <table class="w-full text-left text-xs">
-                  <thead>
-                    <tr class="border-b border-zinc-800/80 text-zinc-500">
-                      <th v-for="col in (tableComp.columns?.length ? tableComp.columns : schema.map((c) => c.name))" :key="col" class="px-4 py-2 font-medium">
-                        {{ col }}
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(row, ri) in tableRows" :key="ri" class="border-b border-zinc-900 text-zinc-300 last:border-0">
-                      <td v-for="col in (tableComp.columns?.length ? tableComp.columns : schema.map((c) => c.name))" :key="col" class="max-w-[220px] truncate px-4 py-2">
-                        {{ row[col] ?? '-' }}
-                      </td>
-                    </tr>
-                    <tr v-if="!tableRows.length">
-                      <td :colspan="schema.length" class="px-4 py-6 text-center text-zinc-600">No records yet.</td>
-                    </tr>
-                  </tbody>
-                </table>
+              <!-- table -->
+              <div v-else-if="c.type === 'table'" class="mt-3 overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-950/60">
+                <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
+                  <p class="text-xs font-semibold text-zinc-300">{{ c.title || 'Records' }}</p>
+                  <span class="text-[10px] text-zinc-600">{{ c.row_count }} of {{ c.total }}</span>
+                </div>
+                <div v-if="c.rows.length" class="overflow-x-auto">
+                  <table class="w-full text-left text-xs">
+                    <thead>
+                      <tr class="border-b border-zinc-800/60 text-[10px] uppercase text-zinc-500">
+                        <th v-for="col in c.columns" :key="col" class="px-4 py-2 font-medium">{{ col }}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(row, ri) in c.rows" :key="ri" class="border-b border-zinc-900 text-zinc-300 last:border-0">
+                        <td v-for="col in c.columns" :key="col" class="max-w-[220px] truncate px-4 py-2">{{ row[col] ?? '-' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <p v-else class="px-4 py-4 text-[11px] text-zinc-600">No records yet.</p>
               </div>
-            </div>
 
-            <!-- form -->
-            <div v-if="formComp" class="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
-              <p class="text-xs font-semibold text-zinc-300">{{ formComp.title || 'Add record' }}</p>
-              <div class="mt-3 grid gap-2 sm:grid-cols-2">
-                <div v-for="f in normFields(formComp)" :key="f.name">
-                  <label class="text-[10px] uppercase tracking-wide text-zinc-500">{{ f.name }}</label>
-                  <div class="mt-1 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-1.5 text-xs text-zinc-600">
-                    {{ dtypeOf(f.name) === 'boolean' ? 'true / false' : dtypeOf(f.name) === 'integer' || dtypeOf(f.name) === 'number' ? 'number input' : 'text input' }}
+              <!-- form -->
+              <div v-else-if="c.type === 'form'" class="mt-3 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
+                <p class="text-xs font-semibold text-zinc-300">{{ c.title || 'Add record' }}</p>
+                <div class="mt-3 grid gap-2 sm:grid-cols-2">
+                  <div v-for="f in c.fields" :key="f.name">
+                    <label class="text-[10px] uppercase tracking-wide text-zinc-500">{{ f.label || f.name }}</label>
+                    <div class="mt-1 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-1.5 text-xs text-zinc-600">
+                      {{ dtypeOf(f.name) === 'boolean' ? 'true / false' : dtypeOf(f.name) === 'integer' || dtypeOf(f.name) === 'number' ? 'number input' : 'text input' }}
+                    </div>
                   </div>
                 </div>
+                <span class="mt-3 inline-block rounded-lg bg-violet-500/20 px-3 py-1.5 text-xs font-medium text-violet-300">{{ c.submit_label || 'Create' }} →</span>
               </div>
-              <span class="mt-3 inline-block rounded-lg bg-violet-500/20 px-3 py-1.5 text-xs font-medium text-violet-300">{{ formComp.submit_label || 'Create' }} →</span>
-            </div>
+            </template>
           </template>
         </div>
       </div>
