@@ -27,6 +27,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import re
 import secrets
 import time
@@ -52,7 +53,9 @@ _PUBLIC_PREFIXES = (
     "/api/v1/webhooks",
     "/api/v1/chat",
     "/api/v1/ws",
-    "/api/v1/_spawn",
+    # "/api/v1/_spawn" removed (audit hardening): the dev-only spawn helper
+    # is token-gated inside the route itself; it must never be treated as a
+    # public surface, and it does not exist at all unless debug+enabled.
 )
 _PUBLIC_SUFFIXES = (
     "/query",  # POST /datasets/query powers embedded app/dashboard components
@@ -76,12 +79,23 @@ def _load_jwt_secret() -> bytes:
     try:
         raw = path.read_text().strip()
         if len(raw) >= 32:
+            try:
+                # Audit hardening: repair perms on secrets written by older,
+                # looser versions (umask-dependent writes).
+                os.chmod(path, 0o600)
+            except OSError:  # pragma: no cover - best effort
+                pass
             return raw.encode()
     except OSError:
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = secrets.token_hex(32)
-    path.write_text(raw)
+    # Audit hardening: create with owner-only permissions (no world-readable
+    # window between create and chmod).
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(raw)
+    os.chmod(path, 0o600)  # umask-independent guarantee
     return raw.encode()
 
 

@@ -126,13 +126,25 @@ onMounted(load)
 async function bindDataset() {
   if (!appRow.value) return
   error.value = null
+  const prevId = appRow.value.dataset_id || ''
   try {
+    // Persist any live layout edits FIRST, against the current binding. The
+    // PATCH below replaces appRow wholesale with the server row, so a plain
+    // dataset_id PATCH used to silently discard unsaved component edits.
+    if ((dirty.value || rulesDirty.value) && !isPublished.value) {
+      await save()
+      if (error.value) {
+        bindId.value = prevId // save failed - the binding did not change
+        return
+      }
+    }
     const updated = await api.patch<any>(`/apps/${appRow.value.id}`, { dataset_id: bindId.value })
     appRow.value = updated
     dirty.value = false
     await loadBound(bindId.value)
     notice.value = bindId.value ? 'Dataset bound' : 'Dataset unbound'
   } catch (e: any) {
+    bindId.value = prevId // the select must reflect the app's real binding
     error.value = e?.data?.detail || e?.message || 'Bind failed'
   }
 }
@@ -150,17 +162,36 @@ async function regenerate() {
   }
 }
 
+// Current editor config - components are edited in place on appRow, rules
+// live in the separate `rules` ref; the server stores both in one config.
+function currentConfig() {
+  return {
+    components: appRow.value?.config?.components ?? [],
+    rules: rules.value,
+  }
+}
+
 async function save() {
   if (!appRow.value) return
   saving.value = true
   error.value = null
   try {
-    const updated = await api.patch<any>(`/apps/${appRow.value.id}`, {
+    const payload: Record<string, any> = {
       name: editingName.value.trim() || appRow.value.name,
       description: editingDesc.value,
-    })
+    }
+    // The layout used to ride only in local state - this PATCH never carried
+    // it, so Save/Publish persisted a stale server config and every component
+    // edit was silently lost on reload. Send the full editor config (PATCH
+    // replaces config wholesale, so rules go along to avoid wiping them).
+    // Only when a dataset is bound: the backend validates component columns
+    // against the bound schema, and an unbound app has none.
+    if (!isPublished.value && appRow.value.dataset_id) payload.config = currentConfig()
+    const updated = await api.patch<any>(`/apps/${appRow.value.id}`, payload)
     appRow.value = updated
     editingName.value = updated.name
+    rules.value = (updated.config?.rules || []).map((r: any) => JSON.parse(JSON.stringify(r)))
+    rulesDirty.value = false
     dirty.value = false
     notice.value = 'Saved'
   } catch (e: any) {
@@ -172,7 +203,11 @@ async function save() {
 
 async function togglePublish() {
   if (!appRow.value) return
-  if (dirty.value) await save()
+  if (dirty.value) {
+    await save()
+    // a failed save must not publish the stale server config
+    if (error.value) return
+  }
   publishing.value = true
   error.value = null
   try {
@@ -199,23 +234,31 @@ const TYPE_COLORS: Record<string, string> = {
   chart: 'bg-violet-500/15 text-violet-400',
 }
 
-let uidCounter = 0
+// Collision-proof id for new components/rules. A session counter resets on
+// reload, so `stat_new1` could collide with a saved component - the backend
+// rejects duplicate component ids with a 400 on the next save/publish.
+function genId(prefix: string): string {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return `${prefix}_${crypto.randomUUID()}`
+  } catch { /* older browsers */ }
+  return `${prefix}_${Date.now().toString(36)}${++uidCounter}`
+}
+
 function addComponent(type: AppComponent['type']) {
   if (!appRow.value) return
   const comps2 = appRow.value.config.components || (appRow.value.config.components = [])
   if (comps2.length >= 24) { error.value = 'Too many components (max 24)'; return }
-  uidCounter++
   const cols = schema.value.map((c) => c.name)
   const numeric = schema.value.filter((c) => c.dtype === 'integer' || c.dtype === 'number').map((c) => c.name)
   const text = schema.value.filter((c) => c.dtype === 'text').map((c) => c.name)
   if (type === 'stat') {
-    comps2.push({ id: `stat_new${uidCounter}`, type, label: 'New stat', agg: numeric.length ? 'avg' : 'count', column: numeric[0] })
+    comps2.push({ id: genId('stat'), type, label: 'New stat', agg: numeric.length ? 'avg' : 'count', column: numeric[0] })
   } else if (type === 'table') {
-    comps2.push({ id: `table_new${uidCounter}`, type, title: 'Records', columns: cols.slice(0, 8), page_size: 10 })
+    comps2.push({ id: genId('table'), type, title: 'Records', columns: cols.slice(0, 8), page_size: 10 })
   } else if (type === 'form') {
-    comps2.push({ id: `form_new${uidCounter}`, type, title: 'Add record', fields: cols.slice(0, 6), submit_label: 'Create' })
+    comps2.push({ id: genId('form'), type, title: 'Add record', fields: cols.slice(0, 6), submit_label: 'Create' })
   } else {
-    comps2.push({ id: `chart_new${uidCounter}`, type, title: 'Breakdown', chart_type: 'bar', group_by: text[0] || cols[0], agg: 'count' })
+    comps2.push({ id: genId('chart'), type, title: 'Breakdown', chart_type: 'bar', group_by: text[0] || cols[0], agg: 'count' })
   }
   touch()
 }
@@ -280,12 +323,11 @@ const ACTION_COLORS: Record<string, string> = {
   set: 'bg-sky-500/15 text-sky-400',
 }
 
-let ruleUid = 0
+let uidCounter = 0
 function addRule() {
-  ruleUid++
   const firstCol = schema.value[0]?.name || ''
   rules.value.push({
-    id: `rule_new${ruleUid}`,
+    id: genId('rule'),
     name: '',
     event: 'create',
     when: { all: [{ field: firstCol, op: 'not_empty' }] },
@@ -887,10 +929,10 @@ function dtypeOf(col: string) {
             <div v-if="formComp" class="mt-4 rounded-2xl border border-zinc-800/80 bg-zinc-950/60 p-4">
               <p class="text-xs font-semibold text-zinc-300">{{ formComp.title || 'Add record' }}</p>
               <div class="mt-3 grid gap-2 sm:grid-cols-2">
-                <div v-for="field in formComp.fields || []" :key="field">
-                  <label class="text-[10px] uppercase tracking-wide text-zinc-500">{{ field }}</label>
+                <div v-for="f in normFields(formComp)" :key="f.name">
+                  <label class="text-[10px] uppercase tracking-wide text-zinc-500">{{ f.name }}</label>
                   <div class="mt-1 rounded-lg border border-zinc-800 bg-zinc-900/40 px-2.5 py-1.5 text-xs text-zinc-600">
-                    {{ dtypeOf(field) === 'boolean' ? 'true / false' : dtypeOf(field) === 'integer' || dtypeOf(field) === 'number' ? 'number input' : 'text input' }}
+                    {{ dtypeOf(f.name) === 'boolean' ? 'true / false' : dtypeOf(f.name) === 'integer' || dtypeOf(f.name) === 'number' ? 'number input' : 'text input' }}
                   </div>
                 </div>
               </div>

@@ -19,10 +19,17 @@ Ingestion rules
 
 SQL
 ===
-``run_sql`` registers every stored dataset as a DuckDB view named by
+``run_sql`` registers every VISIBLE dataset as a DuckDB view named by
 :func:`view_name` (lowercase, non-alphanumerics folded to ``_``), so a
 dataset called "Customers" is queryable as ``SELECT * FROM customers`` -
 including joins across datasets.
+
+run_sql is a READ-ONLY surface: statements must start with SELECT/WITH,
+strong write/admin keywords are rejected anywhere in the statement, only a
+single statement is accepted, and returned rows are capped at
+``settings.max_sql_rows`` (``truncated: true`` flags a clipped result).
+With ``owner_id`` passed, only datasets owned by that caller or unclaimed
+are registered as views.
 """
 
 from __future__ import annotations
@@ -150,6 +157,89 @@ def read_parquet_df(path: Path) -> pd.DataFrame:
         con.close()
 
 
+# ----------------------------------------------------------------- sql gate
+# Strong DuckDB verbs that must never appear in a run_sql statement. Whole
+# words only (word boundaries), so a field called ``created`` or ``offset``
+# never trips the gate.
+_FORBIDDEN_SQL_RE = re.compile(
+    r"\b(copy|attach|install|load|pragma|set|create|insert|update|delete|drop|"
+    r"alter|call|export|import)\b",
+    re.IGNORECASE,
+)
+_READ_SQL_PREFIXES = ("select", "with")
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """Remove ``--`` line and ``/* */`` block comments (quote-aware)."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    in_str = False
+    while i < n:
+        c = sql[i]
+        if in_str:
+            out.append(c)
+            if c == "'":
+                if i + 1 < n and sql[i + 1] == "'":  # escaped quote ('')
+                    out.append("'")
+                    i += 2
+                    continue
+                in_str = False
+            i += 1
+            continue
+        if c == "'":
+            in_str = True
+            out.append(c)
+            i += 1
+            continue
+        if c == "-" and sql[i : i + 2] == "--":
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if c == "/" and sql[i : i + 2] == "/*":
+            end = sql.find("*/", i + 2)
+            i = n if end == -1 else end + 2
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def _has_statement_separator(sql: str) -> bool:
+    """True when a semicolon appears OUTSIDE single quotes (multi-statement)."""
+    in_str = False
+    for ch in sql:
+        if ch == "'":
+            in_str = not in_str
+        elif ch == ";" and not in_str:
+            return True
+    return False
+
+
+def validate_readonly_sql(sql: str) -> str:
+    """Gate ``run_sql`` input to a single read-only SELECT/WITH statement.
+
+    Returns the comment-stripped statement (single trailing semicolon removed).
+    Raises ValueError with an end-user safe message otherwise.
+    """
+    cleaned = _strip_sql_comments(sql or "").strip()
+    if not cleaned:
+        raise ValueError("SQL query is empty")
+    if cleaned.endswith(";"):
+        cleaned = cleaned[:-1].rstrip()
+    if not cleaned:
+        raise ValueError("SQL query is empty")
+    if _has_statement_separator(cleaned):
+        raise ValueError("only a single statement is allowed (remove extra semicolons)")
+    first = re.match(r"[A-Za-z_]+", cleaned)
+    keyword = first.group(0).lower() if first else ""
+    if keyword not in _READ_SQL_PREFIXES:
+        raise ValueError("only SELECT queries are allowed")
+    hit = _FORBIDDEN_SQL_RE.search(cleaned)
+    if hit:
+        raise ValueError(f"keyword {hit.group(0).upper()} is not allowed (read-only SQL)")
+    return cleaned
+
+
 # ----------------------------------------------------------------- db helpers
 async def name_taken(db: AsyncSession, name: str, exclude_id: str | None = None) -> bool:
     q = select(Dataset).where(func.upper(Dataset.name) == name.strip().upper())
@@ -158,14 +248,26 @@ async def name_taken(db: AsyncSession, name: str, exclude_id: str | None = None)
     return (await db.execute(q)).scalar_one_or_none() is not None
 
 
-async def get_dataset(db: AsyncSession, ref: str) -> Dataset | None:
-    """Resolve a dataset by id first, then by case-insensitive name."""
+async def get_dataset(db: AsyncSession, ref: str, owner_id: str | None = None) -> Dataset | None:
+    """Resolve a dataset by id first, then by case-insensitive name.
+
+    With ``owner_id`` set, a dataset claimed by a DIFFERENT owner is treated
+    as not found (unclaimed rows stay visible). ``owner_id=None`` keeps the
+    legacy all-visible behavior.
+    """
     row = await db.get(Dataset, ref)
-    if row is not None:
-        return row
-    return (
-        await db.execute(select(Dataset).where(func.upper(Dataset.name) == ref.strip().upper()))
-    ).scalar_one_or_none()
+    if row is None:
+        row = (
+            await db.execute(select(Dataset).where(func.upper(Dataset.name) == ref.strip().upper()))
+        ).scalar_one_or_none()
+    if (
+        row is not None
+        and owner_id is not None
+        and row.owner_id is not None
+        and row.owner_id != owner_id
+    ):
+        return None
+    return row
 
 
 async def create_from_df(
@@ -326,9 +428,34 @@ def delete_file(ds: Dataset) -> None:
 
 
 # ----------------------------------------------------------------- sql
-async def run_sql(db: AsyncSession, sql: str) -> dict:
-    """Run SQL over ALL datasets (each registered as a view)."""
-    rows = (await db.execute(select(Dataset).order_by(Dataset.name))).scalars().all()
+async def run_sql(db: AsyncSession, sql: str, owner_id: str | None = None) -> dict:
+    """Run read-only SQL over the visible datasets (each registered as a view).
+
+    Layers of defense:
+    * the statement must be a single SELECT/WITH (see :func:`validate_readonly_sql`);
+    * rows come back through ``fetchmany(max_sql_rows + 1)`` so a huge table
+      can never be materialized whole (``truncated: true`` marks a clip);
+    * with ``owner_id`` set, only datasets owned by that caller or unclaimed
+      (``owner_id IS NULL``) are registered - other owners' datasets are not
+      queryable at all. ``owner_id=None`` keeps the legacy all-visible
+      behavior for existing callers.
+
+    Note: the DuckDB connection stays in-memory (views must be CREATEd, so
+    ``read_only=True`` is not available); nothing can persist there and the
+    keyword gate above blocks cross-engine side effects.
+    """
+    try:
+        cleaned = validate_readonly_sql(sql)
+    except ValueError as exc:
+        # keep the historical "SQL error:" prefix so every rejection surfaces
+        # with the same shape (tests and the UI match on it)
+        raise ValueError(f"SQL error: {exc}") from exc
+
+    q = select(Dataset).order_by(Dataset.name)
+    if owner_id is not None:
+        q = q.where(Dataset.owner_id.is_(None) | (Dataset.owner_id == owner_id))
+    rows = (await db.execute(q)).scalars().all()
+
     views: dict[str, str] = {}
     con = duckdb.connect()
     try:
@@ -343,9 +470,17 @@ async def run_sql(db: AsyncSession, sql: str) -> dict:
                 f"CREATE VIEW {view} AS SELECT * FROM read_parquet('{parquet_path(ds.id).as_posix()}')"
             )
         started = time.perf_counter()
-        result = con.execute(sql)
+        result = con.execute(cleaned)
         columns = [d[0] for d in (result.description or [])]
-        records = result.fetchall()
+        cap = int(settings.max_sql_rows)
+        if cap > 0:
+            records = result.fetchmany(cap + 1)
+            truncated = len(records) > cap
+            if truncated:
+                records = records[:cap]
+        else:
+            records = result.fetchall()
+            truncated = False
         duration_ms = int((time.perf_counter() - started) * 1000)
     except duckdb.Error as exc:
         raise ValueError(f"SQL error: {exc}") from exc
@@ -365,6 +500,7 @@ async def run_sql(db: AsyncSession, sql: str) -> dict:
         "row_count": len(out_rows),
         "duration_ms": duration_ms,
         "views": views,
+        "truncated": truncated,
     }
 
 

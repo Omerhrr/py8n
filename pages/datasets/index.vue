@@ -87,19 +87,13 @@ async function doUpload() {
   uploading.value = true
   error.value = null
   try {
-    // multipart: let the browser set the content-type boundary - bypass the
-    // json content-type that useApi.request injects
-    const config = useRuntimeConfig()
-    const mode = (config.public.gatewayMode as string) || 'gateway'
-    const apiPort = (config.public.apiPort as string) || '8000'
-    const url = mode === 'gateway'
-      ? `/api/v1/datasets/upload?XTransformPort=${apiPort}`
-      : '/api/v1/datasets/upload'
     const form = new FormData()
     form.append('file', upFile.value)
     form.append('name', upName.value.trim())
     form.append('description', upDesc.value.trim())
-    const created = await $fetch<any>(url, { method: 'POST', body: form })
+    // multipart upload through the central api client - rides the auth token
+    // like every other call (browser sets the multipart boundary itself)
+    const created = await api.upload<any>('/datasets/upload', form)
     showUpload.value = false
     navigateTo(`/datasets/${created.id}`)
   } catch (e: any) {

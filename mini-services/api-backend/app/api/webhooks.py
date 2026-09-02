@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hmac
+import json
 from dataclasses import dataclass, field
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -23,8 +24,61 @@ from ..services.dispatcher import dispatch_execution
 from ..services.events import get_event_bus
 from ..services.executor import _background_tasks, execute_workflow
 from ..services.webhook_info import public_webhook_url
+from ._ratelimit import rate_limit
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
+
+# Audit hardening: headers persisted with the webhook envelope must never
+# carry credentials. Exact names cover the classic auth channels; the
+# substring rule catches look-alikes (x-auth-token, x-sentry-key, ...
+# anything containing token/secret/password/key).
+_REDACTED = "[REDACTED]"
+_SENSITIVE_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "x-auth-token",
+}
+_SENSITIVE_NAME_PARTS = ("token", "secret", "password", "key")
+
+
+def _redact_headers(headers) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for name, value in headers:
+        lname = name.lower()
+        if lname in _SENSITIVE_HEADERS or any(part in lname for part in _SENSITIVE_NAME_PARTS):
+            redacted[name] = _REDACTED
+        else:
+            redacted[name] = value
+    return dict(list(redacted.items())[:40])  # keep the v4 40-header safety valve
+
+
+async def _read_body_capped(request: Request) -> bytes:
+    """Read the raw body with a hard size cap (audit hardening).
+
+    Rejects early on a lying-large Content-Length, and also guards the
+    streaming read so chunked/undeclared bodies cannot balloon memory.
+    """
+    cap = settings.max_webhook_body_bytes
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > cap:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Webhook body too large (limit {cap} bytes)",
+        )
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > cap:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Webhook body too large (limit {cap} bytes)",
+            )
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 @dataclass
@@ -65,7 +119,7 @@ async def _load_webhook_workflow(workflow_id: str, db: AsyncSession) -> Workflow
 def _request_envelope(request: Request, body: object) -> dict:
     return {
         "method": request.method,
-        "headers": dict(list(request.headers.items())[:40]),
+        "headers": _redact_headers(request.headers.items()),
         "query": dict(request.query_params),
         "body": body,
     }
@@ -107,14 +161,20 @@ def _enforce_webhook_auth(request: Request, params: dict) -> None:
     raise HTTPException(status_code=401, detail=f"Unknown auth mode {mode!r}")
 
 
-@router.api_route("/{workflow_id}", methods=["POST", "GET", "PUT", "PATCH", "DELETE"], tags=["webhooks"])
+@router.api_route(
+    "/{workflow_id}",
+    methods=["POST", "GET", "PUT", "PATCH", "DELETE"],
+    tags=["webhooks"],
+    dependencies=[Depends(rate_limit("webhook"))],
+)
 async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     wf = await _load_webhook_workflow(workflow_id, db)
     body: object = None
     if request.method in ("POST", "PUT", "PATCH"):
+        raw = await _read_body_capped(request)
         try:
-            body = await request.json()
-        except Exception:  # noqa: BLE001
+            body = json.loads(raw) if raw else None
+        except (ValueError, UnicodeDecodeError):  # noqa: BLE001 - same contract as request.json()
             body = None
 
     node = wf.webhook_nodes()[0]

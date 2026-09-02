@@ -61,13 +61,65 @@ def execute_workflow_task(self, workflow_id: str, trigger_type: str, trigger_pay
     from .executor import execute_workflow
 
     # Fresh event loop per task - the async engine + aiosqlite/asyncpg live here.
-    result = asyncio.run(
-        execute_workflow(
-            workflow_id,
-            trigger_type=trigger_type,
-            trigger_payload=trigger_payload,
-            trigger_node_id=trigger_node_id,
-            execution_id=execution_id,
+    try:
+        result = asyncio.run(
+            execute_workflow(
+                workflow_id,
+                trigger_type=trigger_type,
+                trigger_payload=trigger_payload,
+                trigger_node_id=trigger_node_id,
+                execution_id=execution_id,
+                log_created=True,  # dispatcher pre-created the running row
+            )
         )
-    )
+    except Exception as exc:
+        # The dispatcher pre-creates the running row; if the task crashes
+        # before/inside the async engine, that row must NOT stay 'running'
+        # forever - finalize it as a failed execution, then let Celery see
+        # the failure.
+        _mark_execution_failed(execution_id, exc)
+        raise
     return {"status": result["status"], "execution_id": result["execution_id"]}
+
+
+def _mark_execution_failed(execution_id: str, exc: Exception) -> None:
+    """Best-effort: stamp the execution row as failed with the error message."""
+    import logging
+
+    from sqlalchemy import create_engine, select, update
+    from sqlalchemy.orm import Session
+
+    from .models import ExecutionLog
+
+    logger = logging.getLogger("py8n.worker")
+    try:
+        engine = create_engine(_sync_database_url())
+        try:
+            with Session(engine) as session:
+                row = session.execute(
+                    select(ExecutionLog.id).where(ExecutionLog.id == execution_id)
+                ).scalar_one_or_none()
+                if row is None:
+                    session.add(
+                        ExecutionLog(
+                            id=execution_id,
+                            workflow_id="",
+                            status="error",
+                            trigger_type="manual",
+                            error=f"Unhandled execution failure: {exc}"[:5000],
+                        )
+                    )
+                else:
+                    session.execute(
+                        update(ExecutionLog)
+                        .where(ExecutionLog.id == execution_id)
+                        .values(
+                            status="error",
+                            error=f"Unhandled execution failure: {exc}"[:5000],
+                        )
+                    )
+                session.commit()
+        finally:
+            engine.dispose()
+    except Exception:  # noqa: BLE001 - the safety net must never mask the error
+        logger.exception("failed to mark execution %s as failed", execution_id)

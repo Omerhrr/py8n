@@ -20,8 +20,11 @@ from ..nodes.base import BaseNode, NodeExecutionError
 from .data import _items, _working_data
 
 
-async def _resolve_dataset(ref: str) -> dict | None:
-    """Resolve a dataset reference (id first, then case-insensitive name)."""
+async def _resolve_dataset(ref: str, owner_id: str | None = None) -> dict | None:
+    """Resolve a dataset reference (id first, then case-insensitive name).
+
+    With ``owner_id`` set, another owner's claimed dataset is not found.
+    """
     from ...db import AsyncSessionLocal
     from ...services import datasets as ds_svc
 
@@ -29,7 +32,7 @@ async def _resolve_dataset(ref: str) -> dict | None:
         raise NodeExecutionError("A dataset name or id is required")
     ref = ref.strip()
     async with AsyncSessionLocal() as session:
-        ds = await ds_svc.get_dataset(session, ref)
+        ds = await ds_svc.get_dataset(session, ref, owner_id=owner_id)
         if ds is None:
             return None
         return {
@@ -58,7 +61,7 @@ class DatasetReadNode(BaseNode):
         from ...services import datasets as ds_svc
 
         p = self.params  # type: DatasetReadNode.ParamsModel
-        meta = await _resolve_dataset(p.dataset)
+        meta = await _resolve_dataset(p.dataset, owner_id=context.owner_id)
         if meta is None:
             raise NodeExecutionError(f"Dataset {p.dataset!r} not found")
         df = ds_svc.read_parquet_df(ds_svc.parquet_path(meta["id"]))
@@ -98,7 +101,7 @@ class DatasetWriteNode(BaseNode):
             raise NodeExecutionError("A target dataset name is required")
 
         async with AsyncSessionLocal() as session:
-            ds = await ds_svc.get_dataset(session, p.dataset.strip())
+            ds = await ds_svc.get_dataset(session, p.dataset.strip(), owner_id=context.owner_id)
             if ds is None:
                 if not p.create_if_missing:
                     raise NodeExecutionError(f"Dataset {p.dataset!r} not found (create_if_missing is off)")
@@ -153,7 +156,7 @@ class SqlQueryNode(BaseNode):
             raise NodeExecutionError("A SQL statement is required")
         async with AsyncSessionLocal() as session:
             try:
-                result = await ds_svc.run_sql(session, p.sql)
+                result = await ds_svc.run_sql(session, p.sql, owner_id=context.owner_id)
             except ValueError as exc:
                 raise NodeExecutionError(str(exc)) from exc
         return self._single({"items": result["rows"], "row_count": result["row_count"], "columns": result["columns"], "duration_ms": result["duration_ms"], "views": result["views"]})

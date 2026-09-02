@@ -17,7 +17,9 @@ class Settings(BaseSettings):
 
     app_name: str = "Py8n"
     version: str = "1.44.0"
-    debug: bool = True
+    # Audit hardening: dev-only convenience surfaces default OFF. Production
+    # docker-compose already pins PY8N_DEBUG=false explicitly.
+    debug: bool = False
 
     # ------------------------------------------------------------------
     # Database
@@ -70,6 +72,29 @@ class Settings(BaseSettings):
 
     # CORS (self-hosted, permissive by default)
     cors_origins: list[str] = ["*"]
+
+    # ------------------------------------------------------------------
+    # Security hardening (audit)
+    # ------------------------------------------------------------------
+    # /_spawn sandbox-control endpoint: disabled unless explicitly enabled.
+    # Token is per-boot random when empty (never a static shared secret).
+    spawn_enabled: bool = False
+    spawn_token: str = ""
+
+    # In-process rate limiting (per client IP per route class, per minute).
+    rate_limit_enabled: bool = True
+    rate_limit_auth_per_min: int = 120
+    rate_limit_webhook_per_min: int = 300
+    rate_limit_chat_per_min: int = 120
+
+    # Webhook ingest: cap request body size (413 above this).
+    max_webhook_body_bytes: int = 2_000_000
+
+    # Pack registry fetches: hard cap on downloaded bytes (64 MB).
+    max_registry_fetch_bytes: int = 64_000_000
+
+    # Dataset run_sql: hard cap on returned rows.
+    max_sql_rows: int = 10_000
 
 
 @lru_cache

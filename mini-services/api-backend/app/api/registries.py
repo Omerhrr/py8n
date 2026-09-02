@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404
+from ..config import settings
 from ..db import get_db
 from ..models import PackRegistry
 from ..api.packs import PACK_FORMAT, PackDocument, _import_pack_doc, _inspect_pack_doc
@@ -35,9 +36,8 @@ from ..api.packs import PACK_FORMAT, PackDocument, _import_pack_doc, _inspect_pa
 router = APIRouter(prefix="/registries", tags=["registries"])
 
 FETCH_TIMEOUT_SECONDS = 30.0
-# A registry pack larger than this is refused before parsing - a misconfigured
-# URL pointing at a huge binary should fail fast with a clear message.
-MAX_REGISTRY_BYTES = 64 * 1024 * 1024
+# Chunk size for the streaming download (see _fetch_pack_doc).
+FETCH_CHUNK_BYTES = 256 * 1024
 
 
 class RegistryFetchError(Exception):
@@ -91,24 +91,36 @@ def _validate_url(url: str) -> str:
 async def _fetch_pack_doc(url: str) -> PackDocument:
     """Fetch a registry URL and parse it into a PackDocument.
 
+    The download is STREAMED and hard-capped at
+    ``settings.max_registry_fetch_bytes`` - a misconfigured URL pointing at a
+    huge binary (or a gzip bomb) is aborted mid-download instead of being
+    buffered into memory first. The cap applies to DECODED bytes: httpx
+    decompresses content-encoding transparently before ``aiter_bytes``.
+
     Raises RegistryFetchError with a human-clean message on transport errors,
     non-2xx responses, oversized bodies, invalid JSON or a wrong format
     marker - callers translate that into a 502.
     """
+    cap = settings.max_registry_fetch_bytes
+    body = b""
     try:
         async with _make_client() as client:
-            resp = await client.get(url)
+            async with client.stream("GET", url) as resp:
+                if resp.status_code >= 400:
+                    raise RegistryFetchError(f"Registry URL returned HTTP {resp.status_code}")
+                chunks: list[bytes] = []
+                total = 0
+                async for chunk in resp.aiter_bytes(FETCH_CHUNK_BYTES):
+                    total += len(chunk)
+                    if total > cap:
+                        raise RegistryFetchError(
+                            f"Registry pack exceeds the {cap // (1024 * 1024)} MB cap"
+                        )
+                    chunks.append(chunk)
+                body = b"".join(chunks)
     except httpx.HTTPError as exc:
         raise RegistryFetchError(f"Could not reach the registry URL: {exc.__class__.__name__}") from exc
 
-    if resp.status_code >= 400:
-        raise RegistryFetchError(f"Registry URL returned HTTP {resp.status_code}")
-    declared = resp.headers.get("content-length")
-    if declared and declared.isdigit() and int(declared) > MAX_REGISTRY_BYTES:
-        raise RegistryFetchError(f"Registry pack exceeds the {MAX_REGISTRY_BYTES // (1024 * 1024)} MB cap")
-    body = resp.content
-    if len(body) > MAX_REGISTRY_BYTES:
-        raise RegistryFetchError(f"Registry pack exceeds the {MAX_REGISTRY_BYTES // (1024 * 1024)} MB cap")
     try:
         doc = json.loads(body)
     except (ValueError, UnicodeDecodeError) as exc:

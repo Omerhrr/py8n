@@ -34,6 +34,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from ..context import ExecutionContext
+from .. import sandbox
 from .base import BaseNode, Handle, NodeExecutionError, NodeResult
 
 MAX_TOOL_RESULT_CHARS = 4000
@@ -127,7 +128,10 @@ class AgentNode(BaseNode):
                 raise NodeExecutionError("openai_compatible provider requires a credential")
             from ...services.crypto import decrypt_credential
 
-            cred = await decrypt_credential(self._context_for_creds, p.credential_id)
+            cred = await decrypt_credential(
+                self._context_for_creds, p.credential_id,
+                owner_id=getattr(self._context_for_creds, "owner_id", None),
+            )
             if cred.get("type") != "openai_compatible":
                 raise NodeExecutionError("Selected credential is not of type openai_compatible")
             base = (cred.get("base_url") or "").rstrip("/")
@@ -241,7 +245,7 @@ class AgentNode(BaseNode):
                 raise NodeExecutionError(f"dataset tool: {banned.upper()} is not allowed")
         return text
 
-    async def _run_tool_dataset(self, tool: ToolSpec, args: dict) -> dict:
+    async def _run_tool_dataset(self, tool: ToolSpec, args: dict, context: ExecutionContext) -> dict:
         sql = self._guard_readonly_sql(str(args.get("sql", args.get("query", ""))))
         if not sql:
             raise NodeExecutionError(f"dataset tool {tool.name!r}: pass {{\"sql\": \"SELECT ...\"}}")
@@ -249,9 +253,9 @@ class AgentNode(BaseNode):
         from ...services import datasets as ds_svc
 
         async with AsyncSessionLocal() as session:
-            # run_sql registers every stored dataset as a DuckDB view
+            # run_sql registers only owner-visible datasets as DuckDB views
             try:
-                result = await ds_svc.run_sql(session, sql)
+                result = await ds_svc.run_sql(session, sql, owner_id=context.owner_id)
             except ValueError as exc:
                 # binder/parse errors must reach the MODEL as tool feedback
                 # (it can fix the query), not kill the workflow node
@@ -272,27 +276,38 @@ class AgentNode(BaseNode):
         if not code.strip():
             raise NodeExecutionError(f"code tool {tool.name!r}: pass {{\"code\": \"...\"}}")
 
-        import asyncio as _asyncio
         import io
         import contextlib
 
+        def _print(*a, **k):  # SAFE_BUILTINS no-ops print - shadow it with a capture
+            buf.write(str(k.get("sep", " ")).join(str(x) for x in a) + str(k.get("end", "\n")))
+
+        buf = io.StringIO()
+        user_globals: dict[str, Any] = {"__builtins__": dict(SAFE_BUILTINS), "result": None, "print": _print}
+        user_globals.update(SAFE_MODULES)
+
         def _exec() -> tuple[str, Any]:
-            buf = io.StringIO()
-
-            def _print(*a, **k):  # SAFE_BUILTINS no-ops print - shadow it with a capture
-                buf.write(str(k.get("sep", " ")).join(str(x) for x in a) + str(k.get("end", "\n")))
-
-            user_globals: dict[str, Any] = {"__builtins__": dict(SAFE_BUILTINS), "result": None, "print": _print}
-            user_globals.update(SAFE_MODULES)
             with contextlib.redirect_stdout(buf):
-                exec(code, user_globals)  # noqa: S102 (sandboxed namespace, self-hosted tool)
+                exec(code_obj, user_globals)  # noqa: S102 - sandboxed, see sandbox.py
             return buf.getvalue(), user_globals.get("result")
 
-        loop = _asyncio.get_running_loop()
+        # Audit hardening: AST guard + module proxies + bounded pool
+        # (see app/engine/sandbox.py). Violations surface as tool feedback so
+        # the model can self-correct instead of killing the workflow.
         try:
-            stdout, result = await _asyncio.wait_for(loop.run_in_executor(None, _exec), timeout=tool.timeout_seconds)
-        except _asyncio.TimeoutError as exc:
-            raise NodeExecutionError(f"code tool timed out after {tool.timeout_seconds}s") from exc
+            code_obj = sandbox.guard(code, SAFE_MODULES)
+        except sandbox.SandboxViolation as exc:
+            raise NodeExecutionError(f"code rejected by sandbox: {exc}") from exc
+        sandbox.make_proxies(user_globals, SAFE_MODULES)
+        sandbox.deepcopy_state(user_globals, skip={"result", "print"})
+        try:
+            stdout, result = await sandbox.run_bounded(
+                _exec, timeout_seconds=tool.timeout_seconds, label="code tool"
+            )
+        except sandbox.SandboxTimeout as exc:
+            raise NodeExecutionError(str(exc)) from None
+        except NodeExecutionError:
+            raise
         except Exception as exc:  # noqa: BLE001 - surface sandbox errors to the model
             raise NodeExecutionError(f"code error: {type(exc).__name__}: {exc}") from exc
         return {"result": result, "stdout": stdout.strip()}
@@ -303,7 +318,7 @@ class AgentNode(BaseNode):
         if tool.kind == "knowledge":
             return tool.content or ""
         if tool.kind == "dataset":
-            return await self._run_tool_dataset(tool, args)
+            return await self._run_tool_dataset(tool, args, context)
         if tool.kind == "code":
             return await self._run_tool_code(tool, args)
         if tool.kind == "http":
@@ -425,7 +440,7 @@ class AgentNode(BaseNode):
         if p.memory == "buffer":
             from ...services.agent_memory import load_history
 
-            history = await load_history(memory_key)
+            history = await load_history(memory_key, owner_id=context.owner_id)
             messages[1:1] = history
             memory_used = len(history) // 2
 
@@ -493,7 +508,10 @@ class AgentNode(BaseNode):
         if p.memory == "buffer":
             from ...services.agent_memory import append_history
 
-            await append_history(memory_key, str(p.user_message), answer, p.max_history_turns)
+            await append_history(
+                memory_key, str(p.user_message), answer, p.max_history_turns,
+                owner_id=context.owner_id,
+            )
 
         await self._emit_agent(context, {"event": "agent_answer", "answer": answer})
 

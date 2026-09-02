@@ -13,6 +13,24 @@ redis>=5.0
 aiosqlite>=0.20        # sandbox/dev default DB driver
 # production database driver (uncomment for PostgreSQL):
 # asyncpg>=0.29
+python-multipart>=0.0.9  # FastAPI UploadFile/Form (dataset + document uploads)
+websockets>=12
+
+# Data platform (v27+ datasets, dashboards, datascience nodes)
+pandas>=2.2
+numpy>=2.0
+duckdb>=1.0            # dataset parquet storage + run_sql analytics
+scikit-learn>=1.4      # train/predict nodes
+matplotlib>=3.8        # chart artifacts (Agg backend)
+anyio>=4               # direct dep: user-code sandbox bounded thread pool
+
+# Document extraction (v32 documents node)
+pdfplumber>=0.11       # pdf text/tables
+pillow>=10.0           # image handling (PIL)
+pytesseract>=0.3       # OCR (needs the tesseract binary at runtime)
+python-docx>=1.1       # Word documents
+openpyxl>=3.1          # Excel workbooks
+reportlab>=4.0         # pdf report generation
+
 pytest>=8               # dev tests
 pytest-asyncio>=0.23
-websockets>=12

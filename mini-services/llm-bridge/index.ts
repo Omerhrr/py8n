@@ -54,6 +54,11 @@ async function loadConfig(): Promise<ZaiConfig> {
 
 const server = Bun.serve({
   port: PORT,
+  // Audit hardening: bind loopback only. The backend calls the bridge at
+  // 127.0.0.1:3010 (config llm_bridge_url default) and the Caddy gateway
+  // proxies from the same host - there is no reason to expose this (dev
+  // helper endpoints included) on external interfaces.
+  hostname: "127.0.0.1",
   async fetch(request) {
     const url = new URL(request.url);
 

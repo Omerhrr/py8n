@@ -4,7 +4,7 @@
 // one chip per node as it starts/finishes - then types out the reply.
 // Each conversation owns a stable session_id (used by downstream agent
 // nodes for per-session memory); "New conversation" rotates it.
-import { nextTick, ref, watch } from 'vue'
+import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { MessageCircle, X, SendHorizontal, RotateCcw, Loader2, Check } from 'lucide-vue-next'
 
 const props = defineProps<{
@@ -49,6 +49,12 @@ function startNewConversation() {
   messages.value = []
   steps.value = []
 }
+
+// navigating away mid-typewriter must stop the interval (it mutates message
+// state that only makes sense while the panel is mounted)
+onBeforeUnmount(() => {
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null }
+})
 
 function streamUrl(): string {
   const config = useRuntimeConfig()
@@ -125,9 +131,15 @@ async function send() {
   await scrollBottomSmooth()
 
   try {
+    // raw fetch (SSE POST) - the central api client can't stream, so the
+    // auth token rides manually, same as every other API call
+    const auth = useAuthStore()
     const res = await fetch(streamUrl(), {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        ...(auth.token ? { Authorization: `Bearer ${auth.token}` } : {}),
+      },
       body: JSON.stringify({ message: text, session_id: sessionId.value }),
     })
     const ctype = res.headers.get('content-type') || ''

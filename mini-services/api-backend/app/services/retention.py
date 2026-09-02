@@ -11,12 +11,19 @@ A single AppSetting row (key = ``execution_retention``) stores the policy:
 
 ``purge_execution_data`` enforces both knobs in one pass:
 * age-based: every FINISHED execution older than ``retention_days`` is deleted
-  (running executions are never touched);
+  (active executions are never touched);
 * volume-based: per workflow, only the newest ``max_executions_per_workflow``
   finished executions survive;
 * orphan sweep (v44): artifact rows whose execution no longer exists (usually
   because the run was just purged) are deleted together with their files -
   before this sweep purged executions leaked their chart/model files forever.
+  The sweep ALSO scans the artifacts directory for files with no DB row
+  (crash leftovers, rows removed elsewhere) and removes those too, so the
+  on-disk footprint can only shrink.
+
+Active executions (status ``running`` or ``waiting`` - webhook wait / human
+resume wait) are NEVER deleted; deleting a waiting row would orphan its
+resume token and strand the run forever.
 
 Explicit commits everywhere - the yield-dependency teardown commit runs after
 the response is sent, so background/purge writes must commit themselves.
@@ -25,16 +32,29 @@ the response is sent, so background/purge writes must commit themselves.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from sqlalchemy import delete, select
 
+from ..config import settings
 from ..db import AsyncSessionLocal
 from ..models import AppSetting, Artifact, ExecutionLog
 
 logger = logging.getLogger("py8n.retention")
 
 SETTING_KEY = "execution_retention"
+
+# Statuses that must NEVER be purged: a running row is self-explanatory; a
+# waiting row is suspended on a Wait-for-Resume / webhook-wait node and still
+# holds a live resume token in its context snapshot.
+ACTIVE_STATUSES = ("running", "waiting")
+
+# Disk-orphan sweep: files younger than this are skipped so a concurrent
+# save_artifact (row flushed, file written, commit pending) is never deleted.
+ORPHAN_FILE_GRACE_SECONDS = 3600
+
 
 DEFAULTS = {
     "retention_days": 30,
@@ -92,7 +112,8 @@ async def set_policy(patch: dict) -> dict:
 
 
 async def purge_execution_data() -> dict:
-    """Apply the retention policy. Returns {deleted_by_age, deleted_by_volume, total}.
+    """Apply the retention policy. Returns {deleted_by_age, deleted_by_volume,
+    artifacts_deleted, orphan_files_deleted, total}.
 
     v20: workflows may override the global age policy via
     ``Workflow.retention_days`` (NULL = inherit, 0 = keep forever, N = days).
@@ -106,6 +127,7 @@ async def purge_execution_data() -> dict:
     deleted_by_age = 0
     deleted_by_volume = 0
     deleted_artifacts = 0
+    deleted_orphan_files = 0
 
     async with AsyncSessionLocal() as session:
         override_rows = (
@@ -118,7 +140,7 @@ async def purge_execution_data() -> dict:
         if days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             conditions = [
-                ExecutionLog.status != "running",
+                ExecutionLog.status.not_in(ACTIVE_STATUSES),
                 ExecutionLog.finished_at.is_not(None),
                 ExecutionLog.finished_at < cutoff,
             ]
@@ -135,7 +157,7 @@ async def purge_execution_data() -> dict:
             result = await session.execute(
                 delete(ExecutionLog).where(
                     ExecutionLog.workflow_id == workflow_id,
-                    ExecutionLog.status != "running",
+                    ExecutionLog.status.not_in(ACTIVE_STATUSES),
                     ExecutionLog.finished_at.is_not(None),
                     ExecutionLog.finished_at < cutoff_w,
                 )
@@ -150,7 +172,10 @@ async def purge_execution_data() -> dict:
                 keep_ids = (
                     await session.execute(
                         select(ExecutionLog.id)
-                        .where(ExecutionLog.workflow_id == workflow_id, ExecutionLog.status != "running")
+                        .where(
+                            ExecutionLog.workflow_id == workflow_id,
+                            ExecutionLog.status.not_in(ACTIVE_STATUSES),
+                        )
                         .order_by(ExecutionLog.started_at.desc())
                         .limit(cap)
                     )
@@ -160,35 +185,57 @@ async def purge_execution_data() -> dict:
                 result = await session.execute(
                     delete(ExecutionLog).where(
                         ExecutionLog.workflow_id == workflow_id,
-                        ExecutionLog.status != "running",
+                        ExecutionLog.status.not_in(ACTIVE_STATUSES),
                         ExecutionLog.id.not_in(keep_ids),
                     )
                 )
                 deleted_by_volume += result.rowcount or 0
 
-        # v44: sweep artifacts orphaned by the purge (execution row is gone)
-        deleted_artifacts = 0
-        if deleted_by_age or deleted_by_volume:
-            from . import artifacts as art_svc
+        # v44/audit: orphan artifact sweep. Runs UNCONDITIONALLY (not only when
+        # this purge deleted rows) because other paths (e.g. history trimming)
+        # can orphan artifacts too.
+        # 1) DB rows whose execution no longer exists -> delete row + file.
+        from . import artifacts as art_svc
 
-            orphan_rows = (
-                await session.execute(
-                    select(Artifact).where(
-                        Artifact.execution_id.is_not(None),
-                        Artifact.execution_id.not_in(select(ExecutionLog.id)),
-                    )
+        orphan_rows = (
+            await session.execute(
+                select(Artifact).where(
+                    Artifact.execution_id.is_not(None),
+                    Artifact.execution_id.not_in(select(ExecutionLog.id)),
                 )
-            ).scalars().all()
-            for art in orphan_rows:
-                art_svc.delete_file(art)
-                await session.delete(art)
-                deleted_artifacts += 1
+            )
+        ).scalars().all()
+        for art in orphan_rows:
+            art_svc.delete_file(art)
+            await session.delete(art)
+            deleted_artifacts += 1
+
+        # 2) Files on disk with no artifact row (crash between write/commit,
+        #    rows deleted elsewhere) -> unlink the file. Recent files are
+        #    skipped so an in-flight save is never swept.
+        known_ids = set((await session.execute(select(Artifact.id))).scalars().all())
+        artifacts_root = Path(settings.artifacts_dir)
+        if artifacts_root.exists():
+            now = time.time()
+            for f in artifacts_root.iterdir():
+                if not f.is_file():
+                    continue
+                if f.stem in known_ids:
+                    continue
+                try:
+                    if now - f.stat().st_mtime < ORPHAN_FILE_GRACE_SECONDS:
+                        continue
+                    f.unlink()
+                    deleted_orphan_files += 1
+                except OSError:
+                    logger.warning("could not sweep orphan artifact file %s", f, exc_info=True)
 
         row = await session.get(AppSetting, SETTING_KEY)
         bookkeeping = dict(policy)
         bookkeeping["last_purge_at"] = datetime.now(timezone.utc).isoformat()
         bookkeeping["last_purge_deleted"] = deleted_by_age + deleted_by_volume
         bookkeeping["last_purge_artifacts"] = deleted_artifacts
+        bookkeeping["last_purge_orphan_files"] = deleted_orphan_files
         if row is None:
             row = AppSetting(key=SETTING_KEY, value=bookkeeping)
             session.add(row)
@@ -197,12 +244,13 @@ async def purge_execution_data() -> dict:
         await session.commit()  # explicit - purge may run outside a request
 
     logger.info(
-        "retention purge: %s by age, %s by volume, %s artifacts orphaned (days=%s cap=%s)",
-        deleted_by_age, deleted_by_volume, deleted_artifacts, days, cap,
+        "retention purge: %s by age, %s by volume, %s orphan artifacts, %s orphan files (days=%s cap=%s)",
+        deleted_by_age, deleted_by_volume, deleted_artifacts, deleted_orphan_files, days, cap,
     )
     return {
         "deleted_by_age": deleted_by_age,
         "deleted_by_volume": deleted_by_volume,
         "artifacts_deleted": deleted_artifacts,
+        "orphan_files_deleted": deleted_orphan_files,
         "total": deleted_by_age + deleted_by_volume,
     }

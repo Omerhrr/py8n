@@ -61,7 +61,7 @@ class EmailSendNode(BaseNode):
 
         from ...services.crypto import decrypt_credential
 
-        cred = await decrypt_credential(context, p.credential_id)
+        cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
         if cred.get("type") != "smtp":
             raise NodeExecutionError("Selected credential is not of type smtp")
         host = cred.get("host") or ""
@@ -161,7 +161,7 @@ class SlackMessageNode(BaseNode):
 
         from ...services.crypto import decrypt_credential
 
-        cred = await decrypt_credential(context, p.credential_id)
+        cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
         token = cred.get("token") or cred.get("value") or cred.get("api_key") or ""
         if not token:
             raise NodeExecutionError("Credential has no token field (expected a Slack bot token, xoxb-…)")

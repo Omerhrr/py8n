@@ -50,6 +50,29 @@ def _track_progress(execution_id: str, event: dict) -> None:
         prog["status"] = event.get("status", "finished")
 
 
+async def _fail_execution(execution_id: str, error: str, node_runs: list | None = None) -> None:
+    """Force an execution row into the terminal 'error' state (best effort).
+
+    Used by the safety nets below so an unexpected crash can never leave a
+    row stuck in 'running' forever.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                update(ExecutionLog)
+                .where(ExecutionLog.id == execution_id)
+                .values(
+                    status="error",
+                    error=(error or "execution failed")[:5000],
+                    finished_at=datetime.now(timezone.utc),
+                    node_runs=node_runs if node_runs is not None else [],
+                )
+            )
+            await session.commit()
+    except Exception:  # noqa: BLE001 - the safety net must never raise
+        logger.exception("failed to finalize execution %s as error", execution_id)
+
+
 async def execute_workflow(
     workflow_id: str,
     trigger_type: str = "manual",
@@ -58,8 +81,13 @@ async def execute_workflow(
     execution_id: str | None = None,
     log_created: bool = False,
     respond_channel: Any | None = None,
+    owner_id: str | None = None,
 ) -> dict:
-    """Load the workflow, run the graph, persist and broadcast events."""
+    """Load the workflow, run the graph, persist and broadcast events.
+
+    With ``owner_id`` set, a workflow claimed by a DIFFERENT owner is treated
+    as not found (LookupError) - engine dispatchers pass the caller's owner.
+    """
     execution_id = execution_id or uuid.uuid4().hex
 
     async with AsyncSessionLocal() as session:
@@ -68,10 +96,27 @@ async def execute_workflow(
         ).scalar_one_or_none()
     if workflow is None:
         raise LookupError(f"Workflow {workflow_id} not found")
+    if (
+        owner_id is not None
+        and workflow.owner_id is not None
+        and workflow.owner_id != owner_id
+    ):
+        raise LookupError(f"Workflow {workflow_id} not found")
 
-    graph = validate_graph_document(workflow.graph or {"nodes": [], "edges": []})
-    if not graph.trigger_nodes():
-        raise ValueError("Workflow has no trigger node - add a trigger to run it")
+    # From here on an execution row may exist (created by us or by the
+    # dispatcher) - everything below is guarded so ANY failure finalizes the
+    # row as 'error' instead of leaving it running forever.
+    try:
+        graph = validate_graph_document(workflow.graph or {"nodes": [], "edges": []})
+        if not graph.trigger_nodes():
+            raise ValueError("Workflow has no trigger node - add a trigger to run it")
+    except asyncio.CancelledError:  # pragma: no cover - never raised here
+        raise
+    except Exception as exc:
+        logger.exception("preparing execution %s failed", execution_id)
+        if log_created:
+            await _fail_execution(execution_id, str(exc))
+        raise
 
     bus = get_event_bus()
     if not log_created:
@@ -116,6 +161,8 @@ async def execute_workflow(
         # error dispatches always execute for real.
         honor_pinned=(trigger_type == "manual"),
         respond_channel=respond_channel,
+        # Audit hardening: node-level service calls scope to the workflow owner
+        owner_id=workflow.owner_id,
     )
     try:
         result = await runner.run()
@@ -156,6 +203,18 @@ async def execute_workflow(
             "execution_id": execution_id,
             "status": "cancelled",
             "error": "Cancelled by user",
+            "duration_ms": None,
+            "node_runs": runner.node_runs,
+            "context": {},
+        }
+    except Exception as exc:
+        # Safety net (audit): a crash that escapes the runner must still end
+        # the row in a terminal failed state with the message recorded.
+        logger.exception("execution %s crashed unexpectedly", execution_id)
+        result = {
+            "execution_id": execution_id,
+            "status": "error",
+            "error": f"Unhandled execution failure: {exc}"[:5000],
             "duration_ms": None,
             "node_runs": runner.node_runs,
             "context": {},
@@ -221,27 +280,30 @@ async def execute_workflow(
     if result["status"] == "error" and trigger_type != "error":
         handler_id = workflow.error_workflow_id
         if handler_id and handler_id != workflow_id:
-            async with AsyncSessionLocal() as session:
-                handler_exists = (
-                    await session.execute(select(Workflow.id).where(Workflow.id == handler_id))
-                ).scalar_one_or_none()
-            if handler_exists:
-                failed = [
-                    {"node_id": r.get("node_id"), "node_name": r.get("node_name"), "error": r.get("error")}
-                    for r in result.get("node_runs") or []
-                    if r.get("status") == "error" and not r.get("continued_on_fail")
-                ]
-                result["error_workflow_execution_id"] = await dispatch_inline(
-                    handler_id,
-                    trigger_type="error",
-                    trigger_payload={
-                        "execution_id": execution_id,
-                        "workflow_id": workflow_id,
-                        "workflow_name": workflow.name,
-                        "error": result.get("error"),
-                        "failed_nodes": failed,
-                    },
-                )
+            try:
+                async with AsyncSessionLocal() as session:
+                    handler_exists = (
+                        await session.execute(select(Workflow.id).where(Workflow.id == handler_id))
+                    ).scalar_one_or_none()
+                if handler_exists:
+                    failed = [
+                        {"node_id": r.get("node_id"), "node_name": r.get("node_name"), "error": r.get("error")}
+                        for r in result.get("node_runs") or []
+                        if r.get("status") == "error" and not r.get("continued_on_fail")
+                    ]
+                    result["error_workflow_execution_id"] = await dispatch_inline(
+                        handler_id,
+                        trigger_type="error",
+                        trigger_payload={
+                            "execution_id": execution_id,
+                            "workflow_id": workflow_id,
+                            "workflow_name": workflow.name,
+                            "error": result.get("error"),
+                            "failed_nodes": failed,
+                        },
+                    )
+            except Exception:  # noqa: BLE001 - routing must not break the finalized run
+                logger.exception("error-workflow dispatch failed for execution %s", execution_id)
 
     return result
 
@@ -298,6 +360,8 @@ async def resume_workflow(execution_id: str, token: str, payload: Any = None) ->
         execution_id=execution_id,
         emit=emit,
         max_output_capture=settings.max_output_capture,
+        # Audit hardening: node-level service calls scope to the workflow owner
+        owner_id=workflow_row.owner_id,
         resume_state={
             "node_states": resume_meta.get("node_states") or {},
             "active_edges": resume_meta.get("active_edges") or [],
@@ -318,7 +382,16 @@ async def resume_workflow(execution_id: str, token: str, payload: Any = None) ->
         await session.commit()
 
     async def _finish() -> None:
-        result = await runner.run()
+        try:
+            result = await runner.run()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - background task: persist, don't leak
+            logger.exception("resumed execution %s crashed unexpectedly", execution_id)
+            await _fail_execution(
+                execution_id, f"Unhandled execution failure: {exc}"[:5000], runner.node_runs
+            )
+            return
         async with AsyncSessionLocal() as session:
             await session.execute(
                 update(ExecutionLog)
@@ -373,8 +446,13 @@ async def dispatch_inline(
     trigger_payload: dict | None = None,
     trigger_node_id: str | None = None,
     execution_id: str | None = None,
+    owner_id: str | None = None,
 ) -> str:
-    """Fire an execution as a background task on the current event loop."""
+    """Fire an execution as a background task on the current event loop.
+
+    ``owner_id`` scopes the run: the engine passes the workflow owner so a
+    subflow/queue dispatch can never run another tenant's workflow.
+    """
     from ..models import ExecutionLog
 
     exec_id = execution_id or uuid.uuid4().hex
@@ -392,7 +470,13 @@ async def dispatch_inline(
         await session.commit()
     task = asyncio_create_task(
         execute_workflow(
-            workflow_id, trigger_type, trigger_payload, trigger_node_id, exec_id, log_created=True
+            workflow_id,
+            trigger_type,
+            trigger_payload,
+            trigger_node_id,
+            exec_id,
+            log_created=True,
+            owner_id=owner_id,
         )
     )
     _background_tasks.add(task)

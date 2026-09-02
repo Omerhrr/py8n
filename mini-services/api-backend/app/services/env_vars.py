@@ -19,10 +19,21 @@ from .crypto import decrypt_value
 logger = logging.getLogger("py8n.env")
 
 
-async def load_env_map() -> dict[str, str]:
-    """Return {key: value} for every stored variable (decrypted)."""
+async def load_env_map(owner_id: str | None = None) -> dict[str, str]:
+    """Return {key: value} for every visible variable (decrypted).
+
+    With ``owner_id`` set, only variables owned by that caller or unclaimed
+    (``owner_id IS NULL``) are loaded - another owner's variables are never
+    decrypted into a run's template context. ``owner_id=None`` keeps the
+    legacy all-visible behavior.
+    """
+    from sqlalchemy import or_
+
+    q = select(EnvVariable)
+    if owner_id is not None:
+        q = q.where(or_(EnvVariable.owner_id.is_(None), EnvVariable.owner_id == owner_id))
     async with AsyncSessionLocal() as session:
-        rows = (await session.execute(select(EnvVariable))).scalars().all()
+        rows = (await session.execute(q)).scalars().all()
     env: dict[str, str] = {}
     for row in rows:
         try:

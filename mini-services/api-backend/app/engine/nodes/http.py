@@ -37,7 +37,7 @@ class HttpRequestNode(BaseNode):
         if p.credential_id:
             from ...services.crypto import decrypt_credential  # local import avoids cycle
 
-            cred = await decrypt_credential(context, p.credential_id)
+            cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
             if cred.get("type") == "header_auth":
                 name = cred.get("header_name") or "Authorization"
                 headers[name] = cred.get("value", "")

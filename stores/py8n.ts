@@ -294,6 +294,9 @@ export const usePy8nStore = defineStore('py8n', () => {
   }
 
   function connectProgress(executionId: string) {
+    // a previous run's socket may still be open - drop it or it leaks (each
+    // one keeps a slot on the backend event bus)
+    closeSocket()
     try {
       ws = new WebSocket(wsUrl(executionId))
     } catch {

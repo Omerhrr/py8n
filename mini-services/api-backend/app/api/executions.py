@@ -168,12 +168,24 @@ async def get_execution(execution_id: str, user=Depends(get_optional_user), db: 
 
 
 @router.post("/{execution_id}/resume", status_code=202)
-async def resume_execution(execution_id: str, body: ResumeRequest, db: AsyncSession = Depends(get_db)):
+async def resume_execution(
+    execution_id: str,
+    body: ResumeRequest,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Continue a suspended Wait-for-Resume execution with the given token.
 
     The resume payload becomes the wait node's output; the SAME execution id
     continues (status flips back to running, then success/error).
     """
+    # Audit hardening: an execution of another user's workflow looks
+    # nonexistent, exactly like GET /executions/{id} (legacy anonymous calls
+    # keep working - the per-run resume token still gates the actual resume).
+    log = await db.get(ExecutionLog, execution_id)
+    if log is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    await _own_workflow_or_404(db, log.workflow_id, user)
     try:
         result = await resume_workflow(execution_id, body.token, body.payload)
     except LookupError as exc:
@@ -186,12 +198,21 @@ async def resume_execution(execution_id: str, body: ResumeRequest, db: AsyncSess
 
 
 @router.post("/{execution_id}/cancel", status_code=202)
-async def cancel_execution_endpoint(execution_id: str):
+async def cancel_execution_endpoint(
+    execution_id: str,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Cooperatively cancel a running execution (runner stops between nodes).
 
     The execution row flips to ``cancelled`` synchronously; the in-flight
     background task winds down at the next node boundary.
     """
+    # Audit hardening: only callers who can see the execution may cancel it.
+    log = await db.get(ExecutionLog, execution_id)
+    if log is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    await _own_workflow_or_404(db, log.workflow_id, user)
     try:
         return await cancel_execution(execution_id)
     except LookupError as exc:

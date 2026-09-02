@@ -45,6 +45,11 @@ class ExecutionContext:
     # Nesting depth for Execute Workflow nodes (sub-workflow recursion guard)
     depth: int = 0
 
+    # Audit hardening: owner id of the workflow being run (None = unclaimed).
+    # Nodes pass it to owner-scoped service calls so a workflow can only read
+    # its owner's (or unclaimed) datasets, credentials, memory and env vars.
+    owner_id: str | None = None
+
     # Global environment variables (v15) - exposed to templates as ``env.KEY``.
     # Deliberately NOT included in snapshot(): execution logs must never
     # contain a dump of (possibly secret) values.

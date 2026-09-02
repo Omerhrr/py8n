@@ -27,6 +27,7 @@ import pandas as pd
 from pydantic import BaseModel, Field
 
 from ..context import ExecutionContext
+from .. import sandbox
 from .base import BaseNode, NodeExecutionError
 from .data import _items, _working_data
 from .logic import SAFE_BUILTINS
@@ -45,7 +46,7 @@ ALLOWED_IMPORTS = {
 }
 _IMPORT_ERROR = (
     "import of {name!r} is not allowed in python_transform - "
-    "allowed: pandas, numpy, sklearn, math, statistics, datetime, random, itertools, collections"
+    "allowed: pandas, numpy, math, statistics, datetime, random, itertools, collections"
 )
 
 
@@ -57,7 +58,11 @@ def _make_import_hook(code_ns: dict[str, Any]):
         if root == "sklearn":
             return __import__(name, *args, **kwargs)
         if name in ALLOWED_IMPORTS:
-            return ALLOWED_IMPORTS[name]
+            # Return the PROXIED module so an explicit import can never
+            # rebind the raw module object over the sandbox proxy.
+            from ..sandbox import ModuleProxy
+
+            return ModuleProxy(ALLOWED_IMPORTS[name], name)
         raise NodeExecutionError(_IMPORT_ERROR.format(name=name))
 
     return _import
@@ -120,13 +125,22 @@ class PythonTransformNode(BaseNode):
         user_globals["df"] = df
         user_globals["result"] = None
 
-        loop = asyncio.get_running_loop()
+        # Audit hardening: AST guard + module proxies + bounded pool
+        # (see app/engine/sandbox.py). The working DataFrame stays shared by
+        # reference on purpose - in-place mutation is a documented feature.
         try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, self._exec_sync, p.code, user_globals, buf),
-                timeout=p.timeout_seconds,
+            code_obj = sandbox.guard(p.code, ALLOWED_IMPORTS, extra_roots={"sklearn"})
+        except sandbox.SandboxViolation as exc:
+            raise NodeExecutionError(f"python_transform rejected by sandbox: {exc}") from exc
+        sandbox.make_proxies(user_globals, ALLOWED_IMPORTS)
+        sandbox.deepcopy_state(user_globals, skip={"df", "result"})
+        try:
+            await sandbox.run_bounded(
+                lambda: self._exec_sync(code_obj, user_globals, buf),
+                timeout_seconds=p.timeout_seconds,
+                label="python_transform",
             )
-        except asyncio.TimeoutError:
+        except sandbox.SandboxTimeout:
             raise NodeExecutionError(f"python_transform timed out after {p.timeout_seconds}s") from None
         except NodeExecutionError:
             raise
@@ -142,12 +156,12 @@ class PythonTransformNode(BaseNode):
         return self._single(payload)
 
     @staticmethod
-    def _exec_sync(code: str, user_globals: dict[str, Any], buf: io.StringIO) -> None:
+    def _exec_sync(code_obj, user_globals: dict[str, Any], buf: io.StringIO) -> None:
         import contextlib
 
         try:
             with contextlib.redirect_stdout(buf):
-                exec(code, user_globals)  # noqa: S102 (sandboxed namespace, self-hosted tool)
+                exec(code_obj, user_globals)  # noqa: S102 - sandboxed, see sandbox.py
         except NodeExecutionError:
             raise
         except Exception as exc:  # noqa: BLE001

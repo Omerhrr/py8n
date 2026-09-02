@@ -50,15 +50,40 @@ export function useApi() {
     patch: <T = any>(path: string, body?: any) => request<T>(path, { method: 'PATCH', body }),
     del: <T = any>(path: string, query?: Record<string, string>) =>
       request<T>(path, { method: 'DELETE', query }),
+    // multipart upload (dataset import, document extraction). Same auth as
+    // every other call, but no Content-Type header - the browser must set
+    // the multipart boundary itself.
+    upload: <T = any>(path: string, form: FormData) => {
+      const auth = useAuthStore()
+      const headers: Record<string, string> = {}
+      if (auth.token) headers.Authorization = `Bearer ${auth.token}`
+      return $fetch<T>(httpUrl(path), {
+        method: 'POST',
+        body: form,
+        headers,
+        onResponseError({ response }) {
+          if (response.status === 401 && auth.requireAuth) {
+            auth.clearSession()
+            if (import.meta.client && !location.pathname.startsWith('/login')) {
+              navigateTo('/login')
+            }
+          }
+        },
+      })
+    },
   }
 
   function wsUrl(executionId: string): string {
-    if (mode === 'gateway') {
-      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-      return `${proto}://${location.host}/ws/executions/${executionId}?XTransformPort=${apiPort}`
-    }
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    return `${proto}://${location.hostname}:${apiPort}/ws/executions/${executionId}`
+    const url = mode === 'gateway'
+      ? `${proto}://${location.host}/ws/executions/${executionId}?XTransformPort=${apiPort}`
+      : `${proto}://${location.hostname}:${apiPort}/ws/executions/${executionId}`
+    // Browsers cannot set headers on WebSocket connects, so authenticated
+    // mode rides the JWT as a query param; absent when logged out so the
+    // legacy anonymous flow keeps working.
+    const auth = useAuthStore()
+    if (auth.token) return `${url}${url.includes('?') ? '&' : '?'}token=${encodeURIComponent(auth.token)}`
+    return url
   }
 
   // URL for raw backend content (artifact images etc.) - gateway param honored.

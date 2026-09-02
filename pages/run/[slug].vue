@@ -206,6 +206,14 @@ async function submitForm() {
   }
 }
 
+// The backend addresses records by their index in the UNFILTERED dataset
+// (parquet row order), so map a rendered row back to its real index - the
+// old `(page - 1) * pageSize + ri` math indexed into filteredRows and made
+// search + edit/delete hit the wrong record.
+function rawIndex(row: any): number {
+  return rows.value.indexOf(row)
+}
+
 async function removeRow(index: number) {
   if (!confirm('Delete this record?')) return
   mutatingId.value = `del-${index}`
@@ -338,11 +346,11 @@ async function removeRow(index: number) {
                     {{ row[col] ?? '-' }}
                   </td>
                   <td v-if="formComp" class="whitespace-nowrap px-4 py-2 text-right">
-                    <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-sky-500/10 hover:text-sky-400" title="Edit" @click="openEdit((page - 1) * pageSize + ri)">
+                    <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-sky-500/10 hover:text-sky-400" title="Edit" @click="openEdit(rawIndex(row))">
                       <Pencil class="h-3.5 w-3.5" />
                     </button>
-                    <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-amber-500/10 hover:text-amber-400" title="Delete" @click="removeRow((page - 1) * pageSize + ri)">
-                      <Loader2 v-if="mutatingId === `del-${(page - 1) * pageSize + ri}`" class="h-3.5 w-3.5 animate-spin" />
+                    <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-amber-500/10 hover:text-amber-400" title="Delete" @click="removeRow(rawIndex(row))">
+                      <Loader2 v-if="mutatingId === `del-${rawIndex(row)}`" class="h-3.5 w-3.5 animate-spin" />
                       <Trash2 v-else class="h-3.5 w-3.5" />
                     </button>
                   </td>

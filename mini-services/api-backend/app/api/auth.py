@@ -9,6 +9,8 @@ GET  /api/v1/auth/status    mode probe for the UI: {require_auth, has_users}
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -28,6 +30,7 @@ from ..auth import (
 from ..config import settings
 from ..db import get_db
 from ..models import User
+from ._ratelimit import rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -53,7 +56,7 @@ async def auth_status(db: AsyncSession = Depends(get_db)):
     }
 
 
-@router.post("/register", status_code=201)
+@router.post("/register", status_code=201, dependencies=[Depends(rate_limit("auth"))])
 async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
     email = validate_email(body.email)
     validate_password(body.password)
@@ -64,10 +67,13 @@ async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
     first = await user_count(db) == 0
+    # Audit hardening: 240k PBKDF2 iterations are ~100ms+ of pure CPU - run
+    # them on a worker thread so register/login never blocks the event loop.
+    password_hash = await asyncio.to_thread(hash_password, body.password)
     user = User(
         email=email,
         name=(body.name or "").strip(),
-        password_hash=hash_password(body.password),
+        password_hash=password_hash,
         role="admin" if first else "member",
     )
     db.add(user)
@@ -77,11 +83,14 @@ async def register(body: RegisterIn, db: AsyncSession = Depends(get_db)):
     return {"token": make_token(user.id), "user": public_user(user), "claimed": claimed}
 
 
-@router.post("/login")
+@router.post("/login", dependencies=[Depends(rate_limit("auth"))])
 async def login(body: LoginIn, db: AsyncSession = Depends(get_db)):
     email = (body.email or "").strip().lower()
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    ok = user is not None and await asyncio.to_thread(
+        verify_password, body.password, user.password_hash
+    )
+    if not ok:
         raise HTTPException(status_code=401, detail="Invalid email or password")
     return {"token": make_token(user.id), "user": public_user(user)}
 

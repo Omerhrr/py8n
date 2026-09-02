@@ -217,7 +217,11 @@ async function togglePublish() {
       const updated = await api.post<Board>(`/dashboards/${board.value.id}/unpublish`)
       board.value = updated
     } else {
-      if (dirty.value) await saveConfig()
+      if (dirty.value) {
+        await saveConfig()
+        // a failed save must not publish the stale server config
+        if (error.value) return
+      }
       const updated = await api.post<Board>(`/dashboards/${board.value.id}/publish`)
       board.value = updated
     }

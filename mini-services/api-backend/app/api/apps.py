@@ -39,6 +39,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
+from ..config import settings
 from ..db import get_db
 from ..models import App, Dataset
 from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut
@@ -80,6 +81,17 @@ async def _get_or_404(db: AsyncSession, ref: str, user=None) -> App:
         raise HTTPException(status_code=404, detail="App not found")
     own_or_404(row.owner_id, user)  # v37 (runtime endpoints stay public)
     return row
+
+
+def _records_mutator_gate(row: App, user) -> None:
+    """Audit hardening: editing/deleting a published app's records is NOT part
+    of the anonymous runtime surface (only listing/form-submit is). The app's
+    owner may always mutate; anonymous callers only in legacy mode."""
+    if user is not None:
+        own_or_404(row.owner_id, user)
+        return
+    if settings.require_auth:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
 
 async def _runtime_or_404(db: AsyncSession, slug: str) -> App:
@@ -403,8 +415,15 @@ async def create_record(slug: str, body: AppRecordIn, db: AsyncSession = Depends
 
 
 @router.patch("/{slug}/records/{index}")
-async def edit_record(slug: str, index: int, body: AppRecordIn, db: AsyncSession = Depends(get_db)):
+async def edit_record(
+    slug: str,
+    index: int,
+    body: AppRecordIn,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     row = await _runtime_or_404(db, slug)
+    _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
@@ -424,8 +443,14 @@ async def edit_record(slug: str, index: int, body: AppRecordIn, db: AsyncSession
 
 
 @router.delete("/{slug}/records/{index}")
-async def remove_record(slug: str, index: int, db: AsyncSession = Depends(get_db)):
+async def remove_record(
+    slug: str,
+    index: int,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
     row = await _runtime_or_404(db, slug)
+    _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")

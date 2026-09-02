@@ -136,7 +136,14 @@ async def health():
 
 if settings.debug:
     # DEV-ONLY helper (sandbox): launch helper daemons from a persistent
-    # process tree. Disabled in production (PY8N_DEBUG=false).
+    # process tree. Triple-gated (audit hardening):
+    #   * settings.debug must be true (PY8N_DEBUG=true, default false);
+    #   * settings.spawn_enabled must be true (PY8N_SPAWN_ENABLED=true);
+    #   * the token is per-boot RANDOM unless PY8N_SPAWN_TOKEN pins it -
+    #     the old committed static token is gone (it was effectively public).
+    # The route is hidden from OpenAPI and answers 404 while disabled so it
+    # does not even advertise its existence.
+    import secrets
     import subprocess
 
     from fastapi import HTTPException
@@ -148,14 +155,23 @@ if settings.debug:
         token: str
         cmd: str
 
-    _SPAWN_TOKEN = "py8n-bootstrap-9f2c"
+    _SPAWN_TOKEN = settings.spawn_token or secrets.token_urlsafe(32)
 
-    @app.post(f"{API}/_spawn")
+    if settings.spawn_enabled:
+        # Ops bootstrap: the token is only discoverable from this log line.
+        logging.warning("[py8n] /_spawn ENABLED - per-boot token: %s", _SPAWN_TOKEN)
+
+    @app.post(f"{API}/_spawn", include_in_schema=False)
     async def _spawn(body: _SpawnReq):
-        if body.token != _SPAWN_TOKEN:
+        if not settings.spawn_enabled:
+            raise HTTPException(status_code=404, detail="Not Found")
+        if not secrets.compare_digest(body.token or "", _SPAWN_TOKEN):
             raise HTTPException(status_code=401, detail="unauthorized")
+        cmd = (body.cmd or "").strip()
+        if not cmd or len(cmd) > 4000:
+            raise HTTPException(status_code=400, detail="cmd missing or too long")
         proc = subprocess.Popen(
-            ["/bin/bash", "-lc", body.cmd],
+            ["/bin/bash", "-lc", cmd],
             cwd=str(_BACKEND_DIR.parent.parent),  # project root
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

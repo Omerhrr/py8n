@@ -57,6 +57,7 @@ class GraphRunner:
         env_vars: dict[str, str] | None = None,
         honor_pinned: bool | None = None,
         respond_channel: Any | None = None,
+        owner_id: str | None = None,
     ):
         self.graph = graph
         self.workflow_id = workflow_id
@@ -89,6 +90,10 @@ class GraphRunner:
         # callable that the respond_to_webhook node awaits. ONLY the root run
         # receives it - sub-workflows / loop bodies never hijack the caller.
         self.respond_channel = respond_channel
+        # Audit hardening: the owning workflow's owner id. Threaded into the
+        # execution context so owner-scoped service calls (datasets, SQL,
+        # credentials, memory, env vars, subflows) can never cross tenants.
+        self.owner_id = owner_id
         # Outputs of nodes that already ran in a PARENT run - seeded into the
         # context so loop bodies / sub-runs can reference upstream nodes.
         self.inherit_node_states: dict[str, dict] = inherit_node_states or {}
@@ -141,7 +146,7 @@ class GraphRunner:
         if self.env_vars is None:
             from ..services.env_vars import load_env_map
 
-            self.env_vars = await load_env_map()
+            self.env_vars = await load_env_map(owner_id=self.owner_id)
         context = ExecutionContext(
             workflow_id=self.workflow_id,
             workflow_name=self.workflow_name,
@@ -151,6 +156,7 @@ class GraphRunner:
             depth=self.depth,
             env_vars=self.env_vars or {},
             honor_pinned=self.honor_pinned,
+            owner_id=self.owner_id,
         )
         context.respond_channel = self.respond_channel
         context.emit = self.emit

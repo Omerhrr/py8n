@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel, Field
 
 from ..context import ExecutionContext
+from .. import sandbox
 from .base import BaseNode, Handle, NodeExecutionError, NodeResult
 
 
@@ -111,6 +112,28 @@ SAFE_BUILTINS = {
 SAFE_MODULES = {"json": json, "re": re, "math": __import__("math")}
 
 
+def _sandboxed_import(name: str, *args: Any, **kwargs: Any) -> Any:
+    """Import hook: resolves only the allowlisted modules (sandbox parity).
+
+    The AST guard admits ``import json``/``from re import escape``-style
+    statements; without this hook CPython's import machinery looks up
+    ``__builtins__['__import__']`` and raises a bare ImportError.
+    Returns the PROXIED module so an explicit import can never rebind the
+    raw module object over the sandbox proxy in the user namespace.
+    """
+    if name in SAFE_MODULES:
+        from ..sandbox import ModuleProxy
+
+        return ModuleProxy(SAFE_MODULES[name], name)
+    raise ImportError(
+        f"import of {name!r} is not allowed in sandboxed code "
+        f"(allowed: {', '.join(sorted(SAFE_MODULES))})"
+    )
+
+
+SAFE_BUILTINS["__import__"] = _sandboxed_import
+
+
 class CodeNode(BaseNode):
     """Runs a sandboxed Python snippet against the execution context."""
 
@@ -140,25 +163,26 @@ class CodeNode(BaseNode):
         import math as _math  # ensure present in SAFE_MODULES
         user_globals["math"] = _math
 
-        loop = asyncio.get_running_loop()
+        # Audit hardening: AST guard + module proxies + deep-copied engine
+        # state + bounded pool (see app/engine/sandbox.py).
         try:
-            await asyncio.wait_for(
-                loop.run_in_executor(None, self._exec_sync, p.code, user_globals),
-                timeout=p.timeout_seconds,
+            code_obj = sandbox.guard(p.code, SAFE_MODULES)
+        except sandbox.SandboxViolation as exc:
+            raise NodeExecutionError(f"Code rejected by sandbox: {exc}") from exc
+        sandbox.make_proxies(user_globals, SAFE_MODULES)
+        sandbox.deepcopy_state(user_globals, skip={"result"})
+        try:
+            await sandbox.run_bounded(
+                lambda: exec(code_obj, user_globals),  # noqa: S102 - sandboxed, see sandbox.py
+                timeout_seconds=p.timeout_seconds,
+                label="Code node",
             )
-        except asyncio.TimeoutError:
-            raise NodeExecutionError(f"Code node timed out after {p.timeout_seconds}s")
-        except NodeExecutionError:
-            raise
+        except sandbox.SandboxTimeout as exc:
+            raise NodeExecutionError(str(exc)) from None
+        except Exception as exc:  # noqa: BLE001 - same surface as before the sandbox
+            raise NodeExecutionError(f"Code error: {type(exc).__name__}: {exc}") from exc
         result = user_globals.get("result")
         return self._single({"result": result})
-
-    @staticmethod
-    def _exec_sync(code: str, user_globals: dict[str, Any]) -> None:
-        try:
-            exec(code, user_globals)  # noqa: S102 (sandboxed namespace, self-hosted tool)
-        except Exception as exc:  # noqa: BLE001
-            raise NodeExecutionError(f"Code error: {type(exc).__name__}: {exc}") from exc
 
 
 class DelayNode(BaseNode):

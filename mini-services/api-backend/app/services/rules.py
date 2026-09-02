@@ -43,6 +43,10 @@ RULE_EVENTS = {"create", "update", "always"}
 VALUELESS_OPS = {"empty", "not_empty"}
 MAX_RULES = 50
 
+# Audit guard: formulas are tiny arithmetic expressions; anything longer is
+# abuse (the evaluator walks the whole AST).
+MAX_FORMULA_LEN = 1000
+
 _ALLOWED_BIN = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -134,9 +138,23 @@ def eval_condition(when: dict | None, row: dict) -> bool:
 
 # ----------------------------------------------------------------- formulas
 def eval_formula(expr: str, row: dict) -> float:
-    """Safely evaluate ``ltv * 0.1``-style arithmetic over row fields."""
+    """Safely evaluate ``ltv * 0.1``-style arithmetic over row fields.
+
+    Guards (audit hardening):
+    * expression length capped at MAX_FORMULA_LEN;
+    * parsed with :mod:`ast` and restricted to numbers, field names and
+      ``+ - * / % **`` - NO calls, attributes, subscripts, lambdas, imports
+      or builtins are reachable at all (the allowlist is the empty set);
+    * dunder names (``__class__``, ``__import__``, ...) are rejected
+      outright, even when the row happens to carry such a key;
+    * math failures (division by zero, overflow) surface as ValueError so
+      callers treat them as rule-data fallout, never a 500.
+    """
+    expr = (expr or "").strip()
+    if len(expr) > MAX_FORMULA_LEN:
+        raise ValueError(f"formula too long (max {MAX_FORMULA_LEN} chars)")
     try:
-        tree = ast.parse((expr or "").strip(), mode="eval")
+        tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
         raise ValueError(f"invalid formula: {exc.msg}") from exc
 
@@ -151,15 +169,23 @@ def eval_formula(expr: str, row: dict) -> float:
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)) and not isinstance(n.value, bool):
             return float(n.value)
         if isinstance(n, ast.Name):
+            if "__" in n.id:
+                raise ValueError(f"forbidden name {n.id!r} in formula")
             if n.id not in row:
                 raise ValueError(f"unknown field {n.id!r} in formula")
             v = _num(row[n.id])
             if v is None:
                 raise ValueError(f"field {n.id!r} is not numeric")
             return v
+        if isinstance(n, (ast.Call, ast.Attribute, ast.Subscript, ast.Lambda)):
+            raise ValueError("formula allows only numbers, fields and + - * / % **")
         raise ValueError("formula allows only numbers, fields and + - * / % **")
 
-    return float(ev(tree))
+    try:
+        return float(ev(tree))
+    except (ZeroDivisionError, OverflowError) as exc:
+        # 1/0 or 1e308 ** 2 must surface as rule data fallout, not a 500.
+        raise ValueError(f"formula math error: {exc}") from exc
 
 
 def formula_fields(expr: str) -> set[str]:
@@ -169,6 +195,19 @@ def formula_fields(expr: str) -> set[str]:
     except SyntaxError:
         return set()
     return {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+
+
+def _validate_formula(expr: str) -> None:
+    """Shared config-time formula checks (length, syntax, dunder names)."""
+    if len((expr or "").strip()) > MAX_FORMULA_LEN:
+        raise ValueError(f"formula too long (max {MAX_FORMULA_LEN} chars)")
+    try:
+        tree = ast.parse((expr or "").strip(), mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"invalid formula: {exc.msg}") from exc
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and "__" in node.id:
+            raise ValueError(f"forbidden name {node.id!r} in formula")
 
 
 # ----------------------------------------------------------------- validation
@@ -232,9 +271,9 @@ def validate_rules(rules: object, schema: list[dict]) -> None:
                 if not isinstance(r["formula"], str):
                     raise ValueError(f"{ctx} ({rid}): formula must be a string")
                 try:
-                    ast.parse(r["formula"].strip(), mode="eval")
-                except SyntaxError as exc:
-                    raise ValueError(f"{ctx} ({rid}): invalid formula: {exc.msg}") from exc
+                    _validate_formula(r["formula"])
+                except ValueError as exc:
+                    raise ValueError(f"{ctx} ({rid}): {exc}") from exc
                 unknown = formula_fields(r["formula"]) - names
                 if unknown:
                     raise ValueError(f"{ctx} ({rid}): formula references unknown fields: {sorted(unknown)}")

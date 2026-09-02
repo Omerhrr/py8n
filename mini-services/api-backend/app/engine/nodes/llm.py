@@ -56,7 +56,7 @@ class LlmChatNode(BaseNode):
                 raise NodeExecutionError("openai_compatible provider requires a credential")
             from ...services.crypto import decrypt_credential
 
-            cred = await decrypt_credential(context, p.credential_id)
+            cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
             if cred.get("type") != "openai_compatible":
                 raise NodeExecutionError("Selected credential is not of type openai_compatible")
             base = (cred.get("base_url") or "").rstrip("/")

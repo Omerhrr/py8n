@@ -75,6 +75,7 @@ class ExecuteWorkflowNode(BaseNode):
             execution_id=uuid.uuid4().hex,
             depth=context.depth + 1,
             honor_pinned=context.honor_pinned,  # v17: manual chains honor pins, production never does
+            owner_id=context.owner_id,  # audit hardening: subflows run in the parent's tenant
         )
         if not p.wait_for_completion:
             return self._single({"subworkflow": {"id": workflow.id, "name": workflow.name}, "queued": True})

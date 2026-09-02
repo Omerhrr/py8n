@@ -126,7 +126,7 @@ function pasteSelection() {
   pasteSeq += 1
   const idMap: Record<string, string> = {}
   const newSpecs = clipboard.specs.map((s: any, i: number) => {
-    const id = `p_${Date.now().toString(36).slice(-4)}${pasteSeq}_${i}`
+    const id = `p_${uuid()}`
     idMap[s.id] = id
     return {
       ...JSON.parse(JSON.stringify(s)),
@@ -137,7 +137,7 @@ function pasteSelection() {
   })
   const newEdges = clipboard.edges
     .map((e: any, i: number) => ({
-      id: `e_p${pasteSeq}_${i}`,
+      id: `e_p${pasteSeq}_${i}_${uuid()}`,
       source: idMap[e.source],
       target: idMap[e.target],
       sourceHandle: e.sourceHandle || 'main',
@@ -305,6 +305,15 @@ onMounted(async () => {
 // ------------------------------------------------------------------
 // Canvas interactions
 // ------------------------------------------------------------------
+// Collision-proof element id - Math.random-based edge ids could (however
+// rarely) collide and corrupt the saved graph / undo snapshots.
+function uuid(): string {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
+  } catch { /* older browsers */ }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 onConnect((params: Connection) => {
   if (params.source === params.target) {
     toast('Self-connections are not allowed', 'error')
@@ -322,7 +331,7 @@ onConnect((params: Connection) => {
   }
   addEdges([
     {
-      id: `e_${Math.random().toString(36).slice(2, 10)}`,
+      id: `e_${uuid()}`,
       source: params.source!,
       target: params.target!,
       sourceHandle: params.sourceHandle || 'main',

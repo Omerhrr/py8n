@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onBeforeUnmount } from 'vue'
 import {
   Workflow as WorkflowIcon, Play, Plus, CheckCircle2, XCircle, Check,
   Clock, Webhook, ChevronRight, Activity, Sparkles, Trash2, Upload, Loader2,
@@ -451,6 +451,12 @@ function openCreateWorkflow() {
 onMounted(() => {
   document.addEventListener('click', onDocClick)
   loadAll()
+})
+
+// the document click listener closes the move-to-folder menu - drop it on
+// unmount or it lingers after leaving the page
+onBeforeUnmount(() => {
+  document.removeEventListener('click', onDocClick)
 })
 
 // ------------------------------------------------------------------ tag manager (v44)

@@ -66,15 +66,9 @@ async function doExtract() {
   result.value = null
   sentDataset.value = null
   try {
-    const config = useRuntimeConfig()
-    const mode = (config.public.gatewayMode as string) || 'gateway'
-    const apiPort = (config.public.apiPort as string) || '8000'
-    const url = mode === 'gateway'
-      ? `/api/v1/documents/extract?XTransformPort=${apiPort}`
-      : '/api/v1/documents/extract'
     const form = new FormData()
     form.append('file', file.value)
-    result.value = await $fetch<ExtractResult>(url, { method: 'POST', body: form })
+    result.value = await api.upload<ExtractResult>('/documents/extract', form)
     tab.value = result.value.tables.length ? 'tables' : 'text'
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Extraction failed'
@@ -88,17 +82,11 @@ async function sendToDataset() {
   sending.value = true
   error.value = null
   try {
-    const config = useRuntimeConfig()
-    const mode = (config.public.gatewayMode as string) || 'gateway'
-    const apiPort = (config.public.apiPort as string) || '8000'
-    const url = mode === 'gateway'
-      ? `/api/v1/documents/to-dataset?XTransformPort=${apiPort}`
-      : '/api/v1/documents/to-dataset'
     const form = new FormData()
     form.append('file', file.value)
     form.append('name', dsName.value.trim())
     form.append('description', dsDesc.value.trim())
-    const res = await $fetch<any>(url, { method: 'POST', body: form })
+    const res = await api.upload<any>('/documents/to-dataset', form)
     sentDataset.value = { id: res.dataset.id, name: res.dataset.name, row_count: res.dataset.row_count }
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'Could not create the dataset'

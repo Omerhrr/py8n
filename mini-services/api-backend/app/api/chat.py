@@ -25,6 +25,7 @@ from ..db import get_db
 from ..models import Workflow
 from ..services.events import get_event_bus
 from ..services.executor import _background_tasks, execute_workflow
+from ._ratelimit import rate_limit
 from .webhooks import WebhookResponder
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -105,7 +106,7 @@ def _chat_anchor(wf: Workflow, msg: ChatMessage) -> tuple[dict, dict]:
     return node, payload
 
 
-@router.post("/{workflow_id}", tags=["chat"])
+@router.post("/{workflow_id}", tags=["chat"], dependencies=[Depends(rate_limit("chat"))])
 async def send_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession = Depends(get_db)):
     wf = await _load_chat_workflow(workflow_id, db)
     node, trigger_payload = _chat_anchor(wf, msg)
@@ -203,7 +204,7 @@ def _sse_frame(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
-@router.post("/{workflow_id}/stream", tags=["chat"])
+@router.post("/{workflow_id}/stream", tags=["chat"], dependencies=[Depends(rate_limit("chat"))])
 async def stream_chat_message(workflow_id: str, msg: ChatMessage, db: AsyncSession = Depends(get_db)):
     # Validate BEFORE establishing the stream so clients get normal JSON errors.
     wf = await _load_chat_workflow(workflow_id, db)
