@@ -3,6 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import {
   Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
   Play, BarChart3, Table2, X, History, Undo2, Plus, Eye, Download, GitBranch, ChevronDown,
+  Activity, ShieldCheck, ShieldAlert, Trash as TrashIcon,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -123,7 +124,7 @@ async function loadProfile() {
 onMounted(async () => {
   await loadMeta()
   if (meta.value) {
-    await Promise.all([loadRows(), loadProfile(), loadVersions()])
+    await Promise.all([loadRows(), loadProfile(), loadVersions(), loadHealth()])
   }
 })
 
@@ -328,6 +329,165 @@ const dtypeColor: Record<string, string> = {
   datetime: 'text-violet-300 border-violet-500/30 bg-violet-500/10',
   text: 'text-zinc-300 border-zinc-700 bg-zinc-800/60',
 }
+
+// ------------------------------------------------------------------ v50: health
+interface HealthReport {
+  status: string
+  score: number
+  checked_rows: number
+  freshness: { last_write_at: string | null; age_minutes: number | null; tier: string }
+  volume: { rows: number; previous_rows: number | null; delta: number | null; delta_pct: number | null; versions: number }
+  schema: { columns: number; contract_present: boolean; contract_ok: boolean | null; contract_violations: any[]; contract_version: number }
+  quality: { score: number; null_rate_pct: number | null; worst_null_column: { column: string; null_pct: number } | null; duplicate_rows_pct: number | null; completeness_pct: number | null }
+  signals: { fresh: boolean; schema_valid: boolean; no_volume_shock: boolean }
+}
+
+const health = ref<HealthReport | null>(null)
+const loadingHealth = ref(false)
+
+const healthStatusStyle: Record<string, string> = {
+  healthy: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+  degraded: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  unhealthy: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+}
+const healthDot: Record<string, string> = {
+  healthy: 'bg-emerald-400', degraded: 'bg-amber-400', unhealthy: 'bg-rose-400',
+}
+
+async function loadHealth() {
+  if (!meta.value) return
+  loadingHealth.value = true
+  try {
+    health.value = await api.get<HealthReport>(`/datasets/${meta.value.id}/health`)
+  } catch {
+    health.value = null
+  } finally {
+    loadingHealth.value = false
+  }
+}
+
+function fmtAgeMin(m: number | null): string {
+  if (m === null || m === undefined) return 'never'
+  if (m < 1) return 'just now'
+  if (m < 60) return `${Math.round(m)} min ago`
+  if (m < 1440) return `${Math.round(m / 60)}h ago`
+  return `${Math.round(m / 1440)}d ago`
+}
+
+// ------------------------------------------------------------------ v50: data contract
+interface ContractCol { name: string; dtype: string; nullable: boolean; allowed?: string[] | null }
+interface ContractReport { present: boolean; columns: ContractCol[]; on_violation: string | null; version: number; ok?: boolean | null; violations?: any[] }
+
+const contract = ref<ContractReport | null>(null)
+const contractCols = ref<ContractCol[]>([])
+const contractOnViolation = ref<'warn' | 'error'>('warn')
+const contractOpen = ref(false)
+const loadingContract = ref(false)
+const savingContract = ref(false)
+const contractMsg = ref('')
+const contractErr = ref('')
+const checkingContract = ref(false)
+const contractCheckResult = ref<any>(null)
+
+const DTYPES = ['text', 'integer', 'number', 'boolean', 'datetime']
+
+async function loadContract() {
+  if (!meta.value) return
+  loadingContract.value = true
+  try {
+    const res = await api.get<ContractReport>(`/datasets/${meta.value.id}/contract`)
+    contract.value = res
+    contractCols.value = res.present ? res.columns.map(c => ({ ...c, allowed: c.allowed || null })) : []
+    contractOnViolation.value = (res.on_violation as any) || 'warn'
+  } catch (e: any) {
+    contractErr.value = e?.data?.detail || e?.message || 'Could not load the contract'
+  } finally {
+    loadingContract.value = false
+  }
+}
+
+function toggleContract() {
+  contractOpen.value = !contractOpen.value
+  if (contractOpen.value && !contract.value) loadContract()
+}
+
+function addContractColumn() {
+  contractCols.value.push({ name: '', dtype: 'text', nullable: true, allowed: null })
+}
+
+function removeContractColumn(i: number) {
+  contractCols.value.splice(i, 1)
+}
+
+function parseAllowed(raw: string): string[] | null {
+  const parts = raw.split(',').map(s => s.trim()).filter(Boolean)
+  return parts.length ? parts : null
+}
+
+function allowedText(col: ContractCol): string {
+  return (col.allowed || []).join(', ')
+}
+
+async function saveContract() {
+  if (!meta.value) return
+  savingContract.value = true
+  contractErr.value = ''
+  contractMsg.value = ''
+  contractCheckResult.value = null
+  try {
+    const payload = {
+      columns: contractCols.value
+        .filter(c => c.name.trim())
+        .map(c => ({
+          name: c.name.trim(),
+          dtype: c.dtype,
+          nullable: !!c.nullable,
+          ...(parseAllowed(allowedText(c) || '') ? { allowed: parseAllowed(allowedText(c)) } : {}),
+        })),
+      on_violation: contractOnViolation.value,
+    }
+    const res = await api.put<ContractReport>(`/datasets/${meta.value.id}/contract`, payload)
+    contract.value = res
+    contractCols.value = res.columns.map(c => ({ ...c, allowed: c.allowed || null }))
+    contractMsg.value = `Contract v${res.version} saved (${res.on_violation} mode) - every write is now checked`
+    await loadHealth()
+  } catch (e: any) {
+    contractErr.value = e?.data?.detail || e?.message || 'Could not save the contract'
+  } finally {
+    savingContract.value = false
+  }
+}
+
+async function deleteContract() {
+  if (!meta.value) return
+  savingContract.value = true
+  contractErr.value = ''
+  contractMsg.value = ''
+  try {
+    await api.del(`/datasets/${meta.value.id}/contract`)
+    contract.value = { present: false, columns: [], on_violation: null, version: 0 }
+    contractCols.value = []
+    contractMsg.value = 'Contract removed - writes are no longer gated'
+    await loadHealth()
+  } catch (e: any) {
+    contractErr.value = e?.data?.detail || e?.message || 'Could not remove the contract'
+  } finally {
+    savingContract.value = false
+  }
+}
+
+async function checkNow() {
+  if (!meta.value) return
+  checkingContract.value = true
+  contractErr.value = ''
+  try {
+    contractCheckResult.value = await api.post<any>(`/datasets/${meta.value.id}/contract/check`, { rows: [] })
+  } catch (e: any) {
+    contractErr.value = e?.data?.detail || e?.message || 'Check failed'
+  } finally {
+    checkingContract.value = false
+  }
+}
 </script>
 
 <template>
@@ -425,6 +585,32 @@ const dtypeColor: Record<string, string> = {
             <Plus v-else class="h-3 w-3" />
           </button>
         </span>
+      </div>
+
+      <!-- v50: health strip -->
+      <div v-if="health" class="flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3" :class="healthStatusStyle[health.status] || healthStatusStyle.healthy">
+        <span class="flex items-center gap-2 text-sm font-bold">
+          <span class="h-2.5 w-2.5 animate-pulse rounded-full" :class="healthDot[health.status] || healthDot.healthy" />
+          {{ health.status.toUpperCase() }} · {{ health.score }}/100
+        </span>
+        <span class="hidden h-4 w-px bg-current opacity-20 sm:block" />
+        <span class="flex items-center gap-1.5 text-[11px]">
+          <Activity class="h-3.5 w-3.5" />
+          {{ health.signals.fresh ? 'Fresh' : 'Stale' }} · written {{ fmtAgeMin(health.freshness.age_minutes) }}
+        </span>
+        <span class="flex items-center gap-1.5 text-[11px]">
+          <Table2 class="h-3.5 w-3.5" />
+          {{ health.signals.schema_valid ? 'Schema valid' : `Contract violated (${health.schema.contract_violations.length} rule${health.schema.contract_violations.length === 1 ? '' : 's'})` }}
+        </span>
+        <span class="flex items-center gap-1.5 text-[11px]">
+          <Rows3 class="h-3.5 w-3.5" />
+          {{ health.volume.rows.toLocaleString() }} rows<template v-if="health.volume.delta !== null"> · {{ health.volume.delta >= 0 ? '+' : '' }}{{ health.volume.delta }} vs prev</template>
+        </span>
+        <span v-if="health.quality.completeness_pct !== null" class="hidden items-center gap-1.5 text-[11px] lg:flex">
+          <BarChart3 class="h-3.5 w-3.5" />
+          quality {{ health.quality.score }}/100 · {{ health.quality.completeness_pct }}% filled<template v-if="health.quality.duplicate_rows_pct"> · {{ health.quality.duplicate_rows_pct }}% dupes</template>
+        </span>
+        <Loader2 v-if="loadingHealth" class="ml-auto h-3.5 w-3.5 animate-spin" />
       </div>
 
       <!-- schema chips -->
@@ -672,6 +858,153 @@ const dtypeColor: Record<string, string> = {
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- v50: data contract -->
+      <div class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+        <button class="flex w-full items-center justify-between border-b border-zinc-800/80 px-4 py-2.5 text-left" @click="toggleContract">
+          <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+            <component :is="contract?.present && contract.on_violation === 'error' ? ShieldAlert : ShieldCheck" class="h-3.5 w-3.5" :class="contract?.present ? (contract.on_violation === 'error' ? 'text-rose-400' : 'text-amber-400') : 'text-zinc-500'" />
+            Data contract
+          </h2>
+          <span class="flex items-center gap-2 text-[11px] text-zinc-500">
+            <template v-if="contract?.present">
+              v{{ contract.version }} · {{ contract.on_violation }} mode · every write is checked
+            </template>
+            <template v-else>No contract - writes are ungated</template>
+            <ChevronDown class="h-3.5 w-3.5 transition" :class="contractOpen && 'rotate-180'" />
+          </span>
+        </button>
+
+        <div v-if="contractOpen">
+          <p class="border-b border-zinc-800/60 bg-zinc-900/60 px-4 py-2.5 text-[11px] leading-relaxed text-zinc-400">
+            A contract is the schema this dataset promises: per column a type (castability-checked, so "7" counts as an
+            integer), nullability and an optional comma-separated allowed-value domain.
+            <b class="text-zinc-200">Error mode</b> hard-stops every write that violates it (workflows fail, the API returns 422);
+            <b class="text-zinc-200">warn mode</b> lets the write land and reports the violations on the output and in the health strip.
+          </p>
+
+          <p v-if="contractMsg" class="border-b border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-300">{{ contractMsg }}</p>
+          <p v-if="contractErr" class="border-b border-rose-500/20 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-300">{{ contractErr }}</p>
+
+          <div v-if="loadingContract" class="flex items-center justify-center py-6 text-zinc-500">
+            <Loader2 class="h-4 w-4 animate-spin" />
+          </div>
+
+          <div v-else class="px-4 py-4">
+            <div class="overflow-x-auto rounded-xl border border-zinc-800">
+              <table class="w-full text-left text-xs">
+                <thead class="bg-zinc-900/80 text-zinc-500">
+                  <tr>
+                    <th class="px-3 py-2 font-medium">Column</th>
+                    <th class="px-3 py-2 font-medium">Type</th>
+                    <th class="px-3 py-2 font-medium">Nullable</th>
+                    <th class="px-3 py-2 font-medium">Allowed values</th>
+                    <th class="px-3 py-2"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="(c, i) in contractCols" :key="i" class="border-t border-zinc-800/60">
+                    <td class="px-3 py-1.5">
+                      <input
+                        v-model="c.name"
+                        class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] outline-none focus:border-orange-500/60"
+                        placeholder="column_name"
+                      />
+                    </td>
+                    <td class="px-3 py-1.5">
+                      <select
+                        v-model="c.dtype"
+                        class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] outline-none focus:border-orange-500/60"
+                      >
+                        <option v-for="d in DTYPES" :key="d" :value="d">{{ d }}</option>
+                      </select>
+                    </td>
+                    <td class="px-3 py-1.5">
+                      <input v-model="c.nullable" type="checkbox" class="h-3.5 w-3.5 accent-orange-500" />
+                    </td>
+                    <td class="px-3 py-1.5">
+                      <input
+                        class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 font-mono text-[11px] outline-none placeholder:text-zinc-600 focus:border-orange-500/60"
+                        placeholder="e.g. active, inactive (blank = any)"
+                        :value="allowedText(c)"
+                        @input="c.allowed = parseAllowed($event.target.value)"
+                      />
+                    </td>
+                    <td class="px-3 py-1.5 text-right">
+                      <button class="rounded-lg border border-zinc-800 p-1 text-zinc-500 transition hover:border-rose-500/40 hover:text-rose-300" title="Remove column" @click="removeContractColumn(i)">
+                        <TrashIcon class="h-3.5 w-3.5" />
+                      </button>
+                    </td>
+                  </tr>
+                  <tr v-if="!contractCols.length">
+                    <td colspan="5" class="px-3 py-4 text-center text-[11px] text-zinc-500">No columns defined yet - add one, or mirror the current schema</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-sky-500/40 hover:text-sky-300"
+                @click="addContractColumn"
+              >
+                <Plus class="h-3.5 w-3.5" /> Add column
+              </button>
+              <button
+                class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500/40 hover:text-violet-300 disabled:opacity-50"
+                :disabled="checkingContract || !contract?.present"
+                title="Lint the CURRENT dataset contents against this contract"
+                @click="checkNow"
+              >
+                <Loader2 v-if="checkingContract" class="h-3.5 w-3.5 animate-spin" />
+                <Play v-else class="h-3.5 w-3.5" /> Check current data
+              </button>
+              <div class="flex-1"></div>
+              <label class="flex items-center gap-2 text-[11px] text-zinc-400">
+                On violation
+                <select
+                  v-model="contractOnViolation"
+                  class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] outline-none focus:border-orange-500/60"
+                >
+                  <option value="warn">warn (write + report)</option>
+                  <option value="error">error (hard-stop)</option>
+                </select>
+              </label>
+              <button
+                class="flex items-center gap-1.5 rounded-xl bg-orange-500 px-3.5 py-1.5 text-xs font-semibold text-white shadow-lg shadow-orange-500/20 transition hover:bg-orange-400 disabled:opacity-50"
+                :disabled="savingContract"
+                @click="saveContract"
+              >
+                <Loader2 v-if="savingContract" class="h-3.5 w-3.5 animate-spin" />
+                <ShieldCheck v-else class="h-3.5 w-3.5" />
+                Save contract
+              </button>
+              <button
+                v-if="contract?.present"
+                class="rounded-xl border border-zinc-800 px-3 py-1.5 text-xs font-medium text-zinc-400 transition hover:border-rose-500/40 hover:text-rose-300 disabled:opacity-50"
+                :disabled="savingContract"
+                title="Remove the contract - writes stop being gated"
+                @click="deleteContract"
+              >
+                Remove
+              </button>
+            </div>
+
+            <!-- check result -->
+            <div v-if="contractCheckResult" class="mt-3 rounded-xl border px-3.5 py-3 text-xs" :class="contractCheckResult.ok ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/30 bg-rose-500/10 text-rose-300'">
+              <p class="font-semibold">
+                {{ contractCheckResult.ok ? 'Current data satisfies the contract' : `Current data violates ${contractCheckResult.violations.length} rule${contractCheckResult.violations.length === 1 ? '' : 's'}` }}
+                <span class="font-normal opacity-70">({{ contractCheckResult.checked_rows }} rows checked · contract v{{ contractCheckResult.contract_version }})</span>
+              </p>
+              <div v-if="contractCheckResult.violations.length" class="mt-2 space-y-1">
+                <p v-for="(v, i) in contractCheckResult.violations" :key="i" class="font-mono text-[11px]">
+                  {{ v.column }} · {{ v.rule }} · {{ v.count }} row(s) · e.g. {{ v.samples.slice(0, 3).join(' | ') }}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 

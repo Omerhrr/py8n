@@ -68,6 +68,7 @@ from .api.auth import router as auth_router  # noqa: E402 (v37)
 from .api.credentials import router as credentials_router  # noqa: E402
 from .api.apps import router as apps_router  # noqa: E402
 from .api.artifacts import router as artifacts_router  # noqa: E402
+from .api.catalog import router as catalog_router  # noqa: E402 (v50)
 from .api.chat import router as chat_router  # noqa: E402
 from .api.dashboards import router as dashboards_router  # noqa: E402
 from .api.datasets import router as datasets_router  # noqa: E402
@@ -130,6 +131,7 @@ app.include_router(tags_router, prefix=API, dependencies=ENFORCED)  # v44
 app.include_router(notifications_router, prefix=API, dependencies=ENFORCED)  # v44
 app.include_router(models_router, prefix=API, dependencies=ENFORCED)  # v46
 app.include_router(reports_router, prefix=API, dependencies=ENFORCED)  # v48
+app.include_router(catalog_router, prefix=API, dependencies=ENFORCED)  # v50
 app.include_router(ws_router)  # /ws/...
 
 

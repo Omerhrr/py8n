@@ -10,9 +10,16 @@ GET    /datasets/{id}            metadata (by id or name)
 GET    /datasets/{id}/rows       paginated rows
 GET    /datasets/{id}/profile    per-column profiling stats
 GET    /datasets/{id}/export     download as csv/xlsx/json/parquet (v45)
-POST   /datasets/{id}/rows       append rows
+POST   /datasets/{id}/rows       append rows (contract-enforced, v50)
 PUT    /datasets/{id}            rename / re-describe
 DELETE /datasets/{id}            drop metadata + parquet file
+GET    /datasets/{id}/health     freshness/volume/schema/quality score (v50)
+GET    /datasets/{id}/contract   the data contract (v50)
+PUT    /datasets/{id}/contract   create/replace the contract (v50)
+DELETE /datasets/{id}/contract   drop the contract (v50)
+POST   /datasets/{id}/contract/check   validate rows or current data (v50)
+GET    /datasets/{id}/ingestion-states   incremental checkpoints (v50)
+DELETE /datasets/{id}/ingestion-states/{key}   reset a checkpoint (v50)
 
 Rows are stored as Parquet via DuckDB; SQL runs against every dataset
 registered as a view (name lowercased, non-alphanumerics folded to ``_``).
@@ -31,15 +38,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
-from ..models import Dataset, DatasetVersion
+from ..models import Dataset, DatasetVersion, IngestionState
 from ..schemas import (
+    ContractCheckIn,
+    ContractIn,
     DatasetCreate,
     DatasetOut,
     DatasetQueryIn,
     DatasetRowsIn,
     DatasetUpdate,
 )
+from ..services import contracts as contract_svc
 from ..services import datasets as ds_svc
+from ..services import health as health_svc
+from ..services import ingestion as ing_svc
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
@@ -237,7 +249,13 @@ async def export_dataset(
 async def append_rows(dataset_id: str, body: DatasetRowsIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _get_or_404(db, dataset_id, user)
     fresh = ds_svc.normalize_df(pd.DataFrame(body.rows))
-    await ds_svc.append_rows(db, row, fresh.to_dict(orient="records"))
+    records = fresh.to_dict(orient="records")
+    # v50: the contract is checked before anything lands (same as the node)
+    try:
+        await contract_svc.enforce_on_rows(db, row, records, context="rows API")
+    except contract_svc.ContractViolation as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    await ds_svc.append_rows(db, row, records)
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -413,4 +431,94 @@ async def delete_dataset_version(
         f.unlink()
     await db.delete(v)
     await db.commit()
+    return None
+
+
+# ---------------------------------------------------------------- v50: health, contracts, checkpoints
+
+
+@router.get("/{dataset_id}/health")
+async def dataset_health(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Derived health report: freshness, volume, contract status, quality score.
+
+    Always computed from live state (versions, parquet, contract) - it can
+    never drift from reality because nothing is stored.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    return await health_svc.compute_health(db, row)
+
+
+@router.get("/{dataset_id}/contract")
+async def get_contract(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
+    return contract_svc.contract_report(await contract_svc.get_contract(db, row.id))
+
+
+@router.put("/{dataset_id}/contract")
+async def put_contract(dataset_id: str, body: ContractIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Create or replace the dataset's data contract (version bumps on replace)."""
+    row = await _get_or_404(db, dataset_id, user)
+    try:
+        saved = await contract_svc.put_contract(
+            db, row, [c.model_dump() for c in body.columns], body.on_violation,
+        )
+    except contract_svc.ContractError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    await db.commit()
+    return contract_svc.contract_report(saved)
+
+
+@router.delete("/{dataset_id}/contract", status_code=204)
+async def delete_contract(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, dataset_id, user)
+    existing = await contract_svc.get_contract(db, row.id)
+    if existing is not None:
+        await db.delete(existing)
+        await db.commit()
+    return None
+
+
+@router.post("/{dataset_id}/contract/check")
+async def check_contract(dataset_id: str, body: ContractCheckIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Check rows against the contract - or, with no rows, the CURRENT data.
+
+    Read-only: this is the lint button, not a write path. 400 when no
+    contract exists yet.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    existing = await contract_svc.get_contract(db, row.id)
+    if existing is None:
+        raise HTTPException(status_code=400, detail="This dataset has no contract to check against")
+    rows = body.rows
+    if not rows:
+        df = ds_svc.read_parquet_df(ds_svc.parquet_path(row.id)) if row.row_count else None
+        rows = df.to_dict(orient="records") if df is not None and len(df) else []
+    report = contract_svc.check_rows(rows, existing.columns_json or [])
+    report["on_violation"] = existing.on_violation
+    report["contract_version"] = int(existing.version or 1)
+    return report
+
+
+@router.get("/{dataset_id}/ingestion-states")
+async def list_ingestion_states(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Every incremental-ingestion checkpoint feeding this dataset."""
+    row = await _get_or_404(db, dataset_id, user)
+    states = (
+        await db.execute(
+            select(IngestionState)
+            .where(IngestionState.dataset_id == row.id)
+            .order_by(IngestionState.key)
+        )
+    ).scalars().all()
+    return [ing_svc.state_out(s) for s in states]
+
+
+@router.delete("/{dataset_id}/ingestion-states/{key}", status_code=204)
+async def reset_ingestion_state(dataset_id: str, key: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Reset a checkpoint - the next incremental run re-ingests from scratch."""
+    row = await _get_or_404(db, dataset_id, user)
+    st = await ing_svc.get_state(db, row.id, key)
+    if st is not None:
+        await db.delete(st)
+        await db.commit()
     return None

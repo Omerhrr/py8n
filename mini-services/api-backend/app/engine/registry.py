@@ -24,6 +24,7 @@ from .nodes.data import (
     SwitchNode,
     UnpivotNode,  # v45
 )
+from .nodes.connectors import DbSourceNode, S3SourceNode  # v50
 from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
 from .nodes.datascience import ChartNode, DriftCheckNode, ModelPredictNode, ModelTrainNode, PythonTransformNode  # v28 + v46 predict + v47 drift
 from .nodes.documents import DocumentExtractNode  # v32
@@ -34,7 +35,7 @@ from .nodes.http import HttpRequestNode
 from .nodes.loop import BatchTriggerNode, LoopOverItemsNode
 from .nodes.sticky import StickyNoteNode
 from .nodes.subflow import ExecuteWorkflowNode
-from .nodes.triggers import ChatTriggerNode, ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
+from .nodes.triggers import ChatTriggerNode, DatasetTriggerNode, ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
 from .nodes.wait import WaitForResumeNode
 from .nodes.webhook_respond import RespondToWebhookNode
 
@@ -51,6 +52,7 @@ for _cls in (
     WebhookTriggerNode,
     ErrorTriggerNode,
     ScheduleTriggerNode,
+    DatasetTriggerNode,  # v50: fire when a watched dataset gets a new version
     ChatTriggerNode,    # v25: conversational workflows - one run per chat message
     HttpRequestNode,
     ExecuteWorkflowNode,
@@ -67,9 +69,11 @@ for _cls in (
     SummarizeNode,        # v24: group-by aggregation
     CSVNode,              # v24: CSV parse/serialize
     DatasetReadNode,      # v27: pull rows from a stored dataset
-    DatasetWriteNode,     # v27: push items into a dataset (append/replace)
+    DatasetWriteNode,     # v27: push items into a dataset (append/replace/upsert/incremental)
     SqlQueryNode,         # v27: DuckDB SQL across all datasets
     DatasetExportNode,    # v45: dataset → downloadable csv/xlsx/json/parquet artifact
+    DbSourceNode,         # v50: read rows from sqlite/postgres/mysql via SQLAlchemy
+    S3SourceNode,         # v50: read csv/xlsx/json/parquet from S3/MinIO
     JoinNode,             # v45: pandas-backed inner/left/right/outer/anti join
     PivotNode,            # v45: rows → matrix
     UnpivotNode,          # v45: matrix → tidy rows (melt)

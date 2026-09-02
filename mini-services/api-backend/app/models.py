@@ -92,6 +92,10 @@ class Workflow(Base):
     def schedule_nodes(self) -> list[dict]:
         return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "schedule_trigger"]
 
+    def dataset_trigger_nodes(self) -> list[dict]:
+        """v50: dataset watchers - fire when a watched dataset version advances."""
+        return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "dataset_trigger"]
+
 
 class ExecutionLog(Base):
     """Persisted record of one workflow execution, including per-node runs."""
@@ -588,3 +592,68 @@ class GrantAuditEvent(Base):
     outcome: Mapped[str] = mapped_column(String(10), nullable=False, default="allowed")
     detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class DatasetContract(Base):
+    """Declarative data contract (v50) - the schema a dataset PROMISES.
+
+    One active contract per dataset. ``columns_json`` is a list of
+    ``{name, dtype, nullable, allowed}`` entries (dtype in
+    text|integer|number|boolean|datetime; ``allowed`` restricts the value
+    domain, e.g. status in [active, inactive]). Contracts are enforced at
+    WRITE time by the dataset_write node and the rows API, before rows land:
+
+    * ``on_violation="error"`` -> the write fails (pipeline hard-stop, the
+      data-quality gate made declarative and persistent);
+    * ``on_violation="warn"`` -> the write proceeds and the violations
+      report rides along on the output / response.
+
+    Checking is castability-based (``"12"`` IS an integer; ``"abc"`` is
+    not) so stringly-typed payloads from HTTP sources do not spuriously
+    fail, matching how the dataset engine itself normalizes types.
+    """
+
+    __tablename__ = "dataset_contracts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    columns_json: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # warn | error
+    on_violation: Mapped[str] = mapped_column(String(10), default="warn", nullable=False)
+    version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class IngestionState(Base):
+    """Incremental-ingestion cursor (v50) - where a pipeline left off.
+
+    One row per (dataset_id, key). ``key`` names the pipeline that feeds
+    the dataset (default ``"default"``; dataset_trigger nodes use
+    ``trigger:{node_id}``), so several pipelines can incrementally feed
+    one dataset without stepping on each other.
+
+    ``watermark`` is the high-water mark of the cursor column (e.g.
+    ``last_updated``): dataset_write in incremental mode only writes rows
+    STRICTLY beyond it (numeric > numeric when both parse as numbers,
+    else ISO-datetime/text comparison), then advances the mark to the
+    best value seen. The effect is the classic CDC checkpoint -
+    ``WHERE last_updated > {{ checkpoint }}`` - without needing the
+    source to remember anything. Resetting the row makes the next run
+    ingest from scratch.
+    """
+
+    __tablename__ = "ingestion_states"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    key: Mapped[str] = mapped_column(String(200), nullable=False, default="default")
+    watermark: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    runs: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    rows_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    __table_args__ = (UniqueConstraint("dataset_id", "key", name="uq_ingestion_state"),)

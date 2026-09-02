@@ -195,6 +195,55 @@ class ScheduleTriggerNode(BaseNode):
         )
 
 
+class DatasetTriggerNode(BaseNode):
+    """Fired when a watched dataset gets a NEW version (v50 orchestration).
+
+    The scheduler polls the dataset's version timeline (poll_seconds) while
+    the workflow is active; the first poll records the current version
+    WITHOUT firing (no stampede on activation), and every later new version
+    dispatches one run whose trigger payload carries the dataset meta and
+    the version that fired it. This is the primitive behind data DAGs:
+    "don't build customer_metrics until clean_customers succeeds" is just
+    this trigger on clean_customers plus the metric-building nodes.
+    """
+
+    type = "dataset_trigger"
+    name = "Dataset Trigger"
+    description = (
+        "Runs the workflow when a dataset gets a new version - the data-DAG "
+        "primitive (downstream pipelines wait for upstream writes). Exposes "
+        "{dataset, version, row_count, rows_delta, source}."
+    )
+    category = "triggers"
+    icon = "database-zap"
+    color = "#14b8a6"
+    inputs: ClassVar[list[Handle]] = []
+    outputs: ClassVar[list[Handle]] = [Handle("main", "Out")]
+
+    class ParamsModel(BaseModel):
+        dataset: str = Field(default="", description="Dataset name (or id) to watch")
+        poll_seconds: int = Field(
+            default=60,
+            ge=30,
+            description="How often to check for a new version (seconds)",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        tp = context.trigger_payload
+        return self._single(
+            {
+                "dataset": tp.get("dataset"),
+                "dataset_id": tp.get("dataset_id"),
+                "version": tp.get("version"),
+                "row_count": tp.get("row_count"),
+                "rows_delta": tp.get("rows_delta"),
+                "source": tp.get("source"),
+                "trigger_type": "dataset",
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+
 class ErrorTriggerNode(BaseNode):
     """Dedicated entry point for error-handler workflows (v22).
 

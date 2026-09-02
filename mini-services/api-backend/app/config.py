@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.49.0"
+    version: str = "1.50.0"
     # Audit hardening: dev-only convenience surfaces default OFF. Production
     # docker-compose already pins PY8N_DEBUG=false explicitly.
     debug: bool = False

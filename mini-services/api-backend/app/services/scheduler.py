@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..db import AsyncSessionLocal
 from ..models import Workflow
@@ -71,8 +71,122 @@ async def _fire_scheduled_workflow(workflow_id: str, node_id: str) -> None:
         logger.exception("Scheduled execution failed for workflow %s", workflow_id)
 
 
+async def _poll_dataset_trigger(workflow_id: str, node_id: str) -> None:
+    """Job callback for dataset_trigger nodes (v50): fire on a new version.
+
+    The cursor is an IngestionState row keyed ``trigger:{node_id}`` on the
+    watched dataset. The FIRST poll records the current version without
+    firing (activating a watcher must not stampede), and every poll after
+    that fires exactly one run when the latest version moves past it. The
+    cursor advance happens BEFORE dispatch so a slow run can never double-
+    fire the same version; a FAILED run still consumed its trigger (the
+    error-workflow binding / notification rules handle that case).
+    """
+    from sqlalchemy import select as _select
+
+    from ..models import Dataset, DatasetVersion, IngestionState
+    from .dispatcher import dispatch_execution
+    from .ingestion import state_key, watermark_gt
+
+    async with AsyncSessionLocal() as session:
+        wf = (
+            await session.execute(select(Workflow).where(Workflow.id == workflow_id))
+        ).scalar_one_or_none()
+        if wf is None or not wf.is_active:
+            return
+        node = next((n for n in wf.dataset_trigger_nodes() if n["id"] == node_id), None)
+        if node is None:
+            return  # node was removed; job will be resynced by the save handler
+        params = node.get("parameters") or {}
+        ref = str(params.get("dataset") or "").strip()
+        if not ref:
+            return
+        ds = await _resolve_dataset_for_trigger(session, ref, wf.owner_id)
+        if ds is None:
+            logger.warning("dataset_trigger %s on workflow %s: dataset %r not found", node_id, workflow_id, ref)
+            return
+        latest = (
+            await session.execute(
+                _select(DatasetVersion)
+                .where(DatasetVersion.dataset_id == ds.id)
+                .order_by(DatasetVersion.version.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        key = state_key(f"trigger:{node_id}")
+        st = (
+            await session.execute(
+                _select(IngestionState).where(
+                    IngestionState.dataset_id == ds.id,
+                    IngestionState.key == key,
+                )
+            )
+        ).scalar_one_or_none()
+        latest_v = str(latest.version) if latest is not None else None
+        if st is None:
+            st = IngestionState(
+                dataset_id=ds.id,
+                owner_id=wf.owner_id,
+                key=key,
+                watermark=latest_v,
+            )
+            session.add(st)
+            await session.commit()
+            return  # first sight: arm the watcher, do not fire
+        if latest is None or not watermark_gt(latest_v, st.watermark):
+            return  # nothing new
+        st.watermark = latest_v
+        st.runs = int(st.runs or 0) + 1
+        st.rows_total = int(latest.row_count or 0)
+        st.last_run_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    try:
+        exec_id = await dispatch_execution(
+            workflow_id,
+            trigger_type="dataset",
+            trigger_payload={
+                "dataset": ds.name,
+                "dataset_id": ds.id,
+                "version": int(latest.version),
+                "row_count": int(latest.row_count or 0),
+                "source": latest.source,
+                "node_id": node_id,
+            },
+            trigger_node_id=node_id,
+        )
+        logger.info(
+            "Dataset trigger fired: workflow %s on %s v%s (execution %s)",
+            workflow_id, ds.name, latest.version, exec_id,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Dataset-trigger dispatch failed for workflow %s", workflow_id)
+
+
+async def _resolve_dataset_for_trigger(session, ref: str, owner_id: str | None):
+    """id-first, then case-insensitive name - same resolution as the engine."""
+    from ..models import Dataset as _DS
+
+    row = (
+        await session.execute(select(_DS).where(_DS.id == ref))
+    ).scalar_one_or_none()
+    if row is not None:
+        if owner_id is not None and row.owner_id not in (None, owner_id):
+            return None
+        return row
+    row = (
+        await session.execute(
+            select(_DS).where(func.lower(_DS.name) == ref.lower())
+        )
+    ).scalar_one_or_none()
+    if row is not None and owner_id is not None and row.owner_id not in (None, owner_id):
+        return None
+    return row
+
+
 async def resync_workflow_jobs(workflow_id: str) -> None:
-    """Re-register APScheduler jobs for one workflow's schedule nodes."""
+    """Re-register APScheduler jobs for one workflow's schedule + dataset
+    trigger nodes."""
     if scheduler is None:
         return
     sched = scheduler
@@ -107,6 +221,23 @@ async def resync_workflow_jobs(workflow_id: str) -> None:
             logger.info("Registered schedule job %s (%s)", job_id(workflow_id, node["id"]), mode)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Could not register schedule job for node %s: %s", node["id"], exc)
+
+    # v50: dataset watchers - one polling job per dataset_trigger node
+    for node in wf.dataset_trigger_nodes():
+        params = node.get("parameters") or {}
+        try:
+            seconds = max(30, int(params.get("poll_seconds") or 60))
+            sched.add_job(
+                _poll_dataset_trigger,
+                trigger=IntervalTrigger(seconds=seconds),
+                id=job_id(workflow_id, node["id"]),
+                args=[workflow_id, node["id"]],
+                replace_existing=True,
+                misfire_grace_time=60,
+            )
+            logger.info("Registered dataset-trigger job %s (every %ss)", job_id(workflow_id, node["id"]), seconds)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not register dataset-trigger job for node %s: %s", node["id"], exc)
 
 
 async def resync_all_jobs() -> None:

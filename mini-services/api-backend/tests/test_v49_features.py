@@ -51,10 +51,10 @@ def test_v49_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] == "1.49.0", res.json()
+            assert res.json()["version"] >= "1.49.0", res.json()
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
-            assert len(defs) >= 47, f"v49 adds no nodes; expected at least 47 types, got {len(defs)}"
+            assert len(defs) >= 47, f"v49 pin: expected at least 47 types, got {len(defs)}"
 
     try:
         asyncio.run(_go())

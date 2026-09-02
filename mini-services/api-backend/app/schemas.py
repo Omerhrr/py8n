@@ -420,3 +420,23 @@ class DashboardOut(BaseModel):
     share_token: str | None = None  # v47: owner-facing; runtime payloads omit it
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+# ---------------------------------------------------------------- v50
+class ContractColumnIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    dtype: str = Field(default="text", description="text|integer|number|boolean|datetime")
+    nullable: bool = True
+    allowed: list | None = Field(default=None, description="Optional value domain")
+
+
+class ContractIn(BaseModel):
+    columns: list[ContractColumnIn] = Field(min_length=1)
+    on_violation: str = Field(default="warn", description="warn | error")
+
+
+class ContractCheckIn(BaseModel):
+    rows: list[dict] = Field(
+        default_factory=list,
+        description="Rows to check; empty = check the dataset's CURRENT contents",
+    )
