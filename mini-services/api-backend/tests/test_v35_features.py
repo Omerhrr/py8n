@@ -13,6 +13,7 @@ Three concerns:
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import httpx
 
@@ -23,7 +24,8 @@ API = "http://testserver/api/v1"
 EM = "\u2014"  # -
 EN = "\u2013"  # -
 
-REPO_ROOT = "/home/z/my-project"
+# <repo>/mini-services/api-backend/tests/test_v35_features.py -> <repo>
+REPO_ROOT = str(Path(__file__).resolve().parents[3])
 
 # product source only (what ships to users); build dirs, artifacts and the
 # platform's own skills/ tree are out of scope
