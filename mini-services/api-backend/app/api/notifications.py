@@ -29,7 +29,7 @@ router = APIRouter(prefix="/notifications", tags=["notifications"])
 
 class NotificationCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
-    events: list[str] = Field(min_length=1, max_length=3)
+    events: list[str] = Field(min_length=1, max_length=5)
     webhook_url: str = Field(min_length=1, max_length=2000)
     headers: dict[str, str] | None = Field(default=None, description="Extra headers, e.g. Authorization")
     workflow_id: str | None = Field(default=None, description="Scope to one workflow; NULL = all")
@@ -38,7 +38,7 @@ class NotificationCreate(BaseModel):
 
 class NotificationUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
-    events: list[str] | None = Field(default=None, min_length=1, max_length=3)
+    events: list[str] | None = Field(default=None, min_length=1, max_length=5)
     webhook_url: str | None = Field(default=None, min_length=1, max_length=2000)
     headers: dict[str, str] | None = None
     workflow_id: str | None = None

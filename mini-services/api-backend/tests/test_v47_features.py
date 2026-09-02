@@ -126,17 +126,18 @@ def _clf_rows(n: int = 80, shift: float = 0.0, seed: int = 7) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# 1) Definitions: 47 types, drift_check exposed, version pinned, templates ship
+# 1) Definitions: drift_check exposed, version floor, templates ship
+#    (strict pins move to the newest wave's test file - v48 convention)
 # ---------------------------------------------------------------------------
 def test_v47_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] == "1.47.0"
+            assert res.json()["version"] >= "1.47.0"
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]
-            assert len(types) == 47, f"expected 47 visible types at v47, got {len(types)}"
+            assert len(types) >= 47, f"expected >= 47 visible types at v47, got {len(types)}"
             by = {d["type"]: d for d in defs}
             assert "drift_check" in types
             props = set(by["drift_check"]["parameters_schema"]["properties"].keys())

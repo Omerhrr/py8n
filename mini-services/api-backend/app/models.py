@@ -313,7 +313,8 @@ class DatasetVersion(Base):
 class NotificationRule(Base):
     """Webhook-on-event rule (v44) - POST a JSON payload when runs finish.
 
-    Events: execution_failed | execution_succeeded | execution_cancelled.
+    Events: execution_failed | execution_succeeded | execution_cancelled |
+    drift_detected (v48, fired by the drift_check node).
     A rule may scope to one workflow (NULL = every workflow). Dispatch is
     fire-and-forget: a slow or dead webhook never slows or breaks a run.
     """
@@ -495,3 +496,64 @@ class PackRegistry(Base):
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_status: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ok|error
     last_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # import summary or {"error": ...}
+
+
+class ScheduledReport(Base):
+    """Scheduled export job (v48) - snapshot a dataset or dashboard on a cron.
+
+    When the APScheduler job fires, the service serializes the source
+    (dataset -> csv/xlsx/json/parquet, dashboard -> a JSON snapshot of every
+    rendered component) and stores it as a regular Artifact; the report row
+    keeps the last artifact id so the UI can deep-link the download.
+
+    Cron-only by design: a report export is a time-of-day concern, and a
+    single crontab string validates + previews with one code path.
+    """
+
+    __tablename__ = "scheduled_reports"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # dataset | dashboard
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="dataset")
+    source_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # dataset exports: csv | xlsx | json | parquet; dashboard exports: json
+    fmt: Mapped[str] = mapped_column(String(10), nullable=False, default="csv")
+    cron: Mapped[str] = mapped_column(String(100), nullable=False, default="0 6 * * *")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fire_count: Mapped[int] = mapped_column(Integer, default=0)
+    last_status: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ok|error
+    last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    last_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class AppShareGrant(Base):
+    """Row-level share grant (v48) - a named, scoped door into one app.
+
+    Where apps.share_token opens the whole runtime surface, a grant opens a
+    SLICE of it: every viewer holding the grant token only ever sees (and,
+    for ``eq`` grants, writes) rows matching ``row_filter``::
+
+        {"column": "region", "op": "eq",  "value": "eu"}
+        {"column": "region", "op": "in",  "value": ["eu", "us"]}
+        {"column": "region", "op": "neq", "value": "internal"}
+
+    Each grant gets its own token + share URL, so per-viewer links can be
+    issued and revoked independently. Grants never widen access for the
+    owner (the builder always sees all rows) and the legacy full-access
+    share token keeps working exactly as before.
+    """
+
+    __tablename__ = "app_share_grants"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    token: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    row_filter: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

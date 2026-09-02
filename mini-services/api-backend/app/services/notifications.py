@@ -1,7 +1,8 @@
 """Notification rules (v44) - webhook-on-event dispatch.
 
 A rule says: when one of my events happens (a run succeeded / failed / was
-cancelled), POST a JSON payload to my webhook URL. Dispatch is
+cancelled, or a drift_check node flagged model drift - v48), POST a JSON
+payload to my webhook URL. Dispatch is
 fire-and-forget: matching rules are collected synchronously, each delivery
 runs in its own task with a 10s timeout, and a dead webhook can never slow
 or break a run. Delivery stats (last_fired_at, fire_count, last_status,
@@ -30,7 +31,12 @@ from ..models import NotificationRule
 
 logger = logging.getLogger("py8n.notifications")
 
-NOTIFICATION_EVENTS = ("execution_succeeded", "execution_failed", "execution_cancelled")
+NOTIFICATION_EVENTS = (
+    "execution_succeeded",
+    "execution_failed",
+    "execution_cancelled",
+    "drift_detected",  # v48: fired by the drift_check node when PSI flags shift
+)
 
 FIRE_TIMEOUT_SECONDS = 10.0
 

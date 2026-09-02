@@ -841,8 +841,43 @@ class DriftCheckNode(BaseNode):
         report["model"] = {"id": info["id"], "name": info["name"], "version": info["version"]}
         report["mode"] = p.on_drift
 
+        shifted = [f["feature"] for f in report["features"] if f["status"] in ("drifted", "missing")]
+
+        # v48: drift alerts ride the notification rules system. Fired for BOTH
+        # modes (warn = visibility, error = the run fails right after this) so
+        # a "Model drift detected" rule on the Notifications page hears about
+        # every shift. Fire-and-forget: a dead webhook can never break the run.
+        if report["drift_detected"]:
+            try:
+                from ...services import notifications as notif_svc
+
+                await notif_svc.dispatch(
+                    "drift_detected",
+                    {
+                        "workflow_id": context.workflow_id,
+                        "workflow_name": context.workflow_name,
+                        "execution_id": context.execution_id,
+                        "status": "drift_detected",
+                        "error": None,
+                        "message": (
+                            f"Drift detected against {info['name']} v{info['version']}: "
+                            f"max PSI {report['overall_psi']} > threshold {p.threshold} "
+                            f"(features: {shifted})"
+                        ),
+                        "model_name": info["name"],
+                        "model_version": info["version"],
+                        "overall_psi": report["overall_psi"],
+                        "threshold": p.threshold,
+                        "drifted_features": shifted,
+                        "mode": p.on_drift,
+                    },
+                    workflow_id=context.workflow_id,
+                    workflow_owner_id=getattr(context, "owner_id", None),
+                )
+            except Exception:  # noqa: BLE001 - alerting must never break the run
+                pass
+
         if p.on_drift == "error" and report["drift_detected"]:
-            shifted = [f["feature"] for f in report["features"] if f["status"] in ("drifted", "missing")]
             raise NodeExecutionError(
                 f"Drift detected against {info['name']} v{info['version']}: "
                 f"max PSI {report['overall_psi']} > threshold {p.threshold} (features: {shifted})"

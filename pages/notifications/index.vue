@@ -49,19 +49,31 @@ const EVENT_LABELS: Record<string, string> = {
   execution_succeeded: 'Run succeeded',
   execution_failed: 'Run failed',
   execution_cancelled: 'Run cancelled',
+  drift_detected: 'Model drift detected',
 }
 
 const EVENT_STYLE: Record<string, string> = {
   execution_succeeded: 'bg-emerald-500/10 text-emerald-400',
   execution_failed: 'bg-rose-500/10 text-rose-400',
   execution_cancelled: 'bg-amber-500/10 text-amber-400',
+  drift_detected: 'bg-fuchsia-500/10 text-fuchsia-400',
 }
+
+// v48: the catalog is server-truth (GET /notifications/events) so new events
+// appear here without a frontend release; labels/styles above are cosmetic.
+const eventCatalog = ref<string[]>(Object.keys(EVENT_LABELS))
 
 async function loadAll() {
   loading.value = true
   try {
     rules.value = await api.get<NotificationRule[]>('/notifications')
     workflows.value = await api.get<{ id: string; name: string }[]>('/workflows')
+    try {
+      const cat = await api.get<{ events: string[] }>('/notifications/events')
+      if (Array.isArray(cat.events) && cat.events.length) eventCatalog.value = cat.events
+    } catch {
+      /* keep the static catalog */
+    }
   } finally {
     loading.value = false
   }
@@ -346,15 +358,15 @@ function fmtDate(iso: string | null) {
               <span class="mb-1.5 block text-xs font-medium text-zinc-400">Events</span>
               <div class="flex flex-wrap gap-2">
                 <button
-                  v-for="(label, ev) in EVENT_LABELS"
+                  v-for="ev in eventCatalog"
                   :key="ev"
                   class="rounded-xl border px-3 py-1.5 text-xs font-medium transition"
                   :class="formEvents.includes(ev)
-                    ? `${EVENT_STYLE[ev]} border-transparent ring-1 ring-orange-400/50`
+                    ? `${EVENT_STYLE[ev] || 'bg-orange-500/10 text-orange-400'} border-transparent ring-1 ring-orange-400/50`
                     : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:border-zinc-600'"
                   @click="formEvents = formEvents.includes(ev) ? formEvents.filter((x) => x !== ev) : [...formEvents, ev]"
                 >
-                  {{ label }}
+                  {{ EVENT_LABELS[ev] || ev }}
                 </button>
               </div>
             </div>

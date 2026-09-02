@@ -12,7 +12,12 @@ from .config import settings
 from .db import init_db
 from .seed import seed_if_empty
 from .services import retention
-from .services.scheduler import resync_all_jobs, shutdown_scheduler, start_scheduler
+from .services.scheduler import (
+    resync_all_jobs,
+    resync_all_report_jobs,
+    shutdown_scheduler,
+    start_scheduler,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("py8n")
@@ -29,6 +34,7 @@ async def lifespan(app: FastAPI):
         await session.commit()
     start_scheduler()
     await resync_all_jobs()  # register schedule_trigger jobs from saved workflows
+    await resync_all_report_jobs()  # v48: register scheduled report export jobs
     # v19: execution data retention - best-effort purge at boot + daily job
     try:
         await retention.purge_execution_data()
@@ -76,6 +82,7 @@ from .api.node_defs import router as node_defs_router  # noqa: E402
 from .api.notifications import router as notifications_router  # noqa: E402 (v44)
 from .api.packs import router as packs_router  # noqa: E402 (v39)
 from .api.registries import router as registries_router  # noqa: E402 (v43)
+from .api.reports import router as reports_router  # noqa: E402 (v48)
 from .api.tags import router as tags_router  # noqa: E402 (v44)
 from .api.schedules import router as schedules_router  # noqa: E402
 from .api.settings import router as settings_router  # noqa: E402
@@ -122,6 +129,7 @@ app.include_router(registries_router, prefix=API, dependencies=ENFORCED)  # v43
 app.include_router(tags_router, prefix=API, dependencies=ENFORCED)  # v44
 app.include_router(notifications_router, prefix=API, dependencies=ENFORCED)  # v44
 app.include_router(models_router, prefix=API, dependencies=ENFORCED)  # v46
+app.include_router(reports_router, prefix=API, dependencies=ENFORCED)  # v48
 app.include_router(ws_router)  # /ws/...
 
 

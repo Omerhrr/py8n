@@ -282,7 +282,7 @@ def test_v44_notification_rules_end_to_end():
                 assert r.json()["fire_count"] == 0
 
                 events = (await client.get("/notifications/events")).json()
-                assert set(events["events"]) == {"execution_succeeded", "execution_failed", "execution_cancelled"}
+                assert set(events["events"]) >= {"execution_succeeded", "execution_failed", "execution_cancelled", "drift_detected"}  # v48: +drift
 
                 run = await _run_and_wait(client, bad_id)
                 assert run["status"] == "error", run

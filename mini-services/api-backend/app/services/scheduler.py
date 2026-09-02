@@ -119,6 +119,68 @@ async def resync_all_jobs() -> None:
         await resync_workflow_jobs(wf.id)
 
 
+async def _fire_scheduled_report(report_id: str) -> None:
+    """Job callback for scheduled report exports (v48).
+
+    reports.run_report owns its session and never raises - a failing report
+    only marks its own row - so the scheduler cannot be wedged by a bad job.
+    """
+    from .reports import run_report
+
+    try:
+        result = await run_report(report_id)
+        if result.get("ok"):
+            logger.info("Scheduled report %s exported (artifact %s)", report_id, result.get("artifact_id"))
+        else:
+            logger.warning("Scheduled report %s failed: %s", report_id, result.get("error"))
+    except Exception:  # noqa: BLE001 - belt and braces
+        logger.exception("Scheduled report job %s crashed", report_id)
+
+
+async def resync_report_jobs(report_id: str) -> None:
+    """Re-register (or clear) the APScheduler job for one scheduled report."""
+    if scheduler is None:
+        return
+    job_id = f"report:{report_id}"
+    for job in list(scheduler.get_jobs()):
+        if job.id == job_id:
+            job.remove()
+
+    from ..models import ScheduledReport
+
+    async with AsyncSessionLocal() as session:
+        row = (
+            await session.execute(select(ScheduledReport).where(ScheduledReport.id == report_id))
+        ).scalar_one_or_none()
+    if row is None or not row.enabled:
+        return
+    try:
+        trigger = CronTrigger.from_crontab(row.cron or "0 6 * * *", timezone="UTC")
+        scheduler.add_job(
+            _fire_scheduled_report,
+            trigger=trigger,
+            id=job_id,
+            args=[report_id],
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+        logger.info("Registered report job %s (cron %s)", job_id, row.cron)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not register report job %s: %s", report_id, exc)
+
+
+async def resync_all_report_jobs() -> None:
+    """On startup: register jobs for every enabled scheduled report (v48)."""
+    from ..models import ScheduledReport
+
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(select(ScheduledReport).where(ScheduledReport.enabled.is_(True)))
+        ).scalars().all()
+    for row in rows:
+        await resync_report_jobs(row.id)
+
+
 # ----------------------------------------------------------------------
 # Schedule introspection (v7) - validation, human summaries, fire previews
 # ----------------------------------------------------------------------

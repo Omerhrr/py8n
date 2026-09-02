@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import {
   Loader2, Save, Rocket, ExternalLink, Database, Plus, Trash2, X, RefreshCw,
   Gauge, Table2, ClipboardList, BarChart3, ArrowLeft, Unlink, CircleAlert,
   ShieldCheck, Link2, TriangleAlert, PlusCircle, XCircle, TrendingUp, Filter,
-  Share2, Copy, Check,
+  Share2, Copy, Check, KeyRound, Power,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -471,6 +471,119 @@ async function copyShare() {
   }
   shareCopied.value = true
   setTimeout(() => (shareCopied.value = false), 2000)
+}
+
+// ------------------------------------------------- row-level grants (v48)
+// Named share doors: each grant pairs a token with a row filter, so a
+// viewer only ever sees (and for eq grants, writes) rows in their slice.
+interface ShareGrant {
+  id: string
+  name: string
+  token: string
+  row_filter: { column: string; op: string; value: unknown }
+  enabled: boolean
+  created_at: string | null
+  url: string
+}
+
+const grants = ref<ShareGrant[]>([])
+const grantsLoading = ref(false)
+const grantName = ref('')
+const grantColumn = ref('')
+const grantOp = ref<'eq' | 'in' | 'neq'>('eq')
+const grantValue = ref('')
+const grantBusy = ref(false)
+const grantError = ref('')
+const grantCopied = ref('')
+
+const schemaColumns = computed<string[]>(() =>
+  (schema.value || []).map((c: any) => c.name),
+)
+
+async function loadGrants() {
+  if (!appRow.value) return
+  grantsLoading.value = true
+  try {
+    grants.value = await api.get<ShareGrant[]>(`/apps/${appRow.value.id}/grants`)
+  } catch {
+    grants.value = []
+  } finally {
+    grantsLoading.value = false
+  }
+}
+
+watch(shareOpen, (open) => {
+  if (open) loadGrants()
+})
+
+function parseGrantValue(): unknown {
+  const raw = grantValue.value.trim()
+  if (grantOp.value === 'in') {
+    return raw.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  if (raw === 'true') return true
+  if (raw === 'false') return false
+  if (raw !== '' && !Number.isNaN(Number(raw))) return Number(raw)
+  return raw
+}
+
+async function createGrant() {
+  if (!appRow.value || !grantName.value.trim() || !grantColumn.value || !grantValue.value.trim()) return
+  grantBusy.value = true
+  grantError.value = ''
+  try {
+    await api.post(`/apps/${appRow.value.id}/grants`, {
+      name: grantName.value.trim(),
+      column: grantColumn.value,
+      op: grantOp.value,
+      value: parseGrantValue(),
+    })
+    grantName.value = ''
+    grantValue.value = ''
+    await loadGrants()
+  } catch (e: any) {
+    grantError.value = e?.data?.detail || e?.message || 'Create grant failed'
+  } finally {
+    grantBusy.value = false
+  }
+}
+
+async function toggleGrant(g: ShareGrant) {
+  if (!appRow.value) return
+  try {
+    await api.put(`/apps/${appRow.value.id}/grants/${g.id}`, { enabled: !g.enabled })
+    await loadGrants()
+  } catch (e: any) {
+    grantError.value = e?.data?.detail || e?.message || 'Toggle failed'
+  }
+}
+
+async function revokeGrant(g: ShareGrant) {
+  if (!appRow.value) return
+  if (!confirm(`Revoke grant "${g.name}"? Every link holding its token stops working now.`)) return
+  try {
+    await api.del(`/apps/${appRow.value.id}/grants/${g.id}`)
+    await loadGrants()
+  } catch (e: any) {
+    grantError.value = e?.data?.detail || e?.message || 'Revoke failed'
+  }
+}
+
+async function copyGrantUrl(g: ShareGrant) {
+  const url = `${window.location.origin}${g.url}`
+  try {
+    await navigator.clipboard.writeText(url)
+  } catch {
+    window.prompt('Copy the grant link:', url)
+  }
+  grantCopied.value = g.id
+  setTimeout(() => (grantCopied.value = ''), 2000)
+}
+
+function grantSummary(g: ShareGrant): string {
+  const f = g.row_filter || { column: '?', op: '?', value: '?' }
+  const val = Array.isArray(f.value) ? f.value.join(', ') : String(f.value)
+  return `${f.column} ${f.op === 'eq' ? '=' : f.op === 'neq' ? '!=' : 'in'} ${val}`
 }
 
 // ---------------------------------------------------------------- preview
@@ -1176,6 +1289,101 @@ function dtypeOf(col: string) {
           <p v-else-if="!isPublished" class="mt-2 text-[11px] text-zinc-600">Publish the app to open /run/{{ appRow?.slug }}.</p>
 
           <p class="mt-3 text-[11px] leading-relaxed text-zinc-500">Regenerating (disable + enable) revokes old links.</p>
+
+          <!-- v48: row-level share grants -->
+          <div class="mt-4 border-t border-zinc-800 pt-3">
+            <div class="flex items-center gap-2">
+              <KeyRound class="h-3.5 w-3.5 text-amber-400" />
+              <span class="text-[10px] font-bold uppercase tracking-wide text-zinc-400">Row-level grants</span>
+            </div>
+            <p class="mt-1 text-[11px] leading-relaxed text-zinc-500">
+              One door per viewer: a grant link shows only the rows matching its filter.
+              <span class="text-zinc-400">= eq</span> viewers can also add rows (the scope value is stamped on them);
+              <span class="text-zinc-400">in / !=</span> grants are read-only.
+            </p>
+
+            <div class="mt-2 space-y-1.5">
+              <div v-if="grantsLoading" class="grid place-items-center py-3 text-zinc-600"><Loader2 class="h-4 w-4 animate-spin" /></div>
+              <div
+                v-for="g in grants"
+                :key="g.id"
+                class="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2.5 py-2"
+              >
+                <div class="min-w-0 flex-1">
+                  <div class="flex items-center gap-1.5">
+                    <span class="truncate text-xs font-semibold">{{ g.name }}</span>
+                    <span
+                      class="rounded px-1 py-0.5 text-[9px] font-bold uppercase"
+                      :class="g.enabled ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-500'"
+                    >{{ g.enabled ? 'on' : 'off' }}</span>
+                  </div>
+                  <div class="truncate font-mono text-[10px] text-zinc-500">{{ grantSummary(g) }}</div>
+                </div>
+                <button
+                  class="shrink-0 rounded-lg p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-100"
+                  title="Copy grant link"
+                  @click="copyGrantUrl(g)"
+                >
+                  <Check v-if="grantCopied === g.id" class="h-3.5 w-3.5 text-emerald-400" />
+                  <Copy v-else class="h-3.5 w-3.5" />
+                </button>
+                <button
+                  class="shrink-0 rounded-lg p-1.5 text-zinc-400 transition hover:text-zinc-100"
+                  :title="g.enabled ? 'Disable grant' : 'Enable grant'"
+                  @click="toggleGrant(g)"
+                >
+                  <Power class="h-3.5 w-3.5" :class="g.enabled ? 'text-emerald-400' : ''" />
+                </button>
+                <button
+                  class="shrink-0 rounded-lg p-1.5 text-zinc-400 transition hover:text-rose-300"
+                  title="Revoke grant"
+                  @click="revokeGrant(g)"
+                >
+                  <Trash2 class="h-3.5 w-3.5" />
+                </button>
+              </div>
+              <p v-if="!grantsLoading && !grants.length" class="text-[11px] text-zinc-600">No grants yet - the full share link above opens every row.</p>
+            </div>
+
+            <div class="mt-2 grid grid-cols-2 gap-1.5">
+              <input
+                v-model="grantName"
+                placeholder="Name, e.g. EU team"
+                class="col-span-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none placeholder:text-zinc-600 focus:border-amber-500/50"
+              />
+              <select
+                v-model="grantColumn"
+                class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-2 py-1.5 text-xs outline-none focus:border-amber-500/50"
+              >
+                <option value="" disabled>Column</option>
+                <option v-for="c in schemaColumns" :key="c" :value="c">{{ c }}</option>
+              </select>
+              <select
+                v-model="grantOp"
+                class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-2 py-1.5 text-xs outline-none focus:border-amber-500/50"
+              >
+                <option value="eq">= (can write)</option>
+                <option value="in">in list (read-only)</option>
+                <option value="neq">≠ (read-only)</option>
+              </select>
+              <input
+                v-model="grantValue"
+                :placeholder="grantOp === 'in' ? 'eu, us' : 'eu'"
+                class="col-span-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-xs outline-none placeholder:text-zinc-600 focus:border-amber-500/50"
+                @keydown.enter="createGrant"
+              />
+              <button
+                class="col-span-2 flex items-center justify-center gap-1.5 rounded-xl bg-amber-500/90 py-1.5 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400 disabled:opacity-40"
+                :disabled="grantBusy || !grantName.trim() || !grantColumn || !grantValue.trim()"
+                @click="createGrant"
+              >
+                <Loader2 v-if="grantBusy" class="h-3.5 w-3.5 animate-spin" />
+                <Plus v-else class="h-3.5 w-3.5" />
+                Create grant link
+              </button>
+            </div>
+            <p v-if="grantError" class="mt-1.5 rounded-lg border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-[11px] text-rose-300">{{ grantError }}</p>
+          </div>
         </div>
       </div>
     </Teleport>

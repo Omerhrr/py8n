@@ -28,6 +28,13 @@ GET    /apps/{ref}/rules                 rules + the known ops/actions/events
 PUT    /apps/{ref}/rules                 replace all rules (validated)
 POST   /apps/{ref}/rules/test            dry-run a sample record against the rules
 
+Row-level share grants (v48) - named, per-viewer doors into the runtime:
+------------------------------------------------------------------------------
+GET    /apps/{ref}/grants                list grants (owner-only)
+POST   /apps/{ref}/grants                create {name, column, op, value}
+PUT    /apps/{ref}/grants/{gid}          rename / re-scope / disable
+DELETE /apps/{ref}/grants/{gid}          revoke (links die instantly)
+
 Every mutation commits explicitly (v4 lesson).
 """
 
@@ -37,16 +44,18 @@ import secrets
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..config import settings
 from ..db import get_db
-from ..models import App, Dataset, Workflow
+from ..models import App, AppShareGrant, Dataset, Workflow
 from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut, ShareToggle
 from ..services import apps as app_svc
 from ..services import datasets as ds_svc
+from ..services import grants as grant_svc
 from ..services import rules as rule_svc
 
 router = APIRouter(prefix="/apps", tags=["apps"])
@@ -107,7 +116,12 @@ async def _runtime_or_404(db: AsyncSession, slug: str) -> App:
 def _share_gate(row: App | Dashboard, request: Request) -> None:
     """v47 share-token ACL: when the owner has enabled share protection,
     public callers must present the token via ``?t=`` or ``X-Share-Token``.
-    NULL token = legacy open access (backward compatible)."""
+    NULL token = legacy open access (backward compatible).
+
+    v48: apps additionally accept a row-scoped grant token - the grant path
+    lives in :func:`_runtime_scope` which the app runtime endpoints use.
+    Dashboards keep the simple v47 gate.
+    """
     expected = getattr(row, "share_token", None)
     if not expected:
         return
@@ -116,12 +130,82 @@ def _share_gate(row: App | Dashboard, request: Request) -> None:
         raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
 
 
+class RuntimeScope:
+    """Resolved public access for one app runtime request (v48).
+
+    ``filter`` is None for full access (owner token, legacy open) and a
+    row_filter dict when the caller came in through a grant token.
+    """
+
+    def __init__(self, grant: AppShareGrant | None):
+        self.grant = grant
+        self.filter = (grant.row_filter or None) if grant is not None else None
+        self.name = grant.name if grant is not None else None
+
+    @property
+    def scoped(self) -> bool:
+        return self.filter is not None
+
+    def echo(self) -> dict | None:
+        if not self.scoped:
+            return None
+        return {
+            "grant": self.name,
+            "column": self.filter.get("column"),
+            "op": self.filter.get("op"),
+            "value": self.filter.get("value"),
+        }
+
+
+async def _runtime_scope(row: App, request: Request, db: AsyncSession) -> RuntimeScope:
+    """Resolve public access for an app runtime request (v48 supersedes the
+    v47 gate on the app surface, which was token-or-nothing):
+
+    1. the full-access share token still works exactly as before;
+    2. otherwise an enabled row-scoped grant token may answer;
+    3. any protection at all (share token OR grants) means an anonymous
+       caller without a token gets 403 - grants exist to fail closed;
+    4. no share token and no grants = legacy open access.
+    """
+    grants = (
+        await db.execute(
+            select(AppShareGrant).where(
+                AppShareGrant.app_id == row.id, AppShareGrant.enabled.is_(True)
+            )
+        )
+    ).scalars().all()
+
+    presented = request.query_params.get("t") or request.headers.get("x-share-token") or ""
+    if row.share_token and presented and secrets.compare_digest(presented, row.share_token):
+        return RuntimeScope(None)  # full access, unchanged v47 behaviour
+    if presented and grants:
+        for g in grants:
+            if secrets.compare_digest(presented, g.token):
+                return RuntimeScope(g)
+    if row.share_token or grants:
+        raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
+    return RuntimeScope(None)  # legacy open access
+
+
 def _form_comp(row: App) -> dict | None:
     """First form component, if any (v30 forms + rules key off it)."""
     for comp in (row.config or {}).get("components", []):
         if comp.get("type") == "form":
             return comp
     return None
+
+
+def _row_in_scope(dataset: Dataset, index: int, filt: dict) -> bool:
+    """v48: is RAW row ``index`` inside the grant's slice? Any failure to
+    evaluate fails CLOSED (a grant viewer can never touch a row we could
+    not prove is theirs)."""
+    try:
+        df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+        if index < 0 or index >= len(df):
+            return False
+        return bool(grant_svc.scope_mask(df, filt).iloc[index])
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def _validate_workflow_ref(db: AsyncSession, workflow_id: str | None) -> None:
@@ -305,11 +389,133 @@ async def toggle_share(app_ref: str, body: ShareToggle, user=Depends(get_optiona
     return await _out_with_dataset(db, row)
 
 
+# ------------------------------------------------------- grants (v48: row-level ACL)
+class GrantCreate(BaseModel):
+    """Body for POST /apps/{ref}/grants - one named, row-scoped share door."""
+
+    name: str = Field(min_length=1, max_length=120)
+    column: str = Field(min_length=1, max_length=200)
+    op: str = Field(default="eq", pattern="^(eq|in|neq)$")
+    value: object = Field(description="scalar for eq/neq, non-empty list for in")
+
+
+class GrantUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    column: str | None = Field(default=None, min_length=1, max_length=200)
+    op: str | None = Field(default=None, pattern="^(eq|in|neq)$")
+    value: object | None = None
+    enabled: bool | None = None
+
+
+def _grant_out(row: AppShareGrant, slug: str) -> dict:
+    return {
+        "id": row.id,
+        "app_id": row.app_id,
+        "name": row.name,
+        "token": row.token,  # owner-facing: the share link needs it
+        "row_filter": row.row_filter or {},
+        "enabled": bool(row.enabled),
+        "created_at": row.created_at,
+        "url": f"/run/{slug}?t={row.token}",
+    }
+
+
+@router.get("/{app_ref}/grants")
+async def list_grants(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Owner-facing list of the app's row-level share grants."""
+    row = await _get_or_404(db, app_ref, user)
+    grants = (
+        await db.execute(
+            select(AppShareGrant)
+            .where(AppShareGrant.app_id == row.id)
+            .order_by(AppShareGrant.created_at.asc())
+        )
+    ).scalars().all()
+    return [_grant_out(g, row.slug) for g in grants]
+
+
+@router.post("/{app_ref}/grants", status_code=201)
+async def create_grant(app_ref: str, body: GrantCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="Bind a dataset before creating grants")
+    try:
+        filt = grant_svc.validate_row_filter(
+            {"column": body.column, "op": body.op, "value": body.value},
+            dataset.schema_json or [],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    grant = AppShareGrant(
+        app_id=row.id,
+        name=body.name.strip(),
+        token=secrets.token_urlsafe(24),
+        row_filter=filt,
+        enabled=True,
+    )
+    grant.owner_id = row.owner_id
+    db.add(grant)
+    await db.commit()
+    await db.refresh(grant)
+    return _grant_out(grant, row.slug)
+
+
+@router.put("/{app_ref}/grants/{grant_id}")
+async def update_grant(
+    app_ref: str,
+    grant_id: str,
+    body: GrantUpdate,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update name/filter/enabled. Disabling keeps the row (re-enablable);
+    deleting the grant is the revocation that instantly kills the link."""
+    row = await _get_or_404(db, app_ref, user)
+    grant = await db.get(AppShareGrant, grant_id)
+    if grant is None or grant.app_id != row.id:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    data = body.model_dump(exclude_none=True)
+    if data:
+        dataset = await _dataset_for(db, row)
+        if dataset is None:
+            raise HTTPException(status_code=409, detail="App has no dataset bound")
+        merged = {
+            "column": data.get("column", (grant.row_filter or {}).get("column", "")),
+            "op": data.get("op", (grant.row_filter or {}).get("op", "eq")),
+            "value": data.get("value", (grant.row_filter or {}).get("value")),
+        }
+        try:
+            grant.row_filter = grant_svc.validate_row_filter(merged, dataset.schema_json or [])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if "name" in data:
+            grant.name = data["name"].strip()
+        if "enabled" in data:
+            grant.enabled = bool(data["enabled"])
+        db.add(grant)
+        await db.commit()
+        await db.refresh(grant)
+    return _grant_out(grant, row.slug)
+
+
+@router.delete("/{app_ref}/grants/{grant_id}")
+async def delete_grant(app_ref: str, grant_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Revoke one grant: every link holding its token stops working at once."""
+    row = await _get_or_404(db, app_ref, user)
+    grant = await db.get(AppShareGrant, grant_id)
+    if grant is None or grant.app_id != row.id:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    await db.delete(grant)
+    await db.commit()
+    return {"ok": True}
+
+
 # ----------------------------------------------------------------- runtime
 @router.get("/{slug}/runtime")
 async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48: token-or-grant resolver
     dataset = await _dataset_for(db, row)
     components = (row.config or {}).get("components", [])
     filters = _filters_from_request(request)  # v46: ?filter.COLUMN=value
@@ -326,20 +532,31 @@ async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db
         "chart": None,
         "components": [],  # v46: every component rendered server-side
         "filters": filters,
+        "scope": scope.echo(),  # v48: row-level grant echo for the UI chip
     }
     if dataset is not None:
         df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
-        payload["dataset"] = {
-            "id": dataset.id,
-            "name": dataset.name,
-            "schema_json": dataset.schema_json or [],
-            "row_count": dataset.row_count,
-        }
+        if scope.scoped:  # v48: grant viewers compute over THEIR slice only
+            df = grant_svc.apply_scope(df, scope.filter)
         rendered = app_svc.compute_components(components, df, filters)
         payload["components"] = rendered
         # v29 backward-compatible keys (stats dict + first chart)
         payload["stats"] = {c["id"]: c["value"] for c in rendered if c["type"] in ("stat", "kpi")}
         payload["chart"] = next((c for c in rendered if c["type"] == "chart" and c.get("chart_type") != "scatter"), None)
+        if scope.scoped:
+            payload["dataset"] = {
+                "id": dataset.id,
+                "name": dataset.name,
+                "schema_json": dataset.schema_json or [],
+                "row_count": int(len(df)),  # scoped viewers see their slice size
+            }
+        else:
+            payload["dataset"] = {
+                "id": dataset.id,
+                "name": dataset.name,
+                "schema_json": dataset.schema_json or [],
+                "row_count": dataset.row_count,
+            }
     return payload
 
 
@@ -418,7 +635,7 @@ async def test_rules(app_ref: str, body: RulesTestIn, user=Depends(get_optional_
 async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Standalone form descriptor for the public /f/{slug} page."""
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     form = _form_comp(row)
     if form is None:
         raise HTTPException(status_code=409, detail="App has no form component")
@@ -431,6 +648,7 @@ async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depend
             "fields": app_svc.form_fields(form),
         },
         "dataset": {"name": dataset.name, "row_count": dataset.row_count} if dataset else None,
+        "scope": scope.echo(),  # v48: grant context for the public form page
     }
 
 
@@ -438,15 +656,18 @@ async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depend
 async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Anonymous single-form submission - same pipeline as records POST."""
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     if _form_comp(row) is None:
         raise HTTPException(status_code=409, detail="App has no form component")
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
+    record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
+    if stamp_err:
+        raise HTTPException(status_code=403, detail=stamp_err)
     try:
         result = await app_svc.append_record(
-            dataset, body.record, dataset.schema_json or [],
+            dataset, record, dataset.schema_json or [],
             form=_form_comp(row), rules=(row.config or {}).get("rules", []),
             db=db,  # v44: form submissions land on the dataset version timeline
         )
@@ -490,11 +711,13 @@ async def runtime_records(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     dataset = await _dataset_for(db, row)
     if dataset is None:
         return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": []}
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+    if scope.scoped:  # v48: grant viewers page through their slice only
+        df = grant_svc.apply_scope(df, scope.filter)
     df = app_svc.search_sort_df(df, q, sort_by, sort_dir)  # v46: server-side search+sort
     page = df.iloc[offset : offset + limit]
     return {
@@ -504,19 +727,23 @@ async def runtime_records(
         "offset": offset,
         "limit": limit,
         "columns": [c["name"] for c in (dataset.schema_json or [])],
+        "scope": scope.echo(),  # v48
     }
 
 
 @router.post("/{slug}/records", status_code=201)
 async def create_record(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
+    record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
+    if stamp_err:
+        raise HTTPException(status_code=403, detail=stamp_err)
     try:
         result = await app_svc.append_record(
-            dataset, body.record, dataset.schema_json or [],
+            dataset, record, dataset.schema_json or [],
             form=_form_comp(row), rules=(row.config or {}).get("rules", []),
             db=db,  # v44: form submissions land on the dataset version timeline
         )
@@ -538,11 +765,13 @@ async def edit_record(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
+    if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+        raise HTTPException(status_code=404, detail="Record not found")
     try:
         result = await app_svc.update_record(
             dataset, index, body.record,
@@ -567,11 +796,13 @@ async def remove_record(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    scope = await _runtime_scope(row, request, db)  # v48
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
+    if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+        raise HTTPException(status_code=404, detail="Record not found")
     try:
         remaining = await app_svc.delete_record(dataset, index)
     except IndexError as exc:
