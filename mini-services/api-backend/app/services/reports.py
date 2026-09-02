@@ -31,7 +31,10 @@ from ..models import Dataset, ScheduledReport
 logger = logging.getLogger("py8n.reports")
 
 DATASET_FORMATS = ("csv", "xlsx", "json", "parquet")
-DASHBOARD_FORMATS = ("json",)
+# v49: dashboards grow "png" - a server-rendered image of every component
+# (services/report_images.py), produced from the SAME compute_config output
+# as the JSON snapshot.
+DASHBOARD_FORMATS = ("json", "png")
 
 
 def validate_cron(cron: str) -> str:
@@ -120,12 +123,22 @@ async def build_report_bytes(
                 loaders[dsid] = ds_svc.read_parquet_df(ds_svc.parquet_path(ds.id))
                 names[dsid] = ds.name
         rendered = dash_svc.compute_config(components, loaders)
+        generated_at = datetime.now(timezone.utc)
+        if fmt == "png":  # v49: image snapshot of the rendered board
+            from ..services.report_images import render_dashboard_png
+
+            return (
+                render_dashboard_png(board.name, rendered, generated_at=generated_at),
+                "image/png",
+                "png",
+                f"{board.slug or board.name}.report.png",
+            )
         import json as _json
 
         payload = {
             "dashboard": {"name": board.name, "slug": board.slug},
             "datasets": names,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "generated_at": generated_at.isoformat(),
             "filters": {},
             "components": rendered,
         }

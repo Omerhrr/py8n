@@ -123,5 +123,23 @@ export function useApi() {
     return `${PREFIX}${p}`
   }
 
-  return { api, wsUrl, srcUrl, download, mode }
+  // v49: fetch content as a blob object URL (report image previews). The
+  // CALLER revokes the URL when done - this helper only creates it.
+  async function blobUrl(path: string): Promise<string> {
+    const auth = useAuthStore()
+    const headers: Record<string, string> = {}
+    if (auth.token) headers.Authorization = `Bearer ${auth.token}`
+    const res = await fetch(httpUrl(path), { headers })
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`
+      try {
+        const body = await res.json()
+        detail = body?.detail || detail
+      } catch {}
+      throw new Error(detail)
+    }
+    return URL.createObjectURL(await res.blob())
+  }
+
+  return { api, wsUrl, srcUrl, download, blobUrl, mode }
 }

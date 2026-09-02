@@ -30,10 +30,15 @@ POST   /apps/{ref}/rules/test            dry-run a sample record against the rul
 
 Row-level share grants (v48) - named, per-viewer doors into the runtime:
 ------------------------------------------------------------------------------
-GET    /apps/{ref}/grants                list grants (owner-only)
+GET    /apps/{ref}/grants                list grants (owner-only, + access stats)
 POST   /apps/{ref}/grants                create {name, column, op, value}
 PUT    /apps/{ref}/grants/{gid}          rename / re-scope / disable
 DELETE /apps/{ref}/grants/{gid}          revoke (links die instantly)
+
+Grant audit log (v49) - every request through a protected runtime surface
+leaves one event (grant snapshot + action + allowed/denied), capped per app:
+------------------------------------------------------------------------------
+GET    /apps/{ref}/grants/audit          newest events (owner-only)
 
 Every mutation commits explicitly (v4 lesson).
 """
@@ -45,13 +50,13 @@ import secrets
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..config import settings
 from ..db import get_db
-from ..models import App, AppShareGrant, Dataset, Workflow
+from ..models import App, AppShareGrant, Dataset, GrantAuditEvent, Workflow
 from ..schemas import AppCreate, AppOut, AppRecordIn, AppUpdate, RulesTestIn, RulesPut, ShareToggle
 from ..services import apps as app_svc
 from ..services import datasets as ds_svc
@@ -157,7 +162,7 @@ class RuntimeScope:
         }
 
 
-async def _runtime_scope(row: App, request: Request, db: AsyncSession) -> RuntimeScope:
+async def _runtime_scope(row: App, request: Request, db: AsyncSession, action: str = "access") -> RuntimeScope:
     """Resolve public access for an app runtime request (v48 supersedes the
     v47 gate on the app surface, which was token-or-nothing):
 
@@ -166,6 +171,9 @@ async def _runtime_scope(row: App, request: Request, db: AsyncSession) -> Runtim
     3. any protection at all (share token OR grants) means an anonymous
        caller without a token gets 403 - grants exist to fail closed;
     4. no share token and no grants = legacy open access.
+
+    v49: rejected callers are recorded on the audit trail before the 403
+    (``action`` names the surface they were knocking on).
     """
     grants = (
         await db.execute(
@@ -183,8 +191,67 @@ async def _runtime_scope(row: App, request: Request, db: AsyncSession) -> Runtim
             if secrets.compare_digest(presented, g.token):
                 return RuntimeScope(g)
     if row.share_token or grants:
+        await _audit(
+            db, row, RuntimeScope(None), action, outcome="denied",
+            detail="invalid token" if presented else "missing token", force=True,
+        )
         raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
     return RuntimeScope(None)  # legacy open access
+
+
+GRANT_AUDIT_CAP = 500  # newest events kept per app
+
+
+async def _audit(
+    db: AsyncSession,
+    app_row: App,
+    scope: RuntimeScope,
+    action: str,
+    outcome: str = "allowed",
+    detail: str | None = None,
+    force: bool = False,
+) -> None:
+    """Append one share-surface audit event (v49).
+
+    Only PROTECTED surfaces are logged by default (share token set or the
+    caller arrived through a grant) - the log answers "what did shared
+    viewers see and do", not the owner's own builder traffic. ``force``
+    records a rejection when protection is known to exist (the caller just
+    failed the gate).
+
+    Owns its commit and never raises: an auditing hiccup must never fail,
+    or reverse, the request it is observing. Trims to the newest
+    GRANT_AUDIT_CAP events per app so a hot public link cannot grow the
+    table without bound.
+    """
+    try:
+        if not (force or app_row.share_token or scope.grant is not None):
+            return
+        db.add(
+            GrantAuditEvent(
+                app_id=app_row.id,
+                grant_id=scope.grant.id if scope.grant else None,
+                grant_name=scope.name,
+                action=action,
+                outcome=outcome,
+                detail=detail[:290] if detail else None,
+            )
+        )
+        await db.flush()
+        keep = (
+            select(GrantAuditEvent.id)
+            .where(GrantAuditEvent.app_id == app_row.id)
+            .order_by(GrantAuditEvent.created_at.desc(), GrantAuditEvent.id.desc())
+            .limit(GRANT_AUDIT_CAP)
+        )
+        await db.execute(
+            delete(GrantAuditEvent).where(
+                GrantAuditEvent.app_id == app_row.id, GrantAuditEvent.id.not_in(keep)
+            )
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 - auditing must never break the surface
+        await db.rollback()
 
 
 def _form_comp(row: App) -> dict | None:
@@ -407,7 +474,8 @@ class GrantUpdate(BaseModel):
     enabled: bool | None = None
 
 
-def _grant_out(row: AppShareGrant, slug: str) -> dict:
+def _grant_out(row: AppShareGrant, slug: str, stats: tuple = (0, None)) -> dict:
+    count, last_at = stats
     return {
         "id": row.id,
         "app_id": row.app_id,
@@ -417,12 +485,15 @@ def _grant_out(row: AppShareGrant, slug: str) -> dict:
         "enabled": bool(row.enabled),
         "created_at": row.created_at,
         "url": f"/run/{slug}?t={row.token}",
+        "access_count": count,  # v49 audit aggregates
+        "last_access_at": last_at,
     }
 
 
 @router.get("/{app_ref}/grants")
 async def list_grants(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    """Owner-facing list of the app's row-level share grants."""
+    """Owner-facing list of the app's row-level share grants, each with its
+    v49 audit aggregates (allowed access count + last access time)."""
     row = await _get_or_404(db, app_ref, user)
     grants = (
         await db.execute(
@@ -431,7 +502,56 @@ async def list_grants(app_ref: str, user=Depends(get_optional_user), db: AsyncSe
             .order_by(AppShareGrant.created_at.asc())
         )
     ).scalars().all()
-    return [_grant_out(g, row.slug) for g in grants]
+    stat_rows = (
+        await db.execute(
+            select(
+                GrantAuditEvent.grant_id,
+                func.count(),
+                func.max(GrantAuditEvent.created_at),
+            )
+            .where(
+                GrantAuditEvent.app_id == row.id,
+                GrantAuditEvent.grant_id.isnot(None),
+                GrantAuditEvent.outcome == "allowed",
+            )
+            .group_by(GrantAuditEvent.grant_id)
+        )
+    ).all()
+    stats = {gid: (count, last) for gid, count, last in stat_rows}
+    return [_grant_out(g, row.slug, stats.get(g.id, (0, None))) for g in grants]
+
+
+@router.get("/{app_ref}/grants/audit")
+async def grants_audit(
+    app_ref: str,
+    limit: int = Query(50, ge=1, le=200),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Owner-facing audit trail (v49): the newest share-surface access
+    events, newest first. Includes denials and post-revocation history
+    (grant_name is snapshotted on the event)."""
+    row = await _get_or_404(db, app_ref, user)
+    events = (
+        await db.execute(
+            select(GrantAuditEvent)
+            .where(GrantAuditEvent.app_id == row.id)
+            .order_by(GrantAuditEvent.created_at.desc(), GrantAuditEvent.id.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    return [
+        {
+            "id": e.id,
+            "grant_id": e.grant_id,
+            "grant_name": e.grant_name,
+            "action": e.action,
+            "outcome": e.outcome,
+            "detail": e.detail,
+            "created_at": e.created_at,
+        }
+        for e in events
+    ]
 
 
 @router.post("/{app_ref}/grants", status_code=201)
@@ -515,7 +635,7 @@ async def delete_grant(app_ref: str, grant_id: str, user=Depends(get_optional_us
 @router.get("/{slug}/runtime")
 async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48: token-or-grant resolver
+    scope = await _runtime_scope(row, request, db, "view_runtime")  # v48: token-or-grant resolver
     dataset = await _dataset_for(db, row)
     components = (row.config or {}).get("components", [])
     filters = _filters_from_request(request)  # v46: ?filter.COLUMN=value
@@ -557,6 +677,7 @@ async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db
                 "schema_json": dataset.schema_json or [],
                 "row_count": dataset.row_count,
             }
+    await _audit(db, row, scope, "view_runtime", detail=f"rows={payload['dataset']['row_count'] if payload['dataset'] else 0}")
     return payload
 
 
@@ -635,11 +756,12 @@ async def test_rules(app_ref: str, body: RulesTestIn, user=Depends(get_optional_
 async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Standalone form descriptor for the public /f/{slug} page."""
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "view_form")  # v48
     form = _form_comp(row)
     if form is None:
         raise HTTPException(status_code=409, detail="App has no form component")
     dataset = await _dataset_for(db, row)
+    await _audit(db, row, scope, "view_form")
     return {
         "app": {"name": row.name, "slug": row.slug, "description": row.description or ""},
         "form": {
@@ -656,7 +778,7 @@ async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depend
 async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     """Anonymous single-form submission - same pipeline as records POST."""
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "submit_form")  # v48
     if _form_comp(row) is None:
         raise HTTPException(status_code=409, detail="App has no form component")
     dataset = await _dataset_for(db, row)
@@ -664,6 +786,7 @@ async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncS
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
     if stamp_err:
+        await _audit(db, row, scope, "submit_form", outcome="denied", detail=stamp_err)
         raise HTTPException(status_code=403, detail=stamp_err)
     try:
         result = await app_svc.append_record(
@@ -696,6 +819,7 @@ async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncS
                 workflow_triggered = True
         except Exception:  # noqa: BLE001 - dispatch must never break the submit
             workflow_triggered = False
+    await _audit(db, row, scope, "submit_form")
     return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"], "workflow_triggered": workflow_triggered}
 
 
@@ -711,15 +835,17 @@ async def runtime_records(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "list_records")  # v48
     dataset = await _dataset_for(db, row)
     if dataset is None:
+        await _audit(db, row, scope, "list_records", detail="rows=0")
         return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": []}
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
     if scope.scoped:  # v48: grant viewers page through their slice only
         df = grant_svc.apply_scope(df, scope.filter)
     df = app_svc.search_sort_df(df, q, sort_by, sort_dir)  # v46: server-side search+sort
     page = df.iloc[offset : offset + limit]
+    await _audit(db, row, scope, "list_records", detail=f"rows={len(df)}")
     return {
         "rows": ds_svc.jsonable_rows(page),
         "row_count": int(len(df)),
@@ -734,12 +860,13 @@ async def runtime_records(
 @router.post("/{slug}/records", status_code=201)
 async def create_record(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "create_record")  # v48
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
     if stamp_err:
+        await _audit(db, row, scope, "create_record", outcome="denied", detail=stamp_err)
         raise HTTPException(status_code=403, detail=stamp_err)
     try:
         result = await app_svc.append_record(
@@ -752,6 +879,7 @@ async def create_record(slug: str, body: AppRecordIn, request: Request, db: Asyn
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
+    await _audit(db, row, scope, "create_record")
     return {"ok": True, "row_count": dataset.row_count, "warnings": result["warnings"]}
 
 
@@ -765,12 +893,13 @@ async def edit_record(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "update_record")  # v48
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+        await _audit(db, row, scope, "update_record", outcome="denied", detail=f"row {index} out of scope")
         raise HTTPException(status_code=404, detail="Record not found")
     try:
         result = await app_svc.update_record(
@@ -784,6 +913,7 @@ async def edit_record(
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
+    await _audit(db, row, scope, "update_record")
     return {"ok": True, "record": result["record"], "row_count": dataset.row_count, "warnings": result["warnings"]}
 
 
@@ -796,12 +926,13 @@ async def remove_record(
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
-    scope = await _runtime_scope(row, request, db)  # v48
+    scope = await _runtime_scope(row, request, db, "delete_record")  # v48
     _records_mutator_gate(row, user)  # audit hardening
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+        await _audit(db, row, scope, "delete_record", outcome="denied", detail=f"row {index} out of scope")
         raise HTTPException(status_code=404, detail="Record not found")
     try:
         remaining = await app_svc.delete_record(dataset, index)
@@ -810,4 +941,5 @@ async def remove_record(
     db.add(dataset)
     await db.commit()
     await db.refresh(dataset)
+    await _audit(db, row, scope, "delete_record")
     return {"ok": True, "row_count": remaining}

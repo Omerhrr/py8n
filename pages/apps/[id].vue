@@ -4,7 +4,7 @@ import {
   Loader2, Save, Rocket, ExternalLink, Database, Plus, Trash2, X, RefreshCw,
   Gauge, Table2, ClipboardList, BarChart3, ArrowLeft, Unlink, CircleAlert,
   ShieldCheck, Link2, TriangleAlert, PlusCircle, XCircle, TrendingUp, Filter,
-  Share2, Copy, Check, KeyRound, Power,
+  Share2, Copy, Check, KeyRound, Power, History, ChevronDown,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -484,10 +484,25 @@ interface ShareGrant {
   enabled: boolean
   created_at: string | null
   url: string
+  access_count?: number
+  last_access_at?: string | null
+}
+
+// v49: share-surface audit trail (newest events from /grants/audit)
+interface GrantEvent {
+  id: string
+  grant_id: string | null
+  grant_name: string | null
+  action: string
+  outcome: 'allowed' | 'denied'
+  detail: string | null
+  created_at: string | null
 }
 
 const grants = ref<ShareGrant[]>([])
 const grantsLoading = ref(false)
+const grantEvents = ref<GrantEvent[]>([])
+const showGrantActivity = ref(false)
 const grantName = ref('')
 const grantColumn = ref('')
 const grantOp = ref<'eq' | 'in' | 'neq'>('eq')
@@ -504,9 +519,15 @@ async function loadGrants() {
   if (!appRow.value) return
   grantsLoading.value = true
   try {
-    grants.value = await api.get<ShareGrant[]>(`/apps/${appRow.value.id}/grants`)
+    const [list, audit] = await Promise.all([
+      api.get<ShareGrant[]>(`/apps/${appRow.value.id}/grants`),
+      api.get<GrantEvent[]>(`/apps/${appRow.value.id}/grants/audit?limit=8`).catch(() => [] as GrantEvent[]),
+    ])
+    grants.value = list
+    grantEvents.value = audit
   } catch {
     grants.value = []
+    grantEvents.value = []
   } finally {
     grantsLoading.value = false
   }
@@ -584,6 +605,33 @@ function grantSummary(g: ShareGrant): string {
   const f = g.row_filter || { column: '?', op: '?', value: '?' }
   const val = Array.isArray(f.value) ? f.value.join(', ') : String(f.value)
   return `${f.column} ${f.op === 'eq' ? '=' : f.op === 'neq' ? '!=' : 'in'} ${val}`
+}
+
+// v49: audit helpers
+const ACTION_LABELS: Record<string, string> = {
+  view_runtime: 'viewed the app',
+  list_records: 'listed records',
+  create_record: 'created a record',
+  update_record: 'edited a record',
+  delete_record: 'deleted a record',
+  view_form: 'opened the form',
+  submit_form: 'submitted the form',
+  access: 'knocked on the door',
+}
+
+function eventLabel(e: GrantEvent): string {
+  const who = e.grant_name || 'unknown caller'
+  const what = ACTION_LABELS[e.action] || e.action
+  return `${who} ${what}`
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return ''
+  const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
 }
 
 // ---------------------------------------------------------------- preview
@@ -1318,6 +1366,11 @@ function dtypeOf(col: string) {
                     >{{ g.enabled ? 'on' : 'off' }}</span>
                   </div>
                   <div class="truncate font-mono text-[10px] text-zinc-500">{{ grantSummary(g) }}</div>
+                  <!-- v49: audit aggregates -->
+                  <div v-if="(g.access_count || 0) > 0" class="text-[10px] text-zinc-500">
+                    <span class="text-emerald-400/80">{{ g.access_count }} access{{ (g.access_count || 0) === 1 ? '' : 'es' }}</span>
+                    <span v-if="g.last_access_at"> · last {{ timeAgo(g.last_access_at) }}</span>
+                  </div>
                 </div>
                 <button
                   class="shrink-0 rounded-lg p-1.5 text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-100"
@@ -1343,6 +1396,36 @@ function dtypeOf(col: string) {
                 </button>
               </div>
               <p v-if="!grantsLoading && !grants.length" class="text-[11px] text-zinc-600">No grants yet - the full share link above opens every row.</p>
+            </div>
+
+            <!-- v49: share-surface audit trail -->
+            <div v-if="grantEvents.length" class="mt-2">
+              <button
+                class="flex w-full items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500 transition hover:text-zinc-300"
+                @click="showGrantActivity = !showGrantActivity"
+              >
+                <History class="h-3 w-3" />
+                Recent grant activity ({{ grantEvents.length }})
+                <ChevronDown class="h-3 w-3 transition-transform" :class="showGrantActivity && 'rotate-180'" />
+              </button>
+              <div v-if="showGrantActivity" class="mt-1.5 space-y-1">
+                <div
+                  v-for="ev in grantEvents"
+                  :key="ev.id"
+                  class="flex items-center gap-1.5 rounded-lg border border-zinc-800/60 bg-zinc-950/40 px-2 py-1"
+                >
+                  <span
+                    class="h-1.5 w-1.5 shrink-0 rounded-full"
+                    :class="ev.outcome === 'allowed' ? 'bg-emerald-400' : 'bg-rose-400'"
+                    :title="ev.outcome"
+                  />
+                  <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-400">
+                    {{ eventLabel(ev) }}
+                    <span v-if="ev.outcome === 'denied' && ev.detail" class="text-rose-300/70">({{ ev.detail }})</span>
+                  </span>
+                  <span class="shrink-0 text-[9px] text-zinc-600">{{ timeAgo(ev.created_at) }}</span>
+                </div>
+              </div>
             </div>
 
             <div class="mt-2 grid grid-cols-2 gap-1.5">

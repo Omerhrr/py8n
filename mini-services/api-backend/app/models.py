@@ -557,3 +557,34 @@ class AppShareGrant(Base):
     row_filter: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class GrantAuditEvent(Base):
+    """Share-surface access log (v49) - who used which door, and when.
+
+    One row per runtime-surface request on a PROTECTED app (share token or
+    grants exist): grant-token views/lists/submits land with their grant
+    snapshot, rejected callers (anonymous once protection exists, or a bad
+    token) land as outcome="denied" with no grant. ``grant_name`` is a
+    snapshot on purpose - the log must stay readable after a grant is
+    revoked and deleted. Legacy open apps (no share_token, no grants) are
+    never logged: the log exists to answer "what did shared viewers see?",
+    not to track the owner's own traffic.
+
+    Capped at the newest GRANT_AUDIT_CAP events per app (trimmed on insert)
+    so a hot public link can never grow the table without bound.
+    """
+
+    __tablename__ = "grant_audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    grant_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    grant_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # view_runtime | list_records | create_record | update_record |
+    # delete_record | view_form | submit_form | access (unknown attempt)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    # allowed | denied
+    outcome: Mapped[str] = mapped_column(String(10), nullable=False, default="allowed")
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

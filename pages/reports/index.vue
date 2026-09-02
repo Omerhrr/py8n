@@ -1,13 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import {
-  FileBarChart, Plus, Loader2, Trash2, XCircle, Play, Power, Download, CalendarClock, CheckCircle2,
+  FileBarChart, Plus, Loader2, Trash2, XCircle, Play, Power, Download, CalendarClock, CheckCircle2, Eye, X,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 // v48: scheduled report exports - point a cron at a dataset (csv/xlsx/json/
-// parquet) or a dashboard (JSON snapshot of every rendered component); the
-// platform writes an Artifact each run and the row remembers the last one.
+// parquet) or a dashboard (JSON snapshot or v49 PNG image of every rendered
+// component); the platform writes an Artifact each run and the row remembers
+// the last one.
 interface ScheduledReport {
   id: string
   name: string
@@ -26,7 +27,7 @@ interface ScheduledReport {
   next_runs?: string[]
 }
 
-const { api, download } = useApi()
+const { api, download, blobUrl } = useApi()
 const loading = ref(true)
 const reports = ref<ScheduledReport[]>([])
 const datasets = ref<{ id: string; name: string }[]>([])
@@ -49,7 +50,7 @@ const pageNotice = ref('')
 
 const FMTS_BY_TYPE: Record<string, string[]> = {
   dataset: ['csv', 'xlsx', 'json', 'parquet'],
-  dashboard: ['json'],
+  dashboard: ['json', 'png'],
 }
 
 const CRON_HINTS = [
@@ -176,6 +177,36 @@ async function downloadLast(r: ScheduledReport) {
   }
 }
 
+// v49: inline preview of dashboard PNG snapshots (image reports only)
+const previewUrl = ref('')
+const previewName = ref('')
+const previewLoading = ref(false)
+let previewReport: ScheduledReport | null = null
+
+async function openPreview(r: ScheduledReport) {
+  if (!r.last_artifact_id) return
+  previewLoading.value = true
+  pageError.value = ''
+  try {
+    const url = await blobUrl(`/artifacts/${r.last_artifact_id}/content`)
+    if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+    previewUrl.value = url
+    previewName.value = r.name
+    previewReport = r
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'Preview failed'
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+function closePreview() {
+  if (previewUrl.value) URL.revokeObjectURL(previewUrl.value)
+  previewUrl.value = ''
+  previewName.value = ''
+  previewReport = null
+}
+
 function fmtDate(iso: string | null) {
   if (!iso) return 'never'
   return new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
@@ -217,7 +248,8 @@ function nextRun(r: ScheduledReport): string {
           Each report snapshots its source on a crontab (UTC): datasets export as
           <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">csv / xlsx / json / parquet</code>,
           dashboards as a <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">JSON</code> snapshot
-          of every rendered component. Every run writes a regular Artifact and the row keeps the freshest one - use
+          or a <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">PNG</code> image of every rendered
+          component. Every run writes a regular Artifact and the row keeps the freshest one - use
           <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-zinc-300">Run now</code> to verify wiring instantly.
         </p>
       </div>
@@ -292,6 +324,16 @@ function nextRun(r: ScheduledReport): string {
                 <Loader2 v-if="running === r.id" class="h-3.5 w-3.5 animate-spin" />
                 <Play v-else class="h-3.5 w-3.5" />
                 Run now
+              </button>
+              <button
+                v-if="r.source_type === 'dashboard' && r.fmt === 'png' && r.last_artifact_id"
+                class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500/40 hover:text-violet-300"
+                title="Preview the latest image"
+                @click="openPreview(r)"
+              >
+                <Loader2 v-if="previewLoading" class="h-3.5 w-3.5 animate-spin" />
+                <Eye v-else class="h-3.5 w-3.5" />
+                Preview
               </button>
               <button
                 class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-40"
@@ -422,6 +464,36 @@ function nextRun(r: ScheduledReport): string {
             >
               <Loader2 v-if="formSaving" class="h-3.5 w-3.5 animate-spin" />
               Create report
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- v49: PNG preview modal -->
+    <Teleport to="body">
+      <div
+        v-if="previewUrl"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm"
+        @click.self="closePreview"
+      >
+        <div class="flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div class="flex items-center justify-between border-b border-zinc-800/80 px-5 py-3.5">
+            <div>
+              <h2 class="text-sm font-bold">{{ previewName }}</h2>
+              <p class="text-[11px] text-zinc-500">Dashboard snapshot - exactly what the cron export rendered</p>
+            </div>
+            <button class="rounded-lg p-1 text-zinc-500 hover:text-zinc-200" @click="closePreview"><X class="h-4 w-4" /></button>
+          </div>
+          <div class="overflow-auto p-4">
+            <img :src="previewUrl" :alt="previewName" class="mx-auto h-auto w-full rounded-xl border border-zinc-800" />
+          </div>
+          <div class="flex justify-end gap-2 border-t border-zinc-800/80 px-5 py-3">
+            <button
+              class="flex items-center gap-1.5 rounded-xl border border-zinc-800 px-3.5 py-2 text-xs font-medium text-zinc-300 transition hover:border-cyan-500/40 hover:text-cyan-300"
+              @click="previewReport && downloadLast(previewReport)"
+            >
+              <Download class="h-3.5 w-3.5" /> Download PNG
             </button>
           </div>
         </div>
