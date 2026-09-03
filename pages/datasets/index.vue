@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   Database, Upload, Plus, Trash2, Loader2, Search, ArrowRight,
-  FileSpreadsheet, Braces, Rows3, X,
+  FileSpreadsheet, Braces, Rows3, X, HardDrive,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -23,6 +23,24 @@ const loading = ref(true)
 const rows = ref<DatasetMeta[]>([])
 const search = ref('')
 const error = ref<string | null>(null)
+
+// v51: dataset storage backend badge (local disk / S3+MinIO / GCS)
+const storage = ref<{ kind: string; bucket?: string; endpoint_url?: string; ping?: boolean } | null>(null)
+const storageLabel = computed(() => {
+  if (!storage.value) return ''
+  const k = storage.value.kind
+  if (k === 's3') return `S3${storage.value.endpoint_url ? ' / MinIO' : ''}`
+  if (k === 'gcs') return 'GCS'
+  return 'Local'
+})
+
+async function loadStorage() {
+  try {
+    storage.value = await api.get('/storage')
+  } catch {
+    storage.value = null  // badge is additive - never block the page
+  }
+}
 
 // upload modal
 const showUpload = ref(false)
@@ -51,7 +69,10 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => {
+  load()
+  loadStorage()  // v51: backend badge
+})
 
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase()
@@ -158,6 +179,14 @@ function fmtDate(iso: string | null) {
           <h1 class="truncate text-base font-bold leading-tight">Datasets</h1>
           <p class="text-xs text-zinc-500">First-class tabular data - upload Excel/CSV, query with SQL, feed workflows</p>
         </div>
+        <span
+          v-if="storageLabel"
+          class="hidden items-center gap-1 rounded-full border border-zinc-800 bg-zinc-900/60 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wide sm:flex"
+          :class="storage?.ping ? 'text-emerald-400' : 'text-rose-400'"
+          :title="storage?.bucket ? `bucket: ${storage.bucket}` : 'dataset parquet storage backend'"
+        >
+          <HardDrive class="h-3 w-3" /> {{ storageLabel }}
+        </span>
         <button
           class="hidden items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600 sm:flex"
           @click="showCreate = true"

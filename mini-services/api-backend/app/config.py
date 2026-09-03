@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.50.0"
+    version: str = "1.51.0"
     # Audit hardening: dev-only convenience surfaces default OFF. Production
     # docker-compose already pins PY8N_DEBUG=false explicitly.
     debug: bool = False
@@ -95,6 +95,23 @@ class Settings(BaseSettings):
 
     # Dataset run_sql: hard cap on returned rows.
     max_sql_rows: int = 10_000
+
+    # ------------------------------------------------------------------
+    # v51: dataset storage backend - where dataset parquet blobs live.
+    # "local" (default) = data/datasets/ on disk, exactly as before;
+    # "s3" = AWS S3 or any S3-compatible store (set s3_endpoint_url for
+    # MinIO/Wasabi/R2); "gcs" = Google Cloud Storage. DuckDB remains the
+    # compute engine either way - backends only move parquet bytes.
+    # ------------------------------------------------------------------
+    storage_backend: str = "local"
+    s3_bucket: str = ""
+    s3_prefix: str = ""                      # optional key prefix inside the bucket
+    s3_endpoint_url: str = ""                # e.g. http://minio:9000 for MinIO
+    s3_region: str = ""
+    s3_access_key_id: str = ""               # empty = boto3 default chain
+    s3_secret_access_key: str = ""
+    gcs_bucket: str = ""
+    gcs_prefix: str = ""
 
 
 @lru_cache

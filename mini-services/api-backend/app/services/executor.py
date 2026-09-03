@@ -163,6 +163,8 @@ async def execute_workflow(
         respond_channel=respond_channel,
         # Audit hardening: node-level service calls scope to the workflow owner
         owner_id=workflow.owner_id,
+        # v51: workflow-level data-DAG execution policy (retry/timeout defaults)
+        workflow_policy=workflow.policy_json,
     )
     try:
         result = await runner.run()
@@ -362,6 +364,8 @@ async def resume_workflow(execution_id: str, token: str, payload: Any = None) ->
         max_output_capture=settings.max_output_capture,
         # Audit hardening: node-level service calls scope to the workflow owner
         owner_id=workflow_row.owner_id,
+        # v51: workflow-level data-DAG execution policy (retry/timeout defaults)
+        workflow_policy=workflow_row.policy_json,
         resume_state={
             "node_states": resume_meta.get("node_states") or {},
             "active_edges": resume_meta.get("active_edges") or [],

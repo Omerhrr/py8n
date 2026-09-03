@@ -34,6 +34,14 @@ class NodeSettings(BaseModel):
     retry_on_fail: bool = Field(default=False, description="Retry the node when it raises")
     max_retries: int = Field(default=2, ge=1, le=5, description="Extra attempts when retry_on_fail is on")
     retry_wait_ms: int = Field(default=500, ge=0, le=10_000, description="Pause between attempts (ms)")
+    # v51: exponential backoff multiplier for the retry pause (1.0 = fixed
+    # pause, 2.0 = doubling: 500ms, 1000ms, 2000ms... capped by the runner).
+    retry_backoff_multiplier: float = Field(
+        default=1.0,
+        ge=1.0,
+        le=10.0,
+        description="Backoff growth per retry attempt (1.0 = fixed wait, 2.0 = doubling)",
+    )
     continue_on_fail: bool = Field(
         default=False,
         description="On final failure, keep the flow alive: emit {'error': ...} on the main handle",

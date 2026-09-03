@@ -302,7 +302,7 @@ def _version_out(v: DatasetVersion) -> dict:
         "note": v.note,
         "created_at": v.created_at,
         "current": False,
-        "file_exists": ds_svc.version_file(v.dataset_id, v.version).exists(),
+        "file_exists": ds_svc.file_exists(ds_svc.version_file(v.dataset_id, v.version)),  # v51: backend-aware
     }
 
 
@@ -382,7 +382,7 @@ async def version_rows(
     """Preview rows stored in a snapshot (no restore needed to look)."""
     await _get_or_404(db, dataset_id, user)
     f = ds_svc.version_file(dataset_id, version)
-    if not f.exists():
+    if not ds_svc.file_exists(f):  # v51: backend-aware
         raise HTTPException(status_code=404, detail="Snapshot file not found (pruned or fileless)")
     df = ds_svc.read_parquet_df(f).head(limit)
     return {
@@ -427,8 +427,7 @@ async def delete_dataset_version(
     if v is None:
         raise HTTPException(status_code=404, detail="Version not found")
     f = ds_svc.version_file(row.id, version)
-    if f.exists():
-        f.unlink()
+    ds_svc.remove_file(f)  # v51: backend-aware blob delete
     await db.delete(v)
     await db.commit()
     return None

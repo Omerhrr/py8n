@@ -50,6 +50,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..models import Dataset, DatasetVersion
+from .storage import StorageError, get_backend
 
 
 # ----------------------------------------------------------------- paths
@@ -61,6 +62,77 @@ def datasets_dir() -> Path:
 
 def parquet_path(dataset_id: str) -> Path:
     return datasets_dir() / f"{dataset_id}.parquet"
+
+
+# ----------------------------------------------------------------- storage keys (v51)
+# Paths stay the service-facing address; the storage BACKEND decides where the
+# bytes live. The key is the path relative to the datasets root, so switching
+# local -> S3/MinIO/GCS is an env change, never a code change.
+def storage_key(path: Path) -> str:
+    """Blob key for a datasets-root path (e.g. ``abc.parquet`` or
+    ``versions/abc/v3.parquet``). Raises StorageError for paths that
+    escape the datasets root (defence in depth - every caller passes
+    parquet_path()/version_file() output)."""
+    try:
+        return path.resolve().relative_to(datasets_dir().resolve()).as_posix()
+    except ValueError as exc:
+        raise StorageError(f"path {path} is outside the datasets root") from exc
+
+
+def file_exists(path: Path) -> bool:
+    """Backend-aware existence check (local disk vs object store)."""
+    backend = get_backend()
+    if backend.kind == "local":
+        return path.exists()
+    try:
+        return backend.exists(storage_key(path))
+    except FileNotFoundError:
+        return False
+
+
+def read_file_bytes(path: Path) -> bytes:
+    """Backend-aware raw blob read (raises FileNotFoundError when absent)."""
+    backend = get_backend()
+    if backend.kind == "local":
+        if not path.exists():
+            raise FileNotFoundError(str(path))
+        return path.read_bytes()
+    return backend.read_bytes(storage_key(path))
+
+
+def copy_file(src: Path, dst: Path) -> None:
+    """Backend-aware blob copy (server-side copy on S3/GCS)."""
+    backend = get_backend()
+    if backend.kind == "local":
+        shutil.copyfile(src, dst)
+        return
+    backend.copy(storage_key(src), storage_key(dst))
+
+
+def remove_file(path: Path) -> None:
+    """Backend-aware blob delete (absent = no-op)."""
+    backend = get_backend()
+    if backend.kind == "local":
+        if path.exists():
+            path.unlink()
+        return
+    backend.delete(storage_key(path))
+
+
+def stage_local(path: Path) -> Path:
+    """Return a LOCAL path holding the blob (DuckDB only reads local files).
+
+    Local backend: the path itself. Remote: downloads to a short-lived
+    ``.staging-*.parquet`` file under the datasets root - the CALLER owns
+    unlinking it (see run_sql for the canonical cleanup pattern).
+    Raises FileNotFoundError when the blob is absent.
+    """
+    backend = get_backend()
+    if backend.kind == "local":
+        return path
+    tmp = datasets_dir() / f".staging-{uuid.uuid4().hex[:10]}.parquet"
+    tmp.write_bytes(read_file_bytes(path))
+    return tmp
 
 
 # ----------------------------------------------------------------- naming
@@ -137,25 +209,61 @@ def schema_of(df: pd.DataFrame) -> list[dict]:
 
 # ----------------------------------------------------------------- parquet io
 def write_parquet(df: pd.DataFrame, path: Path) -> None:
-    """Atomic parquet write via DuckDB (temp file + replace)."""
-    tmp = path.with_suffix(f".parquet.tmp-{uuid.uuid4().hex[:8]}")
+    """Parquet write via DuckDB, landing on the configured STORAGE BACKEND.
+
+    Local backend: atomic (temp file + os.replace) exactly as pre-v51.
+    Remote backends (S3/MinIO/GCS): DuckDB copies to a local staging file,
+    the backend uploads the bytes, the staging file is removed - so the
+    live local path NEVER exists for remote-backed datasets and existence
+    checks stay truthful through the backend.
+    """
+    backend = get_backend()
+    if backend.kind == "local":
+        tmp = path.with_suffix(f".parquet.tmp-{uuid.uuid4().hex[:8]}")
+        con = duckdb.connect()
+        try:
+            con.register("df_view", df)
+            con.execute(f"COPY df_view TO '{tmp.as_posix()}' (FORMAT PARQUET)")
+        finally:
+            con.close()
+        os.replace(tmp, path)
+        return
+
+    tmp = datasets_dir() / f".staging-{uuid.uuid4().hex[:10]}.parquet"
     con = duckdb.connect()
     try:
         con.register("df_view", df)
         con.execute(f"COPY df_view TO '{tmp.as_posix()}' (FORMAT PARQUET)")
     finally:
         con.close()
-    os.replace(tmp, path)
+    try:
+        backend.write_bytes(storage_key(path), tmp.read_bytes())
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def read_parquet_df(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        return pd.DataFrame()
+    backend = get_backend()
+    if backend.kind != "local":
+        try:
+            data = backend.read_bytes(storage_key(path))
+        except FileNotFoundError:
+            return pd.DataFrame()
+        tmp = datasets_dir() / f".staging-{uuid.uuid4().hex[:10]}.parquet"
+        tmp.write_bytes(data)
+        path = tmp
+        cleanup = True
+    else:
+        if not path.exists():
+            return pd.DataFrame()
+        cleanup = False
     con = duckdb.connect()
     try:
         return con.execute(f"SELECT * FROM read_parquet('{path.as_posix()}')").df()
     finally:
         con.close()
+        if cleanup:
+            path.unlink(missing_ok=True)
 
 
 # ----------------------------------------------------------------- sql gate
@@ -363,8 +471,8 @@ async def snapshot_version(
     vdir = version_dir(ds.id)
     vdir.mkdir(parents=True, exist_ok=True)
     src = parquet_path(ds.id)
-    if src.exists():
-        shutil.copyfile(src, version_file(ds.id, next_v))
+    if file_exists(src):
+        copy_file(src, version_file(ds.id, next_v))
 
     row = DatasetVersion(
         dataset_id=ds.id,
@@ -393,9 +501,7 @@ async def snapshot_version(
         .all()
     )
     for old in stale:
-        f = version_file(ds.id, old.version)
-        if f.exists():
-            f.unlink()
+        remove_file(version_file(ds.id, old.version))
         await db.delete(old)
     return row
 
@@ -404,7 +510,7 @@ async def restore_version(db: AsyncSession, ds: Dataset, version: int) -> Datase
     """Roll the dataset back to a snapshot; the restored state itself is
     recorded as a new version, so a restore is always undoable."""
     f = version_file(ds.id, version)
-    if not f.exists():
+    if not file_exists(f):
         raise ValueError(f"snapshot v{version} has no file to restore")
     df = read_parquet_df(f)
     write_parquet(df, parquet_path(ds.id))
@@ -414,10 +520,14 @@ async def restore_version(db: AsyncSession, ds: Dataset, version: int) -> Datase
 
 
 def delete_versions(dataset_id: str) -> None:
-    """Remove every snapshot file of a dataset (called on dataset delete)."""
-    vdir = version_dir(dataset_id)
-    if vdir.exists():
-        shutil.rmtree(vdir, ignore_errors=True)
+    """Remove every snapshot of a dataset (called on dataset delete)."""
+    backend = get_backend()
+    if backend.kind == "local":
+        vdir = version_dir(dataset_id)
+        if vdir.exists():
+            shutil.rmtree(vdir, ignore_errors=True)
+    else:
+        backend.delete_prefix(f"versions/{dataset_id}")
 
 
 async def append_rows(db: AsyncSession, ds: Dataset, items: list[dict]) -> int:
@@ -524,7 +634,11 @@ def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
         raise ValueError(f"dataset has {ds.row_count} rows - export cap is {MAX_EXPORT_ROWS}")
     df = read_parquet_df(path)
     if fmt == "parquet":
-        return path.read_bytes() if path.exists() else b"", EXPORT_CONTENT_TYPES["parquet"], "parquet"
+        try:
+            blob = read_file_bytes(path)
+        except FileNotFoundError:
+            blob = b""
+        return blob, EXPORT_CONTENT_TYPES["parquet"], "parquet"
     if len(df) == 0:
         empty = {"csv": b"", "xlsx": b"", "json": b"[]"}[fmt]
         return empty, EXPORT_CONTENT_TYPES[fmt], fmt
@@ -549,9 +663,7 @@ def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
 
 
 def delete_file(ds: Dataset) -> None:
-    path = parquet_path(ds.id)
-    if path.exists():
-        path.unlink()
+    remove_file(parquet_path(ds.id))
 
 
 # ----------------------------------------------------------------- sql
@@ -584,6 +696,7 @@ async def run_sql(db: AsyncSession, sql: str, owner_id: str | None = None) -> di
     rows = (await db.execute(q)).scalars().all()
 
     views: dict[str, str] = {}
+    staged: list[Path] = []  # v51: remote downloads live until the query ran
     con = duckdb.connect()
     try:
         for ds in rows:
@@ -592,10 +705,18 @@ async def run_sql(db: AsyncSession, sql: str, owner_id: str | None = None) -> di
             while view in views:
                 view = f"{base}_{n}"
                 n += 1
+            try:
+                local = stage_local(parquet_path(ds.id))
+            except FileNotFoundError:
+                # v51: a dataset whose blob is absent (created empty, or its
+                # backend holds nothing yet) is SKIPPED instead of failing
+                # the whole query - boards/SQL stay renderable, mirroring
+                # the tolerant compute contract everywhere else.
+                continue
             views[view] = ds.name
-            con.execute(
-                f"CREATE VIEW {view} AS SELECT * FROM read_parquet('{parquet_path(ds.id).as_posix()}')"
-            )
+            con.execute(f"CREATE VIEW {view} AS SELECT * FROM read_parquet('{local.as_posix()}')")
+            if local != parquet_path(ds.id):
+                staged.append(local)  # remote staging temp - DuckDB views are lazy
         started = time.perf_counter()
         result = con.execute(cleaned)
         columns = [d[0] for d in (result.description or [])]
@@ -613,6 +734,8 @@ async def run_sql(db: AsyncSession, sql: str, owner_id: str | None = None) -> di
         raise ValueError(f"SQL error: {exc}") from exc
     finally:
         con.close()
+        for tmp in staged:
+            tmp.unlink(missing_ok=True)
 
     out_rows: list[dict] = []
     for rec in records:

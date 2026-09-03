@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -35,6 +36,105 @@ Emitter = Callable[[dict], Awaitable[None]]
 
 class GraphValidationError(ValueError):
     pass
+
+
+# ----------------------------------------------------------------------
+# v51 data-DAG execution policies
+#
+# A workflow can carry a POLICY (workflow.policy_json) that becomes the
+# default retry/timeout behavior for EVERY node in it - so a chain of
+# dataset jobs (db_source -> dataset_write -> dataset_trigger -> ...)
+# survives transient failures (S3 throttling, a restarting database) and
+# cannot hang forever on a stuck connection without configuring each
+# node by hand. Node-level settings (retry_on_fail / timeout_ms) always
+# win over the workflow policy.
+#
+# retry_on="transient" retries only errors that look retryable
+# (timeouts, connection/5xx/throttling messages); permanent errors
+# (validation, data-contract violations - ValueError subclasses with no
+# transient marker) fail on the FIRST attempt, because retrying a
+# contract breach cannot ever succeed.
+# ----------------------------------------------------------------------
+_TRANSIENT_ERROR_RE = re.compile(
+    r"timeout|timed out|timed-out|connection|temporarily|unavailable|throttl|"
+    r"rate limit|rate-limit|too many requests|429|\b500\b|\b502\b|\b503\b|\b504\b|"
+    r"service unavailable|internal server error|bad gateway|gateway timeout|"
+    r"broken pipe|reset by peer|eof occurred|nodename nor servname|"
+    r"name or service not known|temporary failure",
+    re.IGNORECASE,
+)
+
+
+def _error_chain(exc: BaseException) -> list[BaseException]:
+    """exc + its __cause__ chain (bounded - no cycles, max depth 6)."""
+    out: list[BaseException] = []
+    cur: BaseException | None = exc
+    for _ in range(6):
+        if cur is None or cur in out:
+            break
+        out.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    return out
+
+
+def _is_permanent_error(exc: BaseException | None) -> bool:
+    """True when a retry cannot plausibly change the outcome.
+
+    Message-based transient detection runs FIRST across the whole CAUSE
+    chain (a ValueError carrying 'connection refused' from a connector IS
+    transient), then type-based permanence. This matters because nodes
+    wrap their errors: a data-contract breach surfaces as
+    NodeExecutionError('contract violation...') with the original
+    ValueError as __cause__ - and retrying a contract breach cannot ever
+    succeed.
+    """
+    if exc is None or isinstance(exc, asyncio.TimeoutError):
+        return False  # timeouts are the canonical transient
+    chain = _error_chain(exc)
+    for e in chain:
+        if isinstance(e, TemplateResolutionError):
+            return True  # a bad expression fails identically every attempt
+        if _TRANSIENT_ERROR_RE.search(str(e)):
+            return False
+    for e in chain:
+        if isinstance(e, (ValueError, TypeError, KeyError, AttributeError)):
+            return True
+    return False
+
+
+def _resolve_policy(cfg, workflow_policy: dict | None) -> dict:
+    """Effective execution policy for one node (node settings > workflow)."""
+    if cfg.retry_on_fail:
+        return {
+            "retries": cfg.max_retries,
+            "backoff_ms": cfg.retry_wait_ms,
+            "backoff_multiplier": getattr(cfg, "retry_backoff_multiplier", 1.0) or 1.0,
+            "backoff_max_ms": 30_000,
+            "timeout_ms": cfg.timeout_ms,
+            "retry_on": "all",
+            "source": "node",
+        }
+    pol = workflow_policy if isinstance(workflow_policy, dict) else None
+    if pol:
+        return {
+            "retries": max(0, min(int(pol.get("retries") or 0), 5)),
+            "backoff_ms": max(0, min(int(pol.get("backoff_ms") or 500), 60_000)),
+            "backoff_multiplier": max(1.0, min(float(pol.get("backoff_multiplier") or 2.0), 10.0)),
+            "backoff_max_ms": max(0, min(int(pol.get("backoff_max_ms") or 30_000), 300_000)),
+            "timeout_ms": cfg.timeout_ms
+            or max(0, min(int(float(pol.get("timeout_seconds") or 0) * 1000), 3_600_000)),
+            "retry_on": "transient" if pol.get("retry_on") == "transient" else "all",
+            "source": "workflow",
+        }
+    return {
+        "retries": 0,
+        "backoff_ms": cfg.retry_wait_ms,
+        "backoff_multiplier": 1.0,
+        "backoff_max_ms": 30_000,
+        "timeout_ms": cfg.timeout_ms,
+        "retry_on": "all",
+        "source": "node-default",
+    }
 
 
 class GraphRunner:
@@ -58,6 +158,7 @@ class GraphRunner:
         honor_pinned: bool | None = None,
         respond_channel: Any | None = None,
         owner_id: str | None = None,
+        workflow_policy: dict | None = None,
     ):
         self.graph = graph
         self.workflow_id = workflow_id
@@ -94,6 +195,9 @@ class GraphRunner:
         # execution context so owner-scoped service calls (datasets, SQL,
         # credentials, memory, env vars, subflows) can never cross tenants.
         self.owner_id = owner_id
+        # v51: workflow-level execution policy (retry/timeout defaults for
+        # every node that has not set its own) - the data-DAG chain setting.
+        self.workflow_policy = workflow_policy if isinstance(workflow_policy, dict) else None
         # Outputs of nodes that already ran in a PARENT run - seeded into the
         # context so loop bodies / sub-runs can reference upstream nodes.
         self.inherit_node_states: dict[str, dict] = inherit_node_states or {}
@@ -530,16 +634,28 @@ class GraphRunner:
             return
 
         cfg = node.settings
-        attempts = 1 + (cfg.max_retries if cfg.retry_on_fail else 0)
+        # v51: effective policy - node settings win, then the workflow-level
+        # data-DAG policy, then the plain defaults.
+        pol = _resolve_policy(cfg, self.workflow_policy)
+        attempts = 1 + int(pol["retries"])
         instance = cls(node)
 
         await self.emit(self._event("node_started", node_id=node.id, node_type=node.type, node_name=node.display_name, status="running"))
 
         t0 = time.monotonic()
         last_error: str | None = None
+        last_exc: BaseException | None = None
+        final_attempt = attempts  # v51: actual attempts used (early-stop on permanent)
         for attempt in range(attempts):
             if attempt:
-                await asyncio.sleep(cfg.retry_wait_ms / 1000)
+                # v51: exponential backoff - wait = backoff_ms * multiplier^(n-1),
+                # capped at backoff_max_ms (fixed wait when multiplier is 1.0,
+                # matching pre-v51 retry_wait_ms behavior exactly).
+                wait_ms = min(
+                    int(pol["backoff_ms"] * (pol["backoff_multiplier"] ** (attempt - 1))),
+                    int(pol["backoff_max_ms"]),
+                )
+                await asyncio.sleep(wait_ms / 1000)
                 # v38: make retries visible on the live stream (canvas + SSE/WS
                 # consumers ignore unknown kinds, so this is purely additive).
                 await self.emit(
@@ -551,27 +667,43 @@ class GraphRunner:
                         attempt=attempt + 1,
                         max_attempts=attempts,
                         last_error=last_error,
+                        wait_ms=wait_ms,  # v51: backoff used before this attempt
                     )
                 )
             try:
                 # v38: per-node wall-clock timeout. A timeout is an ordinary
                 # failure - the retry loop applies to it like any other error.
-                if cfg.timeout_ms > 0:
-                    result = await asyncio.wait_for(instance.run(context), timeout=cfg.timeout_ms / 1000)
+                if pol["timeout_ms"] > 0:
+                    result = await asyncio.wait_for(instance.run(context), timeout=pol["timeout_ms"] / 1000)
                 else:
                     result = await instance.run(context)
                 duration_ms = int((time.monotonic() - t0) * 1000)
                 await self._record(
                     context, node, "success", result.outputs, duration_ms, None,
-                    raw_output=result.raw_output, attempt=attempt + 1,
+                    raw_output=result.raw_output, attempt=attempt + 1, policy=pol,
                 )
                 return
-            except asyncio.TimeoutError:
-                last_error = f"timed out after {cfg.timeout_ms / 1000:g}s"
+            except asyncio.TimeoutError as exc:
+                last_error = f"timed out after {pol['timeout_ms'] / 1000:g}s"
+                last_exc = exc
             except TemplateResolutionError as exc:
                 last_error = str(exc)
+                last_exc = exc
             except Exception as exc:  # noqa: BLE001
                 last_error = f"{exc}"
+                last_exc = exc
+            # v51: retry_on="transient" stops the loop early on PERMANENT
+            # errors - a validation/contract breach cannot succeed on attempt
+            # 2, so the chain fails fast instead of burning the backoff wheel.
+            if attempt + 1 < attempts and pol["retry_on"] == "transient":
+                permanent = (
+                    False if isinstance(last_exc, asyncio.TimeoutError)
+                    else _is_permanent_error(last_exc)
+                )
+                if permanent:
+                    last_error = f"{last_error} (permanent error, retries skipped)"
+                    final_attempt = attempt + 1
+                    break
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         if cfg.fallback_enabled:
@@ -580,7 +712,7 @@ class GraphRunner:
             # is still recorded (status "error" on the node, run continues).
             await self._record(
                 context, node, "error", {"main": cfg.fallback_value}, duration_ms, last_error,
-                raw_output=cfg.fallback_value, continued=True, attempt=attempts, fallback=True,
+                raw_output=cfg.fallback_value, continued=True, attempt=final_attempt, fallback=True, policy=pol,
             )
             return
         if cfg.continue_on_fail:
@@ -588,10 +720,10 @@ class GraphRunner:
             payload = {"error": last_error, "failed_node": node.display_name}
             await self._record(
                 context, node, "error", {"main": payload}, duration_ms, last_error,
-                raw_output=payload, continued=True, attempt=attempts,
+                raw_output=payload, continued=True, attempt=final_attempt, policy=pol,
             )
             return
-        await self._record(context, node, "error", None, duration_ms, last_error, attempt=attempts)
+        await self._record(context, node, "error", None, duration_ms, last_error, attempt=final_attempt, policy=pol)
 
     async def _suspend(self, context: ExecutionContext, node: NodeSpec, started: float) -> dict:
         """Pause the run at a Wait for Resume node and persist everything needed
@@ -684,6 +816,7 @@ class GraphRunner:
         attempt: int = 1,
         pinned: bool = False,
         fallback: bool = False,
+        policy: dict | None = None,
     ) -> None:
         """Persist node run, update context state, activate edges, emit event.
 
@@ -738,6 +871,8 @@ class GraphRunner:
             run_record["attempts"] = attempt
         if pinned:
             run_record["pinned"] = True  # v17: output came from pinned data
+        if policy:  # v51: the execution policy this node ran under
+            run_record["policy"] = policy
         self.node_runs.append(run_record)
 
         await self.emit(

@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 
 def _normalize_tags(value: Any) -> list[str]:
@@ -32,6 +32,48 @@ def _normalize_tags(value: Any) -> list[str]:
 Tags = Annotated[list[str], BeforeValidator(_normalize_tags)]
 
 
+# ----------------------------------------------------------------------
+# v51: data-DAG execution policy - the workflow-level retry/timeout
+# defaults applied to every node that has not set its own. Validated here
+# once (create + update share the gate) so the runner can trust the shape.
+# ----------------------------------------------------------------------
+POLICY_KEYS = {
+    "retries": (int, 0, 5),
+    "backoff_ms": (int, 0, 60_000),
+    "backoff_multiplier": ((int, float), 1.0, 10.0),
+    "backoff_max_ms": (int, 0, 300_000),
+    "timeout_seconds": ((int, float), 0, 3600),
+}
+
+
+def validate_execution_policy(policy: Any) -> dict | None:
+    """Normalize + validate a workflow execution policy; None clears it.
+
+    Unknown keys, wrong types and out-of-range values raise ValueError
+    with an end-user-safe message (the API layer turns it into a 400).
+    """
+    if policy is None:
+        return None
+    if not isinstance(policy, dict):
+        raise ValueError("policy must be an object")
+    out: dict = {}
+    for key, value in policy.items():
+        if key == "retry_on":
+            if value not in ("all", "transient"):
+                raise ValueError("policy.retry_on must be 'all' or 'transient'")
+            out[key] = value
+            continue
+        if key not in POLICY_KEYS:
+            raise ValueError(f"unknown policy key {key!r}")
+        typ, lo, hi = POLICY_KEYS[key]
+        if isinstance(value, bool) or not isinstance(value, typ):
+            raise ValueError(f"policy.{key} must be a number")
+        if not lo <= value <= hi:
+            raise ValueError(f"policy.{key} must be between {lo} and {hi}")
+        out[key] = value
+    return out or None
+
+
 class WorkflowCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=2000)
@@ -40,6 +82,8 @@ class WorkflowCreate(BaseModel):
     error_workflow_id: str | None = None
     tags: Tags = Field(default_factory=list)
     folder_id: str | None = Field(default=None, max_length=36)  # v16
+    # v51: data-DAG execution policy (retry/timeout defaults for every node)
+    policy: dict | None = None
 
 
 class WorkflowUpdate(BaseModel):
@@ -53,6 +97,9 @@ class WorkflowUpdate(BaseModel):
     tags: Tags | None = None
     # v16 tri-state: omitted (None) = untouched; "" = move to root; str = assign.
     folder_id: str | None = Field(default=None, max_length=36)
+    # v51 tri-state: omitted (None) = untouched; {} = clear the policy;
+    # object = replace (validated server-side).
+    policy: dict | None = None
     # v20 tri-state: omitted = untouched; null = inherit global policy;
     # 0 = keep forever; N = purge this workflow's logs after N days.
     retention_days: int | None = Field(default=None, ge=0, le=3650)
@@ -68,12 +115,26 @@ class WorkflowOut(BaseModel):
     tags: Tags = Field(default_factory=list)
     folder_id: str | None = None
     retention_days: int | None = None
+    policy: dict | None = None  # v51: data-DAG execution policy (NULL = none)
     owner_id: str | None = None  # v37: owning user (NULL = unclaimed)
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _policy_from_row(cls, data: Any) -> Any:
+        """Expose the ORM's policy_json column as the API's ``policy``."""
+        if hasattr(data, "policy_json") and not hasattr(data, "policy"):
+            try:
+                data = data.__dict__ | {"policy": data.policy_json}
+            except Exception:  # noqa: BLE001 - fall through to ORM mode
+                pass
+        elif isinstance(data, dict) and "policy" not in data and "policy_json" in data:
+            data = {**data, "policy": data["policy_json"]}
+        return data
 
 
 class WorkflowListItem(BaseModel):

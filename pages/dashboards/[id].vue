@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Gauge, Loader2, X, Rocket, Square, Save, RefreshCw, Plus, Trash2,
   ChevronDown, ChevronUp, ArrowUp, ArrowDown, Wand2, ExternalLink, BarChart3, Database, Type,
-  Share2, Copy, Check,
+  Share2, Copy, Check, History,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -248,11 +248,49 @@ async function togglePublish() {
 // ---------------------------------------------------------------- share (v47)
 // share_token lives on the board row - nothing persisted client-side; the
 // toggle PUT returns the fresh (or cleared) row.
+// v51 audit parity: every protected /d render (and every rejected attempt)
+// is logged server-side; the dialog shows the newest events.
 const shareOpen = ref(false)
 const shareBusy = ref(false)
 const shareCopied = ref(false)
 
+interface ShareAuditEvent {
+  id: string
+  action: string
+  outcome: 'allowed' | 'denied'
+  detail: string | null
+  created_at: string | null
+}
+
+const shareEvents = ref<ShareAuditEvent[]>([])
+const showShareActivity = ref(false)
+
+async function loadShareAudit() {
+  shareEvents.value = []
+  try {
+    const res = await api.get<{ events: ShareAuditEvent[] }>(`/dashboards/${boardId}/share/audit?limit=8`)
+    shareEvents.value = res.events || []
+  } catch {
+    shareEvents.value = []  // audit is additive - never block the dialog
+  }
+}
+
+function timeAgo(iso: string | null): string {
+  if (!iso) return ''
+  const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (s < 60) return 'just now'
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`
+  return `${Math.floor(s / 86400)}d ago`
+}
+
 const shareProtected = computed(() => !!board.value?.share_token)
+
+async function openShare() {
+  shareOpen.value = true
+  showShareActivity.value = false
+  await loadShareAudit()
+}
 
 function shareUrl(): string {
   if (!board.value?.share_token) return ''
@@ -333,7 +371,7 @@ const typeColor: Record<string, string> = {
         <button
           class="flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-zinc-600"
           :title="board?.share_token ? 'Share protection is ON - links need the token' : 'Share protection is OFF'"
-          @click="shareOpen = true"
+          @click="openShare"
         >
           <Share2 class="h-3.5 w-3.5" /> <span class="hidden sm:inline">Share</span>
         </button>
@@ -598,6 +636,36 @@ const typeColor: Record<string, string> = {
             </div>
           </template>
           <p v-else-if="!isPublished" class="mt-2 text-[11px] text-zinc-600">Publish the board to open /d/{{ board?.slug }}.</p>
+
+          <!-- v51: share-surface audit trail (parity with the apps share dialog) -->
+          <div v-if="shareEvents.length" class="mt-2">
+            <button
+              class="flex w-full items-center gap-1.5 text-[10px] font-bold uppercase tracking-wide text-zinc-500 transition hover:text-zinc-300"
+              @click="showShareActivity = !showShareActivity"
+            >
+              <History class="h-3 w-3" />
+              Recent share activity ({{ shareEvents.length }})
+              <ChevronDown class="h-3 w-3 transition-transform" :class="showShareActivity && 'rotate-180'" />
+            </button>
+            <div v-if="showShareActivity" class="mt-1.5 space-y-1">
+              <div
+                v-for="ev in shareEvents"
+                :key="ev.id"
+                class="flex items-center gap-1.5 rounded-lg border border-zinc-800/60 bg-zinc-950/40 px-2 py-1"
+              >
+                <span
+                  class="h-1.5 w-1.5 shrink-0 rounded-full"
+                  :class="ev.outcome === 'allowed' ? 'bg-emerald-400' : 'bg-rose-400'"
+                  :title="ev.outcome"
+                />
+                <span class="min-w-0 flex-1 truncate text-[10px] text-zinc-400">
+                  {{ ev.action === 'view_dashboard' ? 'Viewed board' : ev.action }}
+                  <span v-if="ev.outcome === 'denied' && ev.detail" class="text-rose-300/70">({{ ev.detail }})</span>
+                </span>
+                <span class="shrink-0 text-[9px] text-zinc-600">{{ timeAgo(ev.created_at) }}</span>
+              </div>
+            </div>
+          </div>
 
           <p class="mt-3 text-[11px] leading-relaxed text-zinc-500">Regenerating (disable + enable) revokes old links.</p>
         </div>

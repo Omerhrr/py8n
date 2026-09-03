@@ -83,5 +83,9 @@ async def init_db() -> None:
                 sync_conn.execute(text("ALTER TABLE dataset_versions ADD COLUMN execution_id VARCHAR(36)"))
             if "node_name" not in dv_cols:
                 sync_conn.execute(text("ALTER TABLE dataset_versions ADD COLUMN node_name VARCHAR(200)"))
+            # v51: data-DAG execution policy on workflows
+            wf_cols = {c["name"] for c in insp.get_columns("workflows")}
+            if "policy_json" not in wf_cols:
+                sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN policy_json JSON"))
 
         await conn.run_sync(_add_missing_columns)

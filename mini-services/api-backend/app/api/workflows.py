@@ -27,6 +27,7 @@ from ..schemas import (
     WorkflowOut,
     WorkflowScheduleOut,
     WorkflowUpdate,
+    validate_execution_policy,
 )
 from ..services.dispatcher import dispatch_execution
 from ..services.scheduler import resync_workflow_jobs, schedule_entries_for_graph, validate_schedule_params
@@ -183,6 +184,7 @@ async def _validate_folder(db: AsyncSession, folder_id: str | None) -> None:
 async def create_workflow(body: WorkflowCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     try:
         validate_graph_document(body.graph or {"nodes": [], "edges": []})
+        policy = validate_execution_policy(body.policy)  # v51
     except (GraphValidationError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _validate_schedule_nodes(body.graph or {})
@@ -194,6 +196,7 @@ async def create_workflow(body: WorkflowCreate, user=Depends(get_optional_user),
         error_workflow_id=body.error_workflow_id,
         tags=body.tags,
         folder_id=body.folder_id,
+        policy_json=policy,  # v51: data-DAG execution policy
         owner_id=user.id if user else None,  # v37
     )
     db.add(wf)
@@ -250,6 +253,12 @@ async def update_workflow(workflow_id: str, body: WorkflowUpdate, user=Depends(g
     if "retention_days" in body.model_dump(exclude_unset=True):
         # v20: null = inherit global policy; 0 = keep forever; N = N days.
         wf.retention_days = body.retention_days
+    if "policy" in body.model_dump(exclude_unset=True):
+        # v51 tri-state: omitted = untouched; {} = clear; object = replace.
+        try:
+            wf.policy_json = validate_execution_policy(body.policy)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.flush()
     await db.refresh(wf)
     # Content change (graph/name/description) → snapshot the new state.

@@ -68,6 +68,12 @@ class Workflow(Base):
     # Per-workflow retention override (v20): NULL = inherit the global policy,
     # 0 = keep forever, N = purge this workflow's finished logs after N days.
     retention_days: Mapped[int | None] = mapped_column(nullable=True)
+    # v51: data-DAG execution policy - defaults applied to EVERY node in the
+    # workflow that has not set its own retry/timeout. Shape (all optional):
+    # {"retries": 0-5, "backoff_ms": ms, "backoff_multiplier": >=1,
+    #  "backoff_max_ms": ms, "timeout_seconds": s, "retry_on": "all"|"transient"}
+    # NULL = no workflow-level policy (node settings alone, pre-v51 behavior).
+    policy_json: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -587,6 +593,33 @@ class GrantAuditEvent(Base):
     grant_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
     # view_runtime | list_records | create_record | update_record |
     # delete_record | view_form | submit_form | access (unknown attempt)
+    action: Mapped[str] = mapped_column(String(40), nullable=False)
+    # allowed | denied
+    outcome: Mapped[str] = mapped_column(String(10), nullable=False, default="allowed")
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class DashboardAuditEvent(Base):
+    """Dashboard share-surface access log (v51) - parity with app grants.
+
+    One row per request through a PROTECTED dashboard share (share_token
+    set on the board): token-bearing renders of /d/{slug} land as
+    outcome="allowed" (action="view_dashboard"), rejected callers as
+    "denied" with the reason (missing/invalid token) BEFORE the 403 -
+    the same contract GrantAuditEvent established for apps in v49.
+    Boards without a share token are never logged: the log answers
+    "what did shared viewers see", not the owner's own traffic.
+
+    Capped at the newest DASHBOARD_AUDIT_CAP events per board (trimmed on
+    insert) so a hot public link cannot grow the table without bound.
+    """
+
+    __tablename__ = "dashboard_audit_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    dashboard_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # view_dashboard | access (an unknown/failed attempt)
     action: Mapped[str] = mapped_column(String(40), nullable=False)
     # allowed | denied
     outcome: Mapped[str] = mapped_column(String(10), nullable=False, default="allowed")

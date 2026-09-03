@@ -442,18 +442,37 @@ const contextMenuItems = computed<ContextMenuItem[]>(() => {
 
 // ------------------------------------------------------------------
 // v20: workflow settings modal (description + retention override)
+// v51: + data-DAG execution policy (workflow-level retry/timeout defaults
+// applied to every node that has not set its own resilience settings)
 // ------------------------------------------------------------------
 const showSettings = ref(false)
 const savingSettings = ref(false)
 const globalRetentionDays = ref<number | null>(null)
-const settingsDraft = ref<{ description: string; retentionMode: 'inherit' | 'keep' | 'days'; retentionDays: number } | null>(null)
+const settingsDraft = ref<{
+  description: string
+  retentionMode: 'inherit' | 'keep' | 'days'
+  retentionDays: number
+  policyEnabled: boolean
+  retries: number
+  backoffMs: number
+  backoffMultiplier: number
+  timeoutSeconds: number
+  retryOn: 'all' | 'transient'
+} | null>(null)
 
 async function openSettings() {
   const wf = store.workflow
+  const pol = (wf?.policy || {}) as Record<string, any>
   settingsDraft.value = {
     description: wf?.description || '',
     retentionMode: wf?.retention_days == null ? 'inherit' : wf.retention_days === 0 ? 'keep' : 'days',
     retentionDays: wf?.retention_days && wf.retention_days > 0 ? wf.retention_days : 30,
+    policyEnabled: !!pol && Object.keys(pol).length > 0,
+    retries: Number(pol.retries ?? 2),
+    backoffMs: Number(pol.backoff_ms ?? 500),
+    backoffMultiplier: Number(pol.backoff_multiplier ?? 2),
+    timeoutSeconds: Number(pol.timeout_seconds ?? 0),
+    retryOn: pol.retry_on === 'transient' ? 'transient' : 'all',
   }
   showSettings.value = true
   if (globalRetentionDays.value == null) {
@@ -474,10 +493,21 @@ async function saveSettings() {
     if (d.retentionMode === 'inherit') body.retention_days = null
     else if (d.retentionMode === 'keep') body.retention_days = 0
     else body.retention_days = Math.max(1, Math.round(d.retentionDays || 30))
+    // v51: {} clears the policy; a full object replaces it
+    body.policy = d.policyEnabled
+      ? {
+          retries: Math.min(5, Math.max(0, Math.round(d.retries || 0))),
+          backoff_ms: Math.min(60000, Math.max(0, Math.round(d.backoffMs || 0))),
+          backoff_multiplier: Math.min(10, Math.max(1, d.backoffMultiplier || 1)),
+          timeout_seconds: Math.min(3600, Math.max(0, Math.round(d.timeoutSeconds || 0))),
+          retry_on: d.retryOn,
+        }
+      : {}
     const updated = await api.put<Workflow>(`/workflows/${workflowId.value}`, body)
     if (store.workflow) {
       store.workflow.description = updated.description
       store.workflow.retention_days = updated.retention_days
+      store.workflow.policy = updated.policy
     }
     toast('Workflow settings saved', 'success')
     showSettings.value = false
@@ -1259,6 +1289,49 @@ const runningCount = computed(
           </div>
           <p class="mb-4 text-[10px] leading-relaxed text-zinc-600">
             Overrides the global policy (Insights → Execution data retention). Running executions are never purged.
+          </p>
+
+          <label class="mb-1 block text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Data-DAG execution policy</label>
+          <div class="mb-2 flex items-center gap-2">
+            <button
+              class="rounded-lg px-2 py-1 text-[10px] font-semibold uppercase tracking-wide transition"
+              :class="settingsDraft!.policyEnabled ? 'bg-emerald-500/15 text-emerald-400' : 'bg-zinc-800 text-zinc-400'"
+              @click="settingsDraft!.policyEnabled = !settingsDraft!.policyEnabled"
+            >{{ settingsDraft!.policyEnabled ? 'on' : 'off' }}</button>
+            <span class="text-[10px] leading-tight text-zinc-600">retry/timeout defaults for EVERY node that has none of its own</span>
+          </div>
+          <div v-if="settingsDraft!.policyEnabled" class="mb-2 grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Retries (0-5)</label>
+              <input v-model.number="settingsDraft!.retries" type="number" min="0" max="5"
+                class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60" />
+            </div>
+            <div>
+              <label class="block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Backoff (ms)</label>
+              <input v-model.number="settingsDraft!.backoffMs" type="number" min="0" max="60000" step="50"
+                class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60" />
+            </div>
+            <div>
+              <label class="block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Backoff ×</label>
+              <input v-model.number="settingsDraft!.backoffMultiplier" type="number" min="1" max="10" step="0.5"
+                class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60" />
+            </div>
+            <div>
+              <label class="block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Timeout (s, 0 = off)</label>
+              <input v-model.number="settingsDraft!.timeoutSeconds" type="number" min="0" max="3600"
+                class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60" />
+            </div>
+            <div class="col-span-2">
+              <label class="block text-[9px] font-semibold uppercase tracking-wider text-zinc-600">Retry on</label>
+              <select v-model="settingsDraft!.retryOn"
+                class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-orange-500/60">
+                <option value="all">all errors</option>
+                <option value="transient">transient only (timeouts, connection, 5xx, throttling)</option>
+              </select>
+            </div>
+          </div>
+          <p class="mb-4 text-[10px] leading-relaxed text-zinc-600">
+            Transient-only skips permanent failures (validation, data-contract violations) instead of burning the backoff wheel. Node-level retry/timeout settings always win over this policy.
           </p>
 
           <div class="flex justify-end gap-2">

@@ -27,13 +27,13 @@ from __future__ import annotations
 import secrets
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
-from ..models import Dashboard, Dataset
+from ..models import Dashboard, DashboardAuditEvent, Dataset
 from ..schemas import DashboardCreate, DashboardOut, DashboardUpdate, ShareToggle
 from ..services import dashboards as db_svc
 from ..services import datasets as ds_svc
@@ -70,14 +70,66 @@ async def _runtime_or_404(db: AsyncSession, slug: str) -> Dashboard:
     return row
 
 
-def _share_gate(row: Dashboard, request: Request) -> None:
-    """v47 share-token ACL - same contract as apps._share_gate."""
+def _share_gate(row: Dashboard, request: Request) -> str | None:
+    """v47 share-token ACL - same contract as apps._share_gate.
+
+    Returns the presented token when the gate passes (so the audit helper
+    can log an allowed view), raises 403 otherwise."""
     expected = row.share_token
     if not expected:
-        return
+        return None
     presented = request.query_params.get("t") or request.headers.get("x-share-token") or ""
     if not presented or not secrets.compare_digest(presented, expected):
         raise HTTPException(status_code=403, detail="Valid share token required (?t= or X-Share-Token)")
+    return presented
+
+
+# ------------------------------------------------------------------ v51 audit
+DASHBOARD_AUDIT_CAP = 500  # newest events kept per dashboard (mirrors apps)
+
+
+async def _audit_share_access(
+    db: AsyncSession,
+    row: Dashboard,
+    action: str,
+    outcome: str = "allowed",
+    detail: str | None = None,
+    force: bool = False,
+) -> None:
+    """Append one share-surface audit event (v51) - parity with app grants.
+
+    Only PROTECTED boards are logged (share_token set); ``force`` records
+    the rejection after a failed gate. Owns its commit and never raises:
+    an auditing hiccup must never fail, or reverse, the request it is
+    observing. Trims to the newest DASHBOARD_AUDIT_CAP events per board.
+    """
+    try:
+        if not (force or row.share_token):
+            return  # open boards stay untracked - the owner's own traffic
+        db.add(
+            DashboardAuditEvent(
+                dashboard_id=row.id,
+                action=action,
+                outcome=outcome,
+                detail=detail[:290] if detail else None,
+            )
+        )
+        await db.flush()
+        keep = (
+            select(DashboardAuditEvent.id)
+            .where(DashboardAuditEvent.dashboard_id == row.id)
+            .order_by(DashboardAuditEvent.created_at.desc(), DashboardAuditEvent.id.desc())
+            .limit(DASHBOARD_AUDIT_CAP)
+        )
+        await db.execute(
+            delete(DashboardAuditEvent).where(
+                DashboardAuditEvent.dashboard_id == row.id,
+                DashboardAuditEvent.id.not_in(keep),
+            )
+        )
+        await db.commit()
+    except Exception:  # noqa: BLE001 - auditing must never break the surface
+        await db.rollback()
 
 
 def _filters_from_request(request: Request) -> dict[str, list[str]]:
@@ -283,7 +335,18 @@ async def unpublish_dashboard(dash_ref: str, user=Depends(get_optional_user), db
 @router.get("/{slug}/runtime")
 async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
-    _share_gate(row, request)  # v47 share-token ACL
+    presented = None
+    try:
+        presented = _share_gate(row, request)  # v47 share-token ACL
+    except HTTPException:
+        # v51: rejected share access lands in the audit trail before the 403
+        await _audit_share_access(
+            db, row, "view_dashboard", outcome="denied", force=True,
+            detail="invalid token" if (request.query_params.get("t") or request.headers.get("x-share-token")) else "missing token",
+        )
+        raise
+    # v51: allowed share views are audited only when the board is protected
+    await _audit_share_access(db, row, "view_dashboard")
     components = (row.config or {}).get("components", [])
     filters = _filters_from_request(request)  # v47: cross-filtering
     datasets = await _collect_datasets(db, _refs(components), strict=False)
@@ -322,3 +385,44 @@ async def toggle_share(dash_ref: str, body: ShareToggle, user=Depends(get_option
     await db.commit()
     await db.refresh(row)
     return _out(row)
+
+
+# ----------------------------------------------------------------- v51 audit
+@router.get("/{dash_ref}/share/audit")
+async def share_audit(
+    dash_ref: str,
+    limit: int = Query(50, ge=1, le=200),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Owner-facing share audit trail (v51): who rendered /d/{slug}, when,
+    and every rejected attempt - the dashboard twin of the apps grant log."""
+    row = await _get_or_404(db, dash_ref, user)
+    events = (
+        await db.execute(
+            select(DashboardAuditEvent)
+            .where(DashboardAuditEvent.dashboard_id == row.id)
+            .order_by(DashboardAuditEvent.created_at.desc(), DashboardAuditEvent.id.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+    total = (
+        await db.execute(
+            select(DashboardAuditEvent.id).where(DashboardAuditEvent.dashboard_id == row.id)
+        )
+    ).scalars().all()
+    return {
+        "dashboard_id": row.id,
+        "protected": bool(row.share_token),
+        "total": len(total),
+        "events": [
+            {
+                "id": e.id,
+                "action": e.action,
+                "outcome": e.outcome,
+                "detail": e.detail,
+                "created_at": e.created_at,
+            }
+            for e in events
+        ],
+    }

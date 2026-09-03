@@ -93,6 +93,8 @@ export interface Workflow {
   tags?: string[]
   folder_id?: string | null
   retention_days?: number | null
+  // v51: data-DAG execution policy (retry/timeout defaults for every node)
+  policy?: Record<string, number | string> | null
   created_at: string
   updated_at: string
 }

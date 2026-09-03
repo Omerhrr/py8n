@@ -109,7 +109,8 @@ def test_v50_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] == "1.50.0", res.json()
+            # v51 moved the strict pin forward; v50 keeps a floor
+            assert res.json()["version"] >= "1.50.0", res.json()
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
             types = {d["type"] for d in defs}
