@@ -799,3 +799,36 @@ class SystemDraft(Base):
     built_json: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class Solution(Base):
+    """A marketplace solution (v60) - the outcome-named layer over packs.
+
+    Templates say "Webhook workflow"; solutions say "Customer Support
+    Automation" and show WHAT YOU GET (the capability checklist) instead
+    of what nodes they contain. The ``pack_json`` payload is a standard
+    py8n-pack document (workflows + datasets), so installing a solution
+    reuses the exact pack-import machinery - and anyone can author one
+    from their own workflows/datasets.
+
+    ``owner_id`` NULL = system-curated (seeded showcase solutions);
+    otherwise the author, who may unlist it.
+    """
+
+    __tablename__ = "solutions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    slug: Mapped[str] = mapped_column(String(140), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    tagline: Mapped[str] = mapped_column(String(300), default="")
+    category: Mapped[str] = mapped_column(String(60), default="Operations", index=True)
+    icon: Mapped[str] = mapped_column(String(60), default="package")
+    color: Mapped[str] = mapped_column(String(20), default="#22d3ee")
+    # the capability checklist - the roadmap's "Includes: ✓ ..." list
+    outcomes_json: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # a standard py8n-pack document (format "py8n-pack")
+    pack_json: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    docs: Mapped[str] = mapped_column(Text, default="")
+    installs: Mapped[int] = mapped_column(Integer, default=0)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
-  FileBarChart, BookOpen, Radio, Wand2,
+  FileBarChart, BookOpen, Radio, Wand2, Store,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -30,6 +30,7 @@ const nav = [
   { to: '/schedules', label: 'Schedules', icon: CalendarClock, match: ['/schedules'] },
   { to: '/reports', label: 'Reports', icon: FileBarChart, match: ['/reports'] },  // v48 scheduled exports
   { to: '/templates', label: 'Templates', icon: Sparkles, match: ['/templates'] },
+  { to: '/marketplace', label: 'Marketplace', icon: Store, match: ['/marketplace'] },  // v60 solution marketplace
   { to: '/agents', label: 'Agents', icon: Bot, match: ['/agents'] },
   { to: '/datasets', label: 'Datasets', icon: Database, match: ['/datasets'] },
   { to: '/catalog', label: 'Catalog', icon: BookOpen, match: ['/catalog'] },  // v50 data catalog
