@@ -87,5 +87,9 @@ async def init_db() -> None:
             wf_cols = {c["name"] for c in insp.get_columns("workflows")}
             if "policy_json" not in wf_cols:
                 sync_conn.execute(text("ALTER TABLE workflows ADD COLUMN policy_json JSON"))
+            # v52: scheduled report delivery channels
+            rep_cols = {c["name"] for c in insp.get_columns("scheduled_reports")}
+            if "delivery_json" not in rep_cols:
+                sync_conn.execute(text("ALTER TABLE scheduled_reports ADD COLUMN delivery_json JSON"))
 
         await conn.run_sync(_add_missing_columns)

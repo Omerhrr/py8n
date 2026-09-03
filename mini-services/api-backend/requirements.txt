@@ -38,3 +38,4 @@ psycopg2-binary>=2.9   # v50: postgres connector (optional at runtime)
 pymysql>=1.1           # v50: mysql connector (optional at runtime)
 boto3>=1.34            # v50: S3/MinIO object storage source
 moto[s3]>=5            # v51: test-only - in-memory S3 for storage backend tests
+google-auth>=2        # v52: Google Sheets service-account access (Sheets REST v4)

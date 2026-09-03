@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.51.0"
+    version: str = "1.52.0"
     # Audit hardening: dev-only convenience surfaces default OFF. Production
     # docker-compose already pins PY8N_DEBUG=false explicitly.
     debug: bool = False
@@ -112,6 +112,23 @@ class Settings(BaseSettings):
     s3_secret_access_key: str = ""
     gcs_bucket: str = ""
     gcs_prefix: str = ""
+
+    # ------------------------------------------------------------------
+    # v52: scheduled report delivery (webhook + email channels).
+    # Reports can push their generated artifact out when they fire:
+    # webhook = HTTP POST of a JSON envelope (optionally with the file
+    # base64-attached); email = SMTP with the report attached. SMTP is
+    # disabled while smtp_host is empty - delivery events then record a
+    # clear "skipped" instead of failing the report run.
+    # ------------------------------------------------------------------
+    smtp_host: str = ""                      # empty = email delivery disabled
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from: str = "py8n@localhost"
+    smtp_use_tls: bool = True                # STARTTLS (port 587 typical)
+    webhook_delivery_timeout_seconds: int = 10
+    max_delivery_attachment_bytes: int = 8_000_000   # skip attaching bigger files
 
 
 @lru_cache

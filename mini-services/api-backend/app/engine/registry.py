@@ -24,7 +24,12 @@ from .nodes.data import (
     SwitchNode,
     UnpivotNode,  # v45
 )
-from .nodes.connectors import DbSourceNode, S3SourceNode  # v50
+from .nodes.connectors import (  # v50 + v52
+    DbSourceNode,
+    FtpSourceNode,
+    GoogleSheetsSourceNode,
+    S3SourceNode,
+)
 from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
 from .nodes.datascience import ChartNode, DriftCheckNode, ModelPredictNode, ModelTrainNode, PythonTransformNode  # v28 + v46 predict + v47 drift
 from .nodes.documents import DocumentExtractNode  # v32
@@ -74,6 +79,8 @@ for _cls in (
     DatasetExportNode,    # v45: dataset → downloadable csv/xlsx/json/parquet artifact
     DbSourceNode,         # v50: read rows from sqlite/postgres/mysql via SQLAlchemy
     S3SourceNode,         # v50: read csv/xlsx/json/parquet from S3/MinIO
+    GoogleSheetsSourceNode,  # v52: read a Google Sheet tab as rows (public/SA)
+    FtpSourceNode,        # v52: read a csv/tsv file over FTP/FTPS
     JoinNode,             # v45: pandas-backed inner/left/right/outer/anti join
     PivotNode,            # v45: rows → matrix
     UnpivotNode,          # v45: matrix → tidy rows (melt)

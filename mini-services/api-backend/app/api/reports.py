@@ -1,12 +1,15 @@
-"""Scheduled reports API (v48) - cron-driven export jobs.
+"""Scheduled reports API (v48 + v52 delivery) - cron-driven export jobs.
 
 Endpoints (owner-scoped like the rest of the build surface):
-  GET    /reports              list the caller's reports (source names resolved)
-  POST   /reports              create one (validates cron + format + source)
-  PUT    /reports/{id}         update name/fmt/cron/enabled/source
-  DELETE /reports/{id}         drop the report (artifacts stay)
-  POST   /reports/{id}/run     run NOW synchronously - returns the artifact id
-  GET    /reports/{id}/runs    next fire previews + last-run stats
+  GET    /reports                    list the caller's reports (source names resolved)
+  POST   /reports                    create one (validates cron + format + source + delivery)
+  PUT    /reports/{id}               update name/fmt/cron/enabled/source/delivery
+  DELETE /reports/{id}               drop the report (artifacts stay)
+  POST   /reports/{id}/run           run NOW synchronously - returns the artifact id
+                                     (+ per-channel delivery results)
+  GET    /reports/{id}/runs          next fire previews + last-run stats
+  GET    /reports/{id}/deliveries    (v52) newest delivery events - did the
+                                     webhook/email push-out succeed?
 
 The generated files are ordinary Artifacts (kind=report) and download via
 GET /artifacts/{artifact_id}/content with the caller's normal auth.
@@ -35,6 +38,8 @@ class ReportCreate(BaseModel):
     fmt: str = Field(default="csv", max_length=10)
     cron: str = Field(default="0 6 * * *", max_length=100)
     enabled: bool = True
+    # v52: outbound delivery channels (webhook/email); omit for artifact-only
+    delivery: dict | None = None
 
 
 class ReportUpdate(BaseModel):
@@ -44,6 +49,7 @@ class ReportUpdate(BaseModel):
     fmt: str | None = Field(default=None, max_length=10)
     cron: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None
+    delivery: dict | None = None
 
 
 async def _source_name(db: AsyncSession, source_type: str, source_id: str) -> str | None:
@@ -78,10 +84,12 @@ async def _validate_body(
     source_id: str,
     fmt: str,
     cron: str,
+    delivery: dict | None = None,
 ) -> None:
     try:
         report_svc.validate_cron(cron)
         report_svc.validate_format(source_type, fmt)
+        report_svc.validate_delivery(delivery)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if source_type == "dataset":
@@ -103,7 +111,7 @@ async def list_reports(user=Depends(get_optional_user), db: AsyncSession = Depen
 
 @router.post("", status_code=201)
 async def create_report(body: ReportCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    await _validate_body(db, source_type=body.source_type, source_id=body.source_id, fmt=body.fmt, cron=body.cron)
+    await _validate_body(db, source_type=body.source_type, source_id=body.source_id, fmt=body.fmt, cron=body.cron, delivery=body.delivery)
     row = ScheduledReport(
         name=body.name.strip(),
         source_type=body.source_type,
@@ -111,6 +119,7 @@ async def create_report(body: ReportCreate, user=Depends(get_optional_user), db:
         fmt=body.fmt.strip().lower(),
         cron=body.cron.strip(),
         enabled=body.enabled,
+        delivery_json=report_svc.validate_delivery(body.delivery),
     )
     row.owner_id = user.id if user else None
     db.add(row)
@@ -132,6 +141,16 @@ async def update_report(report_id: str, body: ReportUpdate, user=Depends(get_opt
         "cron": data.get("cron", row.cron),
         "enabled": data.get("enabled", row.enabled),
     }
+    # v52: delivery is replaced wholesale when present (None in the model
+    # dump means "not sent" - explicit [] clears all channels).
+    delivery_raw = body.model_dump().get("delivery", "__absent__")
+    if delivery_raw != "__absent__":
+        try:
+            merged_delivery = report_svc.validate_delivery(delivery_raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    else:
+        merged_delivery = row.delivery_json
     await _validate_body(
         db,
         source_type=merged["source_type"],
@@ -145,6 +164,7 @@ async def update_report(report_id: str, body: ReportUpdate, user=Depends(get_opt
     row.fmt = merged["fmt"].strip().lower()
     row.cron = merged["cron"].strip()
     row.enabled = bool(merged["enabled"])
+    row.delivery_json = merged_delivery
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -183,4 +203,38 @@ async def run_preview(report_id: str, user=Depends(get_optional_user), db: Async
         "last_error": row.last_error,
         "fire_count": row.fire_count or 0,
         "last_artifact_id": row.last_artifact_id,
+    }
+
+
+@router.get("/{report_id}/deliveries")
+async def delivery_history(report_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Newest delivery events for one report (v52) - the 'did the 6am
+    email go out?' trail. Includes skipped/error entries so misconfig
+    (no SMTP host, dead webhook) is visible without touching servers."""
+    from ..models import ReportDeliveryEvent
+
+    row = await _get_or_404(db, report_id, user)
+    rows = (
+        await db.execute(
+            select(ReportDeliveryEvent)
+            .where(ReportDeliveryEvent.report_id == row.id)
+            .order_by(ReportDeliveryEvent.created_at.desc(), ReportDeliveryEvent.id.desc())
+            .limit(50)
+        )
+    ).scalars().all()
+    return {
+        "delivery": report_svc.delivery_out(row.delivery_json),
+        "events": [
+            {
+                "id": e.id,
+                "channel": e.channel,
+                "target": e.target,
+                "status": e.status,
+                "detail": e.detail,
+                "artifact_id": e.artifact_id,
+                "attached": bool(e.attached),
+                "created_at": e.created_at,
+            }
+            for e in rows
+        ],
     }

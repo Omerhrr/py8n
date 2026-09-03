@@ -1,14 +1,33 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import {
-  FileBarChart, Plus, Loader2, Trash2, XCircle, Play, Power, Download, CalendarClock, CheckCircle2, Eye, X,
+  FileBarChart, Plus, Loader2, Trash2, XCircle, Play, Power, Download, CalendarClock, CheckCircle2, Eye, X, Send, Mail, History,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 // v48: scheduled report exports - point a cron at a dataset (csv/xlsx/json/
 // parquet) or a dashboard (JSON snapshot or v49 PNG image of every rendered
 // component); the platform writes an Artifact each run and the row remembers
-// the last one.
+// the last one. v52: reports can also DELIVER - webhook POST and/or email
+// with the file attached - with a per-report delivery trail.
+interface DeliveryChannel {
+  type: 'webhook' | 'email'
+  url?: string
+  headers?: Record<string, string>
+  to?: string[]
+  cc?: string[]
+  subject?: string
+  include_attachment?: boolean
+}
+interface DeliveryEvent {
+  id: string
+  channel: string
+  target: string
+  status: 'ok' | 'error' | 'skipped'
+  detail: string | null
+  attached: boolean
+  created_at: string | null
+}
 interface ScheduledReport {
   id: string
   name: string
@@ -18,6 +37,7 @@ interface ScheduledReport {
   fmt: string
   cron: string
   enabled: boolean
+  delivery?: { channels: DeliveryChannel[] }
   created_at: string | null
   last_run_at: string | null
   fire_count: number
@@ -40,8 +60,18 @@ const formSourceId = ref('')
 const formFmt = ref('csv')
 const formCron = ref('0 6 * * *')
 const formEnabled = ref(true)
+// v52 delivery (all optional - empty = artifact-only, pre-v52 behaviour)
+const formWebhookUrl = ref('')
+const formWebhookAttach = ref(false)
+const formEmailTo = ref('')
+const formEmailAttach = ref(true)
 const formSaving = ref(false)
 const formError = ref('')
+
+// v52: delivery trail per report
+const deliveryFor = ref<ScheduledReport | null>(null)
+const deliveryEvents = ref<DeliveryEvent[]>([])
+const deliveryLoading = ref(false)
 
 const running = ref<string | null>(null)
 const toggling = ref<string | null>(null)
@@ -96,8 +126,47 @@ function openCreate() {
   formFmt.value = 'csv'
   formCron.value = '0 6 * * *'
   formEnabled.value = true
+  formWebhookUrl.value = ''
+  formWebhookAttach.value = false
+  formEmailTo.value = ''
+  formEmailAttach.value = true
   formError.value = ''
   showCreate.value = true
+}
+
+function buildDelivery(): { channels: DeliveryChannel[] } | null {
+  const channels: DeliveryChannel[] = []
+  if (formWebhookUrl.value.trim()) {
+    channels.push({
+      type: 'webhook',
+      url: formWebhookUrl.value.trim(),
+      include_attachment: formWebhookAttach.value,
+    })
+  }
+  if (formEmailTo.value.trim()) {
+    channels.push({ type: 'email', to: formEmailTo.value.split(',').map((s) => s.trim()).filter(Boolean), include_attachment: formEmailAttach.value })
+  }
+  return channels.length ? { channels } : null
+}
+
+async function openDeliveries(r: ScheduledReport) {
+  deliveryFor.value = r
+  deliveryEvents.value = []
+  deliveryLoading.value = true
+  try {
+    const res = await api.get<{ events: DeliveryEvent[] }>(`/reports/${r.id}/deliveries`)
+    deliveryEvents.value = res.events
+  } catch {
+    deliveryEvents.value = []
+  } finally {
+    deliveryLoading.value = false
+  }
+}
+
+function deliveryBadge(r: ScheduledReport): string {
+  const ch = r.delivery?.channels || []
+  if (!ch.length) return ''
+  return ch.map((c) => c.type).join(' + ')
 }
 
 function switchType() {
@@ -121,6 +190,7 @@ async function saveForm() {
       fmt: formFmt.value,
       cron: formCron.value.trim(),
       enabled: formEnabled.value,
+      ...(buildDelivery() ? { delivery: buildDelivery() } : {}),
     })
     showCreate.value = false
     await loadAll()
@@ -298,6 +368,11 @@ function nextRun(r: ScheduledReport): string {
                 <span class="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
                   scope: {{ r.source_name || 'missing source' }}
                 </span>
+                <span
+                  v-if="deliveryBadge(r)"
+                  class="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium uppercase text-violet-300"
+                  title="Outbound delivery channels"
+                >deliver: {{ deliveryBadge(r) }}</span>
               </div>
               <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                 <span class="font-mono text-[10px]">cron {{ r.cron }}</span>
@@ -334,6 +409,14 @@ function nextRun(r: ScheduledReport): string {
                 <Loader2 v-if="previewLoading" class="h-3.5 w-3.5 animate-spin" />
                 <Eye v-else class="h-3.5 w-3.5" />
                 Preview
+              </button>
+              <button
+                class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-violet-500/40 hover:text-violet-300"
+                title="Delivery trail - did the webhook/email go out?"
+                @click="openDeliveries(r)"
+              >
+                <History class="h-3.5 w-3.5" />
+                Deliveries
               </button>
               <button
                 class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-40"
@@ -447,6 +530,37 @@ function nextRun(r: ScheduledReport): string {
               Enabled immediately
             </label>
 
+            <!-- v52: outbound delivery -->
+            <div class="rounded-xl border border-violet-500/25 bg-violet-500/5 p-3">
+              <p class="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-violet-300">
+                <Send class="h-3 w-3" /> Delivery (optional)
+              </p>
+              <label class="block">
+                <span class="mb-1 block text-[11px] font-medium text-zinc-400">Webhook URL - POSTs a JSON envelope after every run</span>
+                <input
+                  v-model="formWebhookUrl"
+                  class="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 font-mono text-xs outline-none transition placeholder:text-zinc-600 focus:border-violet-500/60"
+                  placeholder="https://hooks.example.com/py8n"
+                />
+              </label>
+              <label class="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
+                <input v-model="formWebhookAttach" type="checkbox" class="h-3.5 w-3.5 accent-violet-500" />
+                include the file inline (base64)
+              </label>
+              <label class="mt-2.5 block">
+                <span class="mb-1 block text-[11px] font-medium text-zinc-400">Email to - comma-separated (SMTP via PY8N_SMTP_* env)</span>
+                <input
+                  v-model="formEmailTo"
+                  class="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-xs outline-none transition placeholder:text-zinc-600 focus:border-violet-500/60"
+                  placeholder="ops@example.com, finance@example.com"
+                />
+              </label>
+              <label class="mt-1.5 flex items-center gap-2 text-[11px] text-zinc-400">
+                <input v-model="formEmailAttach" type="checkbox" class="h-3.5 w-3.5 accent-violet-500" />
+                attach the report file
+              </label>
+            </div>
+
             <p v-if="formError" class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{{ formError }}</p>
           </div>
 
@@ -465,6 +579,57 @@ function nextRun(r: ScheduledReport): string {
               <Loader2 v-if="formSaving" class="h-3.5 w-3.5 animate-spin" />
               Create report
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- v52: deliveries trail modal -->
+    <Teleport to="body">
+      <div
+        v-if="deliveryFor"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        @click.self="deliveryFor = null"
+      >
+        <div class="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div class="flex items-center justify-between border-b border-zinc-800/80 px-5 py-3.5">
+            <div>
+              <h2 class="text-sm font-bold">Delivery trail - {{ deliveryFor.name }}</h2>
+              <p class="mt-0.5 text-[11px] text-zinc-500">Newest 50 push-out attempts (webhook / email) per run</p>
+            </div>
+            <button class="rounded-lg p-1 text-zinc-500 hover:text-zinc-200" @click="deliveryFor = null"><X class="h-4 w-4" /></button>
+          </div>
+          <div class="flex-1 overflow-auto p-4">
+            <div v-if="deliveryLoading" class="grid place-items-center py-10 text-zinc-600"><Loader2 class="h-5 w-5 animate-spin" /></div>
+            <p v-else-if="!deliveryEvents.length" class="py-8 text-center text-xs text-zinc-600">No delivery attempts yet - run the report once.</p>
+            <div v-else class="space-y-2">
+              <div
+                v-for="e in deliveryEvents"
+                :key="e.id"
+                class="flex items-start gap-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-3 py-2.5"
+              >
+                <div
+                  class="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border"
+                  :class="e.channel === 'email' ? 'border-pink-500/30 bg-pink-500/10 text-pink-300' : 'border-violet-500/30 bg-violet-500/10 text-violet-300'"
+                >
+                  <Mail v-if="e.channel === 'email'" class="h-3.5 w-3.5" />
+                  <Send v-else class="h-3.5 w-3.5" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-xs font-semibold">{{ e.channel }}</span>
+                    <span
+                      class="rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase"
+                      :class="e.status === 'ok' ? 'bg-emerald-500/15 text-emerald-400' : e.status === 'skipped' ? 'bg-zinc-800 text-zinc-400' : 'bg-rose-500/15 text-rose-300'"
+                    >{{ e.status }}</span>
+                    <span v-if="e.attached" class="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">file attached</span>
+                    <span class="text-[10px] text-zinc-600">{{ fmtDate(e.created_at) }}</span>
+                  </div>
+                  <p class="mt-0.5 truncate font-mono text-[10px] text-zinc-500">{{ e.target }}</p>
+                  <p v-if="e.detail" class="mt-0.5 text-[11px]" :class="e.status === 'ok' ? 'text-zinc-400' : 'text-rose-300/90'">{{ e.detail }}</p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

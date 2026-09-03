@@ -532,12 +532,46 @@ class ScheduledReport(Base):
     fmt: Mapped[str] = mapped_column(String(10), nullable=False, default="csv")
     cron: Mapped[str] = mapped_column(String(100), nullable=False, default="0 6 * * *")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # v52: outbound delivery channels evaluated after every successful run.
+    # {"channels": [{"type": "webhook", "url", "headers", "include_attachment"},
+    #               {"type": "email", "to", "cc", "subject", "include_attachment"}]}
+    # NULL/{} = artifact-only (pre-v52 behaviour, nothing leaves the instance).
+    delivery_json: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     fire_count: Mapped[int] = mapped_column(Integer, default=0)
     last_status: Mapped[str | None] = mapped_column(String(10), nullable=True)  # ok|error
     last_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     last_artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class ReportDeliveryEvent(Base):
+    """Scheduled-report delivery log (v52) - did the push-out succeed?
+
+    One row per (report run x delivery channel): a webhook POST or an
+    SMTP send attempted after a report run produced its artifact. The
+    log answers "did the 6am email actually go out?" without grepping
+    server logs - including the negative space (SMTP not configured,
+    oversized attachment skipped, webhook answered 500).
+
+    Capped at the newest REPORT_DELIVERY_CAP events per report (trimmed
+    on insert) and never written before the artifact exists - a delivery
+    failure NEVER fails the report run it belongs to.
+    """
+
+    __tablename__ = "report_delivery_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    report_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # webhook | email
+    channel: Mapped[str] = mapped_column(String(20), nullable=False)
+    target: Mapped[str] = mapped_column(String(300), default="")  # url or comma-joined recipients
+    # ok | error | skipped
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="ok")
+    detail: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    artifact_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    attached: Mapped[bool] = mapped_column(Boolean, default=False)  # file went inline/attached
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 
 
 class AppShareGrant(Base):
