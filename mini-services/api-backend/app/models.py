@@ -721,6 +721,10 @@ class IngestionState(Base):
     runs: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     rows_total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v53: what the LAST run actually did - {"mode", "rows_in", "written",
+    # "skipped", "updated", "inserted", "lookback"} - so the ingestion
+    # surface shows behaviour, not just a cursor position.
+    stats_json: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True, default=None)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     __table_args__ = (UniqueConstraint("dataset_id", "key", name="uq_ingestion_state"),)

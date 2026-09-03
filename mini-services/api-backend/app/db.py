@@ -91,5 +91,9 @@ async def init_db() -> None:
             rep_cols = {c["name"] for c in insp.get_columns("scheduled_reports")}
             if "delivery_json" not in rep_cols:
                 sync_conn.execute(text("ALTER TABLE scheduled_reports ADD COLUMN delivery_json JSON"))
+            # v53: incremental-ingestion per-run stats
+            ing_cols = {c["name"] for c in insp.get_columns("ingestion_states")}
+            if "stats_json" not in ing_cols:
+                sync_conn.execute(text("ALTER TABLE ingestion_states ADD COLUMN stats_json JSON"))
 
         await conn.run_sync(_add_missing_columns)

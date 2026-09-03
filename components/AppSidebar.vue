@@ -3,7 +3,7 @@ import {
   LayoutDashboard, Activity, BarChart3, CalendarClock, Sparkles, Plus,
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
-  FileBarChart, BookOpen,
+  FileBarChart, BookOpen, Radio,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -33,6 +33,7 @@ const nav = [
   { to: '/agents', label: 'Agents', icon: Bot, match: ['/agents'] },
   { to: '/datasets', label: 'Datasets', icon: Database, match: ['/datasets'] },
   { to: '/catalog', label: 'Catalog', icon: BookOpen, match: ['/catalog'] },  // v50 data catalog
+  { to: '/observability', label: 'Observability', icon: Radio, match: ['/observability'] },  // v53 data observability
   { to: '/models', label: 'Models', icon: Network, match: ['/models'] },  // v46 model registry
   { to: '/documents', label: 'Documents', icon: FileText, match: ['/documents'] },
   { to: '/apps', label: 'Apps', icon: LayoutGrid, match: ['/apps'] },

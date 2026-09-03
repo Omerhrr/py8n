@@ -80,8 +80,12 @@ class DatasetWriteNode(BaseNode):
         "Writes the incoming items into a dataset - appends by default, replaces all rows, "
         "upserts (fresh rows REPLACE rows sharing the key_columns values), or ingests "
         "INCREMENTALLY: only rows whose watermark_column value is beyond the stored "
-        "checkpoint are written and the checkpoint advances (v50). A data contract on the "
-        "dataset is enforced before anything lands (error = hard-stop)."
+        "checkpoint are written and the checkpoint advances (v50). UPSERT + a "
+        "watermark_column combines both (v53): rows beyond the checkpoint are MERGED "
+        "on key_columns, so late-arriving updates never duplicate. lookback rewinds "
+        "the comparison window (units for numeric cursors, seconds for ISO) so "
+        "boundary rows are re-admitted. A data contract on the dataset is enforced "
+        "before anything lands (error = hard-stop)."
     )
     category = "actions"
     icon = "hard-drive-download"
@@ -101,11 +105,17 @@ class DatasetWriteNode(BaseNode):
         create_if_missing: bool = Field(default=True, description="Create the dataset on first write")
         watermark_column: str = Field(
             default="",
-            description="Incremental mode: the cursor column (e.g. last_updated) compared against the stored checkpoint",
+            description="Cursor column (e.g. last_updated) compared against the stored checkpoint - in incremental mode OR in upsert mode (incremental upsert)",
         )
         ingestion_key: str = Field(
             default="default",
-            description="Incremental mode: names this pipeline's checkpoint so several pipelines can feed one dataset",
+            description="Names this pipeline's checkpoint so several pipelines can feed one dataset",
+        )
+        lookback: float = Field(
+            default=0.0,
+            ge=0.0,
+            le=1.0e12,
+            description="Rewind the checkpoint comparison by this many units (numeric cursor) or seconds (ISO cursor) so boundary/late rows are re-admitted; pair with mode=upsert to merge instead of duplicate",
         )
 
     async def execute(self, context: ExecutionContext) -> NodeResult:
@@ -125,6 +135,8 @@ class DatasetWriteNode(BaseNode):
             raise NodeExecutionError("Dataset Write mode=upsert needs key_columns (the column(s) that identify a row)")
         if p.mode == "incremental" and not p.watermark_column.strip():
             raise NodeExecutionError("Dataset Write mode=incremental needs watermark_column (the cursor column, e.g. last_updated)")
+        if p.lookback and p.mode not in ("incremental", "upsert"):
+            raise NodeExecutionError("lookback only applies to mode=incremental or mode=upsert (with a watermark_column)")
 
         async with AsyncSessionLocal() as session:
             # v47 lineage: stamp every version this write produces with the
@@ -151,6 +163,7 @@ class DatasetWriteNode(BaseNode):
                     raise NodeExecutionError(str(exc)) from exc
                 created = ds.row_count == 0 and len(rows) > 0
                 updated = inserted = 0
+                wm = p.watermark_column.strip()
                 if p.mode == "replace":
                     if not rows:
                         raise NodeExecutionError("Refusing to replace a dataset with zero items")
@@ -160,16 +173,42 @@ class DatasetWriteNode(BaseNode):
                         missing = [c for c in p.key_columns if c not in rows[0]]
                         if missing:
                             raise NodeExecutionError(f"Upsert key column(s) {missing} not present in the incoming items")
-                    stats = await ds_svc.upsert_rows(session, ds, rows, [str(c) for c in p.key_columns])
-                    written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
+                    keys = [str(c) for c in p.key_columns]
+                    if wm:
+                        # v53 incremental upsert: rows beyond the checkpoint are
+                        # MERGED on key_columns - late updates never duplicate.
+                        fresh, state, checkpoint_before = await ing_svc.filter_incremental(
+                            session, ds, rows, wm, p.ingestion_key, lookback=p.lookback,
+                        )
+                        skipped = len(rows) - len(fresh)
+                        stats = await ds_svc.upsert_rows(session, ds, fresh, keys)
+                        written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
+                        checkpoint_after = state.watermark
+                        await ing_svc.advance(
+                            session, state, checkpoint_after, written,
+                            stats={
+                                "mode": "upsert", "rows_in": len(rows), "written": written,
+                                "skipped": skipped, "updated": updated, "inserted": inserted,
+                                "lookback": p.lookback,
+                            },
+                        )
+                    else:
+                        stats = await ds_svc.upsert_rows(session, ds, rows, keys)
+                        written, updated, inserted = stats["written"], stats["updated"], stats["inserted"]
                 elif p.mode == "incremental":
                     fresh, state, checkpoint_before = await ing_svc.filter_incremental(
-                        session, ds, rows, p.watermark_column.strip(), p.ingestion_key,
+                        session, ds, rows, wm, p.ingestion_key, lookback=p.lookback,
                     )
                     skipped = len(rows) - len(fresh)
                     written = await ds_svc.append_rows(session, ds, fresh)
                     checkpoint_after = state.watermark
-                    await ing_svc.advance(session, state, checkpoint_after, written)
+                    await ing_svc.advance(
+                        session, state, checkpoint_after, written,
+                        stats={
+                            "mode": "incremental", "rows_in": len(rows), "written": written,
+                            "skipped": skipped, "lookback": p.lookback,
+                        },
+                    )
                 else:
                     written = await ds_svc.append_rows(session, ds, rows)
                 total = ds.row_count
@@ -190,12 +229,14 @@ class DatasetWriteNode(BaseNode):
             payload["updated"] = updated
             payload["inserted"] = inserted
             payload["key_columns"] = [str(c) for c in p.key_columns]
-        if p.mode == "incremental":
+        if p.mode == "incremental" or (p.mode == "upsert" and p.watermark_column.strip()):
             payload["rows_in"] = len(rows)
             payload["skipped"] = skipped
             payload["watermark_column"] = p.watermark_column.strip()
             payload["checkpoint_before"] = checkpoint_before
             payload["checkpoint_after"] = checkpoint_after
+            if p.lookback:
+                payload["lookback"] = p.lookback
         if contract_report is not None:
             payload["contract"] = contract_report
         return self._single(payload)

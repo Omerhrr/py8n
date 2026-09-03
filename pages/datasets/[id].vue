@@ -488,6 +488,48 @@ async function checkNow() {
     checkingContract.value = false
   }
 }
+
+// ------------------------------------------------------------------ v53: ingestion checkpoints
+interface IngestionStateRow {
+  key: string
+  watermark: string | null
+  runs: number
+  rows_total: number
+  last_run_at: string | null
+  updated_at: string | null
+  stats: Record<string, any> | null
+}
+const ingestionStates = ref<IngestionStateRow[]>([])
+const ingestionOpen = ref(false)
+const loadingIngestion = ref(false)
+const ingestionMsg = ref('')
+
+async function loadIngestion() {
+  loadingIngestion.value = true
+  try {
+    ingestionStates.value = await api.get<IngestionStateRow[]>(`/datasets/${ref_.value}/ingestion-states`)
+  } catch (e: any) {
+    ingestionMsg.value = e?.data?.detail || e?.message || 'Could not load checkpoints'
+  } finally {
+    loadingIngestion.value = false
+  }
+}
+
+function toggleIngestion() {
+  ingestionOpen.value = !ingestionOpen.value
+  if (ingestionOpen.value && !ingestionStates.value.length) loadIngestion()
+}
+
+async function resetCheckpoint(key: string) {
+  ingestionMsg.value = ''
+  try {
+    await api.del(`/datasets/${ref_.value}/ingestion-states/${encodeURIComponent(key)}`)
+    ingestionMsg.value = `Checkpoint "${key}" reset - the next run re-ingests from scratch`
+    await loadIngestion()
+  } catch (e: any) {
+    ingestionMsg.value = e?.data?.detail || e?.message || 'Could not reset the checkpoint'
+  }
+}
 </script>
 
 <template>
@@ -1002,6 +1044,69 @@ async function checkNow() {
                   {{ v.column }} · {{ v.rule }} · {{ v.count }} row(s) · e.g. {{ v.samples.slice(0, 3).join(' | ') }}
                 </p>
               </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- v53: incremental ingestion checkpoints -->
+      <div class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+        <button class="flex w-full items-center justify-between border-b border-zinc-800/80 px-4 py-2.5 text-left" @click="toggleIngestion">
+          <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+            <GitBranch class="h-3.5 w-3.5 text-lime-400" />
+            Ingestion checkpoints
+          </h2>
+          <span class="flex items-center gap-2 text-[11px] text-zinc-500">
+            {{ ingestionStates.length ? `${ingestionStates.length} pipeline${ingestionStates.length === 1 ? '' : 's'} feeding this dataset` : 'where incremental pipelines left off' }}
+            <ChevronDown class="h-3.5 w-3.5 transition" :class="ingestionOpen && 'rotate-180'" />
+          </span>
+        </button>
+
+        <div v-if="ingestionOpen">
+          <p class="border-b border-zinc-800/60 bg-zinc-900/60 px-4 py-2.5 text-[11px] leading-relaxed text-zinc-400">
+            One checkpoint per pipeline (key): dataset_write in incremental or upsert+watermark mode only writes rows
+            beyond the stored watermark, then advances it. <b class="text-zinc-200">lookback</b> re-admits boundary rows
+            (units for numeric cursors, seconds for ISO) so late arrivals merge instead of vanish. Resetting a checkpoint
+            makes the next run re-ingest from scratch.
+          </p>
+
+          <p v-if="ingestionMsg" class="border-b border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-300">{{ ingestionMsg }}</p>
+
+          <div v-if="loadingIngestion" class="flex items-center justify-center py-6 text-zinc-500">
+            <Loader2 class="h-4 w-4 animate-spin" />
+          </div>
+
+          <div v-else-if="!ingestionStates.length" class="px-4 py-6 text-center text-[11px] text-zinc-600">
+            No checkpoints yet - point a dataset_write node (mode=incremental, or upsert with a watermark_column) at this dataset.
+          </div>
+
+          <div v-else class="divide-y divide-zinc-800/40">
+            <div v-for="s in ingestionStates" :key="s.key" class="flex flex-wrap items-start gap-3 px-4 py-3">
+              <div class="min-w-0 flex-1">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">{{ s.key }}</span>
+                  <span class="font-mono text-[10px] text-zinc-500" title="Stored watermark">wm: {{ s.watermark ?? 'null' }}</span>
+                  <span class="text-[10px] text-zinc-600">{{ s.runs }} runs · {{ s.rows_total.toLocaleString() }} rows in · last {{ s.last_run_at ? new Date(s.last_run_at).toLocaleString() : 'never' }}</span>
+                </div>
+                <p v-if="s.stats" class="mt-1 flex flex-wrap gap-1.5 text-[10px] text-zinc-500">
+                  <span class="rounded bg-zinc-800/60 px-1.5 py-0.5">mode: {{ s.stats.mode }}</span>
+                  <span class="rounded bg-zinc-800/60 px-1.5 py-0.5">rows_in: {{ s.stats.rows_in }}</span>
+                  <span class="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-300">written: {{ s.stats.written }}</span>
+                  <span class="rounded bg-zinc-800/60 px-1.5 py-0.5">skipped: {{ s.stats.skipped }}</span>
+                  <template v-if="s.stats.updated != null">
+                    <span class="rounded bg-sky-500/10 px-1.5 py-0.5 text-sky-300">updated: {{ s.stats.updated }}</span>
+                    <span class="rounded bg-zinc-800/60 px-1.5 py-0.5">inserted: {{ s.stats.inserted }}</span>
+                  </template>
+                  <span v-if="s.stats.lookback" class="rounded bg-amber-500/10 px-1.5 py-0.5 text-amber-300">lookback: {{ s.stats.lookback }}</span>
+                </p>
+              </div>
+              <button
+                class="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[10px] font-medium text-zinc-400 transition hover:border-rose-500/40 hover:text-rose-300"
+                title="Reset this checkpoint - the next run re-ingests everything"
+                @click="resetCheckpoint(s.key)"
+              >
+                <Trash2 class="h-3 w-3" /> reset
+              </button>
             </div>
           </div>
         </div>
