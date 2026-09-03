@@ -89,6 +89,14 @@ const drillLoading = ref(false)
 const drill = ref<IncidentChain | null>(null)
 const drillError = ref('')
 
+// v58: AI investigation state
+const aiLoading = ref(false)
+const aiFindings = ref<any>(null)
+const aiError = ref('')
+const aiNarrate = ref(false)
+const applying = ref(false)
+const appliedNote = ref('')
+
 const typeChips = [
   { label: 'All', value: '' },
   { label: 'Dataset writes', value: 'dataset.' },
@@ -207,10 +215,48 @@ function openIncident(e: ObsEvent) {
   drillLoading.value = true
   drill.value = null
   drillError.value = ''
+  aiFindings.value = null
+  aiError.value = ''
+  appliedNote.value = ''
   api.get<IncidentChain>(`/ops/incidents/${execId}`)
     .then((res) => { drill.value = res })
     .catch((err: any) => { drillError.value = err?.data?.detail || err?.message || 'Drilldown failed' })
     .finally(() => { drillLoading.value = false })
+}
+
+async function runInvestigation() {
+  if (!drill.value) return
+  aiLoading.value = true
+  aiError.value = ''
+  aiFindings.value = null
+  appliedNote.value = ''
+  try {
+    aiFindings.value = await api.post('/ops/ai/investigate', {
+      execution_id: drill.value.execution.id,
+      narrate: aiNarrate.value,
+    })
+  } catch (e: any) {
+    aiError.value = e?.data?.detail || e?.message || 'Investigation failed'
+  } finally {
+    aiLoading.value = false
+  }
+}
+
+async function applyProposal() {
+  const p = aiFindings.value?.proposed_action
+  if (!p) return
+  applying.value = true
+  try {
+    const res = await api.post('/ops/ai/apply-proposal', {
+      workflow_id: p.workflow_id,
+      patch: p.patch,
+    })
+    appliedNote.value = `Applied as workflow v${res.version} - policy: ${Object.entries(res.policy || {}).map(([k, v]) => `${k}=${v}`).join(', ')}`
+  } catch (e: any) {
+    aiError.value = e?.data?.detail || e?.message || 'Apply failed'
+  } finally {
+    applying.value = false
+  }
 }
 
 function stepIcon(step: string) {
@@ -545,6 +591,84 @@ onUnmounted(() => { if (timer) clearInterval(timer) })
                 <p v-if="impactTotals.highest" class="mt-1 text-[10px] text-zinc-500">
                   highest risk: <span class="font-semibold text-zinc-300">{{ impactTotals.highest.kind }} {{ impactTotals.highest.name }}</span>
                 </p>
+              </div>
+
+              <!-- v58: AI operations -->
+              <div class="mt-5 border-t border-zinc-800 pt-4">
+                <div class="flex flex-wrap items-center gap-2">
+                  <button
+                    class="flex items-center gap-1.5 rounded-xl border border-pink-500/40 bg-pink-500/10 px-3 py-1.5 text-[11px] font-semibold text-pink-300 transition hover:bg-pink-500/20 disabled:opacity-50"
+                    :disabled="aiLoading"
+                    @click="runInvestigation"
+                  >
+                    <Loader2 v-if="aiLoading" class="h-3.5 w-3.5 animate-spin" />
+                    <Bot v-else class="h-3.5 w-3.5" />
+                    {{ aiFindings ? 'Re-run AI investigation' : 'AI investigate' }}
+                  </button>
+                  <label class="flex cursor-pointer items-center gap-1.5 text-[10px] text-zinc-500">
+                    <input v-model="aiNarrate" type="checkbox" class="h-3 w-3 accent-pink-500" />
+                    narrate with LLM (fail-soft)
+                  </label>
+                </div>
+                <p v-if="aiError" class="mt-2 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[10px] text-rose-300">{{ aiError }}</p>
+
+                <div v-if="aiFindings" class="mt-3 space-y-3">
+                  <!-- checklist -->
+                  <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                    <p class="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">Investigation checklist</p>
+                    <div class="mt-1.5 space-y-1">
+                      <div v-for="c in aiFindings.checklist" :key="c.step" class="flex items-start gap-2 text-[10px]">
+                        <CheckCircle2 v-if="c.ok" class="mt-0.5 h-3 w-3 shrink-0 text-emerald-400" />
+                        <XCircle v-else class="mt-0.5 h-3 w-3 shrink-0 text-zinc-600" />
+                        <span class="w-40 shrink-0 font-mono text-zinc-500">{{ c.step }}</span>
+                        <span class="min-w-0 flex-1 truncate text-zinc-300" :title="c.detail">{{ c.detail }}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- cause + recommendation -->
+                  <div class="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+                    <p class="text-[10px] font-semibold uppercase tracking-wide text-amber-300">Cause</p>
+                    <p class="mt-1 text-xs font-bold text-zinc-100">{{ aiFindings.cause.label }}
+                      <span class="ml-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300">{{ aiFindings.cause.kind }} · {{ aiFindings.cause.confidence }}</span>
+                    </p>
+                    <p class="mt-0.5 break-all font-mono text-[9px] text-zinc-500">evidence: {{ aiFindings.cause.evidence }}</p>
+                    <p v-for="(h, i) in aiFindings.hints" :key="i" class="mt-0.5 text-[10px] text-zinc-400">· {{ h }}</p>
+                    <p class="mt-2 text-[10px] font-semibold uppercase tracking-wide text-sky-300">Recommendation</p>
+                    <p class="mt-0.5 text-[11px] leading-relaxed text-zinc-300">{{ aiFindings.recommendation }}</p>
+                  </div>
+
+                  <!-- proposed action -->
+                  <div v-if="aiFindings.proposed_action" class="rounded-xl border border-pink-500/30 bg-pink-500/5 p-3">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p class="text-[10px] font-semibold uppercase tracking-wide text-pink-300">Proposed change (AI proposes - you execute)</p>
+                        <p class="mt-0.5 font-mono text-[10px] text-zinc-300">
+                          policy patch: {{ Object.entries(aiFindings.proposed_action.patch).map(([k, v]) => `${k}=${v}`).join(' · ') }}
+                        </p>
+                        <p class="text-[10px] text-zinc-500">{{ aiFindings.proposed_action.rationale }}</p>
+                      </div>
+                      <button
+                        class="rounded-xl bg-pink-500 px-3 py-1.5 text-[11px] font-bold text-white transition hover:bg-pink-400 disabled:opacity-50"
+                        :disabled="applying"
+                        @click="applyProposal"
+                      >
+                        <Loader2 v-if="applying" class="mr-1 inline h-3 w-3 animate-spin" />
+                        Apply proposal
+                      </button>
+                    </div>
+                    <p v-if="appliedNote" class="mt-2 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-[10px] text-emerald-300">{{ appliedNote }}</p>
+                  </div>
+                  <p v-else class="text-[10px] text-zinc-600">No automated change proposed for this cause - the recommendation above is the action.</p>
+
+                  <!-- narration -->
+                  <div v-if="aiFindings.narration" class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                    <p class="text-[10px] font-semibold uppercase tracking-wide text-pink-300">LLM incident report</p>
+                    <p class="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-zinc-300">{{ aiFindings.narration }}</p>
+                  </div>
+                  <p v-else-if="aiFindings.narration_note" class="text-[10px] text-zinc-600">{{ aiFindings.narration_note }}</p>
+                  <p class="text-[9px] text-zinc-600">{{ aiFindings.disclaimer }}</p>
+                </div>
               </div>
             </template>
           </div>
