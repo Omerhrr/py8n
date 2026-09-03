@@ -289,6 +289,10 @@ class Dataset(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)
     source: Mapped[str] = mapped_column(String(20), default="api")  # api|upload|workflow
     tags: Mapped[list | None] = mapped_column(JSONVariant, nullable=True)  # v44 tag strings
+    # v54 governance: steward certification stamp (NULL = uncertified). Set
+    # by the owner via POST /datasets/{id}/certify - a human promise that
+    # this dataset is what it says it is, surfaced in the catalog.
+    certified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -728,3 +732,29 @@ class IngestionState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
     __table_args__ = (UniqueConstraint("dataset_id", "key", name="uq_ingestion_state"),)
+
+
+class DatasetContractRevision(Base):
+    """Immutable contract-history snapshot (v54) - what the dataset
+    promised BEFORE the current contract.
+
+    One row per superseded contract state, written by :func:`put_contract`
+    when a contract is replaced and by the delete endpoint when a contract
+    is removed (note="contract removed"), so the promise trail survives
+    edits and deletions. Diffing two revisions answers "what changed and
+    who must re-check their pipelines" without grepping history.
+
+    Capped at the newest MAX_CONTRACT_REVISIONS per dataset (trimmed on
+    insert) - contracts change at human speed, not machine speed.
+    """
+
+    __tablename__ = "dataset_contract_revisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    columns_json: Mapped[list] = mapped_column(JSONVariant, default=list)
+    on_violation: Mapped[str] = mapped_column(String(10), default="warn", nullable=False)
+    note: Mapped[str] = mapped_column(String(200), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)

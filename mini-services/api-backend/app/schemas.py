@@ -375,6 +375,8 @@ class DatasetOut(BaseModel):
     row_count: int = 0
     source: str = "api"
     tags: list[str] = Field(default_factory=list)
+    owner_id: str | None = None  # v54 governance surface: NULL = unclaimed
+    certified_at: datetime | None = None  # v54 governance: steward certification
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

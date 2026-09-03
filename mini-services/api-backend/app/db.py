@@ -95,5 +95,9 @@ async def init_db() -> None:
             ing_cols = {c["name"] for c in insp.get_columns("ingestion_states")}
             if "stats_json" not in ing_cols:
                 sync_conn.execute(text("ALTER TABLE ingestion_states ADD COLUMN stats_json JSON"))
+            # v54: dataset governance certification stamp
+            ds54_cols = {c["name"] for c in insp.get_columns("datasets")}
+            if "certified_at" not in ds54_cols:
+                sync_conn.execute(text("ALTER TABLE datasets ADD COLUMN certified_at TIMESTAMP"))
 
         await conn.run_sync(_add_missing_columns)

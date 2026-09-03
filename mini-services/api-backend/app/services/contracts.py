@@ -22,10 +22,10 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import Dataset, DatasetContract
+from ..models import Dataset, DatasetContract, DatasetContractRevision
 
 CONTRACT_DTYPES = ("text", "integer", "number", "boolean", "datetime")
 
@@ -191,18 +191,163 @@ async def put_contract(
     columns: list,
     on_violation: str = "warn",
 ) -> DatasetContract:
-    """Create or replace the dataset's contract (version bumps on replace)."""
+    """Create or replace the dataset's contract (version bumps on replace).
+
+    v54: the OUTGOING state is snapshotted into ``dataset_contract_revisions``
+    before it is overwritten, so the promise trail survives every edit and a
+    diff between any two versions is always available.
+    """
     normalized = validate_contract_def(columns, on_violation)
     row = await get_contract(db, ds.id)
     if row is None:
         row = DatasetContract(dataset_id=ds.id, owner_id=ds.owner_id)
         db.add(row)
     else:
+        await snapshot_revision(db, ds, row, note=f"superseded by v{int(row.version or 1) + 1}")
         row.version = int(row.version or 1) + 1
     row.columns_json = normalized
     row.on_violation = on_violation
     await db.flush()
     return row
+
+
+MAX_CONTRACT_REVISIONS = 20  # per dataset; oldest beyond the cap are trimmed
+
+
+async def snapshot_revision(
+    db: AsyncSession, ds: Dataset, contract: DatasetContract, note: str = ""
+) -> DatasetContractRevision | None:
+    """Preserve one contract state in the revision history (v54).
+
+    A no-op when the contract carries no columns (never persisted) or when
+    an identical revision already exists (double-snapshot guard). Trims the
+    oldest revisions beyond :data:`MAX_CONTRACT_REVISIONS`.
+    """
+    cols = contract.columns_json or []
+    if not cols:
+        return None
+    existing = (
+        await db.execute(
+            select(DatasetContractRevision)
+            .where(
+                DatasetContractRevision.dataset_id == ds.id,
+                DatasetContractRevision.version == int(contract.version or 1),
+            )
+        )
+    ).scalars().first()
+    if existing is not None:
+        return None  # same version already captured - nothing to add
+    rev = DatasetContractRevision(
+        dataset_id=ds.id,
+        owner_id=ds.owner_id,
+        version=int(contract.version or 1),
+        columns_json=cols,
+        on_violation=contract.on_violation or "warn",
+        note=note[:200],
+    )
+    db.add(rev)
+    await db.flush()
+    stale = (
+        (
+            await db.execute(
+                select(DatasetContractRevision)
+                .where(DatasetContractRevision.dataset_id == ds.id)
+                .order_by(DatasetContractRevision.version.desc(), DatasetContractRevision.created_at.desc())
+                .offset(MAX_CONTRACT_REVISIONS)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    for old in stale:
+        await db.delete(old)
+    return rev
+
+
+async def delete_contract(db: AsyncSession, ds: Dataset) -> bool:
+    """Remove the dataset's contract, snapshotting the final state first.
+
+    Returns True when a contract existed. The revision trail keeps the
+    removed promise (note='contract removed') so history survives deletion.
+    """
+    row = await get_contract(db, ds.id)
+    if row is None:
+        return False
+    await snapshot_revision(db, ds, row, note="contract removed")
+    await db.execute(sa_delete(DatasetContract).where(DatasetContract.dataset_id == ds.id))
+    await db.flush()
+    return True
+
+
+async def list_revisions(db: AsyncSession, dataset_id: str) -> list[DatasetContractRevision]:
+    """The dataset's contract history, newest version first."""
+    return (
+        (
+            await db.execute(
+                select(DatasetContractRevision)
+                .where(DatasetContractRevision.dataset_id == dataset_id)
+                .order_by(DatasetContractRevision.version.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+# ---------------------------------------------------------------- diff (v54)
+
+
+def _allowed_equal(a: list | None, b: list | None) -> bool:
+    """Allowed-value domains compare as sets (order is presentation)."""
+    if a is None and b is None:
+        return True
+    if a is None or b is None:
+        return False
+    return {str(v) for v in a} == {str(v) for v in b}
+
+
+def diff_contract_columns(old: list[dict], new: list[dict]) -> dict:
+    """Two contract column lists -> a human-readable change report.
+
+    Shape::
+
+        {"added": [col], "removed": [col],
+         "changed": [{"name", "field", "old", "new"}],
+         "same": [names], "summary": "1 added, 2 removed, 1 changed"}
+
+    ``changed`` walks dtype / nullable / allowed per column, so a reviewer
+    sees exactly which promise loosened or tightened.
+    """
+    old_by = {c["name"]: c for c in (old or []) if isinstance(c, dict) and c.get("name")}
+    new_by = {c["name"]: c for c in (new or []) if isinstance(c, dict) and c.get("name")}
+    added = [new_by[n] for n in new_by if n not in old_by]
+    removed = [old_by[n] for n in old_by if n not in new_by]
+    changed: list[dict] = []
+    same: list[str] = []
+    for name, nc in new_by.items():
+        oc = old_by.get(name)
+        if oc is None:
+            continue
+        if nc.get("dtype") != oc.get("dtype"):
+            changed.append({"name": name, "field": "dtype", "old": oc.get("dtype"), "new": nc.get("dtype")})
+        if bool(nc.get("nullable", True)) != bool(oc.get("nullable", True)):
+            changed.append({"name": name, "field": "nullable", "old": bool(oc.get("nullable", True)), "new": bool(nc.get("nullable", True))})
+        if not _allowed_equal(oc.get("allowed"), nc.get("allowed")):
+            changed.append({
+                "name": name, "field": "allowed",
+                "old": oc.get("allowed"), "new": nc.get("allowed"),
+            })
+        if not any(ch["name"] == name for ch in changed):
+            same.append(name)
+    parts = []
+    if added:
+        parts.append(f"{len(added)} added")
+    if removed:
+        parts.append(f"{len(removed)} removed")
+    if changed:
+        parts.append(f"{len(changed)} changed")
+    summary = ", ".join(parts) if parts else "no changes"
+    return {"added": added, "removed": removed, "changed": changed, "same": same, "summary": summary}
 
 
 def contract_report(row: DatasetContract | None) -> dict:

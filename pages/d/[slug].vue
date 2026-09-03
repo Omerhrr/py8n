@@ -112,6 +112,8 @@ onMounted(() => { load(); schedule() })
 onBeforeUnmount(() => { if (timer) clearInterval(timer) })
 
 const comps = computed(() => rt.value?.components || [])
+// v54 drilldown target: ?c=<component id> highlights + scrolls to that card
+const highlightComp = computed(() => (route.query.c ? String(route.query.c) : undefined))
 const dsNames = computed(() => (rt.value?.datasets || []).map((d: any) => d.name))
 
 // active cross-filters flattened for the chip row
@@ -187,7 +189,7 @@ const filterChips = computed(() => {
         >Clear all</button>
       </div>
       <div class="grid gap-3 sm:grid-cols-2">
-        <DashboardBoard :components="comps" :group-bys="groupBys" :active-filters="crossFilters" @segment-click="onSegmentClick" />
+        <DashboardBoard :components="comps" :group-bys="groupBys" :active-filters="crossFilters" :highlight-id="highlightComp" @segment-click="onSegmentClick" />
       </div>
       <p v-if="comps.length === 0" class="mt-10 text-center text-sm text-zinc-600">This board has no components yet.</p>
     </div>

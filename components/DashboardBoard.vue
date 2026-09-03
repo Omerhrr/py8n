@@ -2,7 +2,7 @@
 // Shared dashboard board renderer (v31) - used by the builder's live preview
 // and the public /d/{slug} page. Input: the RENDERED component payload from
 // POST /dashboards/{ref}/preview or GET /dashboards/{slug}/runtime.
-import { computed, useAttrs } from 'vue'
+import { computed, useAttrs, onMounted, ref } from 'vue'
 
 const props = defineProps<{
   components: any[]
@@ -12,7 +12,25 @@ const props = defineProps<{
   // stays byte-identical to v46.
   groupBys?: Record<string, string> // chart id -> group_by column, learned from the board config
   activeFilters?: Record<string, string[]> // active cross-filters, for the active-segment highlight
+  // v54 drilldown target: when set (from ?c= on the runtime), that component
+  // card gets a highlight ring and the page scrolls to it.
+  highlightId?: string
 }>()
+
+const HIGHLIGHT_CLASS = 'ring-2 ring-sky-400/70 ring-offset-2 ring-offset-zinc-950'
+const didScroll = ref(false)
+onMounted(() => {
+  if (props.highlightId && !didScroll.value) {
+    didScroll.value = true
+    setTimeout(() => {
+      document.getElementById(`comp-${props.highlightId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }, 350)
+  }
+})
+
+function compClass(id: string): string {
+  return props.highlightId && props.highlightId === id ? HIGHLIGHT_CLASS : ''
+}
 
 // Optional parent callback: @segment-click="..." on the component tag. Read
 // from attrs (not defineEmits) so the handler stays optional - without it no
@@ -116,19 +134,19 @@ function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8)
   <div>
     <template v-for="comp in components" :key="comp.id">
       <!-- stat card -->
-      <div v-if="comp.type === 'stat'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+      <div v-if="comp.type === 'stat'" :id="`comp-${comp.id}`" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4" :class="compClass(comp.id)">
         <p class="truncate text-[11px] font-medium uppercase tracking-wide text-zinc-500">{{ comp.label }}</p>
         <p class="mt-1.5 text-2xl font-bold tabular-nums text-zinc-50">{{ statDisplay(comp.value) }}</p>
       </div>
 
       <!-- text / narrative -->
-      <div v-else-if="comp.type === 'text'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+      <div v-else-if="comp.type === 'text'" :id="`comp-${comp.id}`" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4" :class="compClass(comp.id)">
         <p v-if="comp.title" class="text-sm font-semibold text-zinc-200">{{ comp.title }}</p>
         <p v-if="comp.body" class="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-zinc-400">{{ comp.body }}</p>
       </div>
 
       <!-- chart -->
-      <div v-else-if="comp.type === 'chart'" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+      <div v-else-if="comp.type === 'chart'" :id="`comp-${comp.id}`" class="rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4" :class="compClass(comp.id)">
         <div class="flex items-center justify-between gap-2">
           <p class="truncate text-sm font-semibold text-zinc-200">{{ comp.title || 'Chart' }}</p>
           <span class="shrink-0 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-medium uppercase text-zinc-400">{{ comp.chart_type }}</span>
@@ -227,7 +245,7 @@ function scatterPoints(c: any, w = 320, h = 140, padL = 24, padB = 12, padT = 8)
       </div>
 
       <!-- table -->
-      <div v-else-if="comp.type === 'table'" class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+      <div v-else-if="comp.type === 'table'" :id="`comp-${comp.id}`" class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40" :class="compClass(comp.id)">
         <div class="flex items-center justify-between border-b border-zinc-800/80 px-4 py-2.5">
           <p class="truncate text-sm font-semibold text-zinc-200">{{ comp.title || 'Table' }}</p>
           <span class="shrink-0 text-[10px] text-zinc-500">{{ comp.row_count }} rows</span>

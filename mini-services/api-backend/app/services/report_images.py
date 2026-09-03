@@ -156,19 +156,53 @@ def render_dashboard_png(
     components: list[dict],
     *,
     generated_at: datetime | None = None,
+    component_id: str | None = None,
+    drilldown: dict | None = None,
 ) -> bytes:
-    """Rendered component list -> PNG bytes (never raises for bad components)."""
+    """Rendered component list -> PNG bytes (never raises for bad components).
+
+    v54 drilldowns: with ``drilldown`` metadata set, every component gets a
+    caption strip beneath it - ``source: <dataset> · drilldown: <url>`` -
+    where the URL points at the runtime board with ``?c=<component id>``
+    (the runtime highlights and scrolls to that component). With
+    ``component_id`` set, ONLY that component renders (plus the header
+    band) - the drilldown target rendered standalone.
+    """
     stamp = (generated_at or datetime.now(timezone.utc)).strftime("%Y-%m-%d %H:%M UTC")
-    comps = [c for c in (components or []) if isinstance(c, dict)][:MAX_COMPONENTS]
+    comps = [c for c in (components or []) if isinstance(c, dict)]
+    if component_id:
+        comps = [c for c in comps if str(c.get("id") or "") == str(component_id)]
+    comps = comps[:MAX_COMPONENTS]
+    dd = drilldown or {}
+    base = str(dd.get("base_url") or "").rstrip("/")
+    slug = str(dd.get("slug") or "")
+    ds_names = dd.get("datasets") or {}
+
+    def _ref(comp: dict) -> str:
+        cid = comp.get("id") or ""
+        return f"{base}/d/{slug}?c={cid}" if slug else (f"?c={cid}" if cid else "")
+
+    def _caption(comp: dict) -> str:
+        parts = []
+        src = ds_names.get(comp.get("dataset_id") or comp.get("id"))
+        if src:
+            parts.append(f"source: {src}")
+        ref = _ref(comp)
+        if ref:
+            parts.append(f"drilldown: {ref}")
+        return "  ·  ".join(parts)
 
     stats = [c for c in comps if c.get("type") in ("stat", "kpi")]
     body = [c for c in comps if c.get("type") not in ("stat", "kpi")]
 
-    # One gridspec owns the whole figure: header row + one row per component.
+    # One gridspec owns the whole figure: header row + one row per component
+    # (v54: each row may carry a thin caption strip for its drilldown link).
+    cap_h = 0.34 if dd else 0.0
     units = [0.9]  # header band
     if stats:
-        units.append(1.7)
-    units.extend([3.1] * len(body))
+        units.append(1.7 + (cap_h if any(_caption(c) for c in stats) else 0.0))
+    for comp in body:
+        units.append(3.1 + (cap_h if _caption(comp) else 0.0))
     if not comps:
         units.append(2.0)
     fig_h = 0.55 + sum(units)
@@ -188,18 +222,30 @@ def render_dashboard_png(
 
     row = 1
     if stats:
-        sgs = gs[row].subgridspec(1, max(len(stats), 1))
+        n = max(len(stats), 1)
+        sgs = gs[row].subgridspec(2 if any(_caption(c) for c in stats) else 1, 1, height_ratios=[1.7, cap_h] if any(_caption(c) for c in stats) else None)
+        chart_area = sgs[0].subgridspec(1, n)
         for i, comp in enumerate(stats):
-            ax = fig.add_subplot(sgs[0, i])
+            ax = fig.add_subplot(chart_area[0, i])
             try:
                 _stat_card(ax, comp)
             except Exception:  # noqa: BLE001 - degrade, never fail the report
                 logger.warning("stat card %s failed to render", comp.get("id"), exc_info=True)
                 _placeholder(ax, comp.get("label") or "stat")
+        if any(_caption(c) for c in stats):
+            cap_ax = fig.add_subplot(sgs[1])
+            cap_ax.axis("off")
+            joined = "   |   ".join(filter(None, (_caption(c) for c in stats)))
+            cap_ax.text(0.0, 0.5, joined[:200], fontsize=7.5, color=MUTED, va="center", ha="left", family="monospace")
         row += 1
 
     for comp in body:
-        ax = fig.add_subplot(gs[row])
+        has_cap = bool(_caption(comp))
+        if has_cap:
+            rgs = gs[row].subgridspec(2, 1, height_ratios=[3.1, cap_h])
+            ax = fig.add_subplot(rgs[0])
+        else:
+            ax = fig.add_subplot(gs[row])
         try:
             ctype = comp.get("type")
             if ctype == "chart":
@@ -219,12 +265,16 @@ def render_dashboard_png(
         except Exception:  # noqa: BLE001 - degrade, never fail the report
             logger.warning("component %s failed to render", comp.get("id"), exc_info=True)
             _placeholder(ax, str(comp.get("title") or "component"))
+        if has_cap:
+            cap_ax = fig.add_subplot(rgs[1])
+            cap_ax.axis("off")
+            cap_ax.text(0.0, 0.5, _caption(comp)[:180], fontsize=7.5, color=MUTED, va="center", ha="left", family="monospace")
         row += 1
 
     if not comps:
         ax = fig.add_subplot(gs[row])
         ax.axis("off")
-        ax.text(0.5, 0.5, "no components configured", ha="center", va="center", fontsize=11, color=MUTED)
+        ax.text(0.5, 0.5, "no components configured" if not component_id else f"component {component_id!r} not found", ha="center", va="center", fontsize=11, color=MUTED)
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", facecolor="white")

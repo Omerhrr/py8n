@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   BookOpen, Loader2, Search, Tag, Database, ShieldCheck, ShieldAlert,
   ArrowDownToLine, ArrowUpFromLine, RefreshCw, CircleDot, X, Plus, Trash2, Save, ListChecks,
+  BadgeCheck, Landmark, Award,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -24,6 +25,10 @@ interface CatalogEntry {
   freshness: { last_write_at: string | null; age_minutes: number | null; tier: string }
   versions: { count: number; latest: number }
   contract: { present: boolean; on_violation: string | null; version: number }
+  certified: boolean
+  certified_at: string | null
+  owner_id: string | null
+  claimable: boolean
   producers: string[]
   consumers: string[]
 }
@@ -50,6 +55,24 @@ const allTags = computed(() => {
   for (const e of entries.value) for (const t of e.tags) set.add(t)
   return [...set].sort()
 })
+
+// v54 governance: client-side filter chips over the derived cards
+const govFilter = ref<'all' | 'certified' | 'unclaimed'>('all')
+const visibleEntries = computed(() => {
+  if (govFilter.value === 'certified') return entries.value.filter(e => e.certified)
+  if (govFilter.value === 'unclaimed') return entries.value.filter(e => e.claimable)
+  return entries.value
+})
+
+async function quickClaim(e: CatalogEntry) {
+  pageError.value = ''
+  try {
+    await api.post(`/datasets/${e.id}/claim`, {})
+    await load()
+  } catch (err: any) {
+    pageError.value = err?.data?.detail || err?.message || 'Claim failed - sign in first?'
+  }
+}
 
 const tierMeta: Record<string, { dot: string; label: string }> = {
   fresh: { dot: 'bg-emerald-400', label: 'fresh (< 1h)' },
@@ -210,6 +233,58 @@ async function checkCurrent() {
     cErr.value = err?.data?.detail || err?.message || 'Check failed'
   }
 }
+
+// ------------------------------------------------------------- v54: governance modal
+const govorFor = ref<CatalogEntry | null>(null)
+const govBusy = ref(false)
+const govMsg = ref('')
+const govErr = ref('')
+const govTransferTo = ref('')
+const govDesc = ref('')
+const govTags = ref('')
+
+function openGovern(e: CatalogEntry) {
+  govorFor.value = e
+  govMsg.value = ''
+  govErr.value = ''
+  govTransferTo.value = ''
+  govDesc.value = e.description || ''
+  govTags.value = (e.tags || []).join(', ')
+}
+
+async function govAct(fn: () => Promise<any>, okMsg: string) {
+  if (!govorFor.value) return
+  govBusy.value = true
+  govMsg.value = ''
+  govErr.value = ''
+  try {
+    await fn()
+    govMsg.value = okMsg
+    await load()
+    const fresh = entries.value.find(x => x.id === govorFor.value?.id)
+    if (fresh) govorFor.value = fresh
+  } catch (err: any) {
+    govErr.value = err?.data?.detail || err?.message || 'Action failed'
+  } finally {
+    govBusy.value = false
+  }
+}
+
+const claimHere = () => govAct(() => api.post(`/datasets/${govorFor.value!.id}/claim`, {}), 'Ownership claimed')
+const releaseHere = () => govAct(() => api.post(`/datasets/${govorFor.value!.id}/claim`, { owner_id: null }), 'Released - the dataset is unclaimed again')
+const transferHere = () => govAct(
+  () => api.post(`/datasets/${govorFor.value!.id}/claim`, { owner_id: govTransferTo.value.trim() }),
+  'Ownership transferred',
+)
+const certifyHere = () => govAct(() => api.post(`/datasets/${govorFor.value!.id}/certify`), 'Certified - the catalog shows the steward badge')
+const uncertifyHere = () => govAct(() => api.del(`/datasets/${govorFor.value!.id}/certify`), 'Certification removed')
+const saveMeta = () => govAct(
+  () => api.put(`/datasets/${govorFor.value!.id}`, {
+    description: govDesc.value,
+    tags: govTags.value.split(',').map(s => s.trim()).filter(Boolean),
+  }),
+  'Description and tags saved',
+)
 </script>
 
 <template>
@@ -242,6 +317,16 @@ async function checkCurrent() {
               <option value="">All tags</option>
               <option v-for="t in allTags" :key="t" :value="t">{{ t }}</option>
             </select>
+            <!-- v54 governance filters -->
+            <div class="flex overflow-hidden rounded-xl border border-zinc-800">
+              <button
+                v-for="f in ([['all', 'All'], ['certified', 'Certified'], ['unclaimed', 'Unclaimed']] as const)"
+                :key="f[0]"
+                class="px-2.5 py-2 text-[11px] font-medium transition"
+                :class="govFilter === f[0] ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-950 text-zinc-400 hover:text-zinc-200'"
+                @click="govFilter = f[0]"
+              >{{ f[1] }}</button>
+            </div>
             <button
               class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs font-medium text-zinc-300 transition hover:border-orange-500/40 hover:text-orange-300 disabled:opacity-50"
               :disabled="refreshing"
@@ -286,7 +371,7 @@ async function checkCurrent() {
 
       <div v-else class="grid gap-3 lg:grid-cols-2">
         <div
-          v-for="e in entries"
+          v-for="e in visibleEntries"
           :key="e.id"
           class="group cursor-pointer rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4 transition hover:border-orange-500/40 hover:bg-zinc-900"
           @click="navigateTo(`/datasets/${e.id}`)"
@@ -298,6 +383,10 @@ async function checkCurrent() {
             <div class="min-w-0 flex-1">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="truncate text-sm font-semibold group-hover:text-orange-200">{{ e.name }}</span>
+                <span v-if="e.certified" class="flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300" title="Steward-certified dataset">
+                  <BadgeCheck class="h-3 w-3" /> certified
+                </span>
+                <span v-if="e.claimable" class="rounded-full border border-dashed border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500">unclaimed</span>
                 <span class="flex items-center gap-1 rounded-full bg-zinc-800/80 px-2 py-0.5 text-[10px] text-zinc-400">
                   <span class="h-1.5 w-1.5 rounded-full" :class="tierOf(e).dot" />
                   {{ tierOf(e).label }}
@@ -311,13 +400,30 @@ async function checkCurrent() {
                   <component :is="e.contract.on_violation === 'error' ? ShieldAlert : ShieldCheck" class="h-3 w-3" />
                   contract · {{ e.contract.on_violation }}
                 </span>
-                <button
-                  class="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-medium text-zinc-400 transition hover:border-amber-500/40 hover:text-amber-300"
-                  title="Edit this dataset's data contract"
-                  @click.stop="openContract(e)"
-                >
-                  <ShieldCheck class="h-3 w-3" /> Contract
-                </button>
+                <div class="ml-auto flex shrink-0 items-center gap-1">
+                  <button
+                    v-if="e.claimable"
+                    class="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-medium text-zinc-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                    title="Claim ownership of this dataset"
+                    @click.stop="quickClaim(e)"
+                  >
+                    <Landmark class="h-3 w-3" /> claim
+                  </button>
+                  <button
+                    class="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-medium text-zinc-400 transition hover:border-amber-500/40 hover:text-amber-300"
+                    title="Edit this dataset's data contract"
+                    @click.stop="openContract(e)"
+                  >
+                    <ShieldCheck class="h-3 w-3" /> Contract
+                  </button>
+                  <button
+                    class="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] font-medium text-zinc-400 transition hover:border-emerald-500/40 hover:text-emerald-300"
+                    title="Ownership, certification, description and tags"
+                    @click.stop="openGovern(e)"
+                  >
+                    <Award class="h-3 w-3" /> Govern
+                  </button>
+                </div>
               </div>
               <p v-if="e.description" class="mt-1 line-clamp-2 text-[11px] text-zinc-500">{{ e.description }}</p>
 
@@ -386,7 +492,7 @@ async function checkCurrent() {
 
           <div class="flex-1 overflow-auto p-4">
             <div v-if="cLoading" class="grid place-items-center py-10 text-zinc-600"><Loader2 class="h-5 w-5 animate-spin" /></div>
-            <template v-else>
+            <div v-else>
               <div class="mb-3 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                 <span class="font-semibold text-zinc-400">on violation</span>
                 <select
@@ -455,7 +561,12 @@ async function checkCurrent() {
 
               <p v-if="cMsg" class="mt-3 rounded-lg bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-300">{{ cMsg }}</p>
               <p v-if="cErr" class="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">{{ cErr }}</p>
-            </template>
+            </div>
+
+            <!-- v54: version history + diff (hidden while loading) -->
+            <div v-if="!cLoading" class="mt-4">
+              <ContractHistory :key="contractFor.id" :dataset-id="contractFor.id" />
+            </div>
           </div>
 
           <div class="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-800/80 px-5 py-3">
@@ -484,6 +595,115 @@ async function checkCurrent() {
               <Save v-else class="h-3.5 w-3.5" />
               save contract
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- v54: governance modal - ownership, certification, description, tags -->
+    <Teleport to="body">
+      <div
+        v-if="govorFor"
+        class="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+        @click.self="govorFor = null"
+      >
+        <div class="flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl">
+          <div class="flex items-center justify-between border-b border-zinc-800/80 px-5 py-3.5">
+            <div>
+              <h2 class="flex items-center gap-2 text-sm font-bold">
+                <Landmark class="h-4 w-4 text-emerald-400" /> Govern - {{ govorFor.name }}
+              </h2>
+              <p class="mt-0.5 text-[11px] text-zinc-500">Ownership, steward certification and card metadata</p>
+            </div>
+            <button class="rounded-lg p-1 text-zinc-500 hover:text-zinc-200" @click="govorFor = null"><X class="h-4 w-4" /></button>
+          </div>
+
+          <div class="flex-1 overflow-auto p-4">
+            <!-- ownership -->
+            <div class="rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-3">
+              <p class="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wide text-zinc-400">
+                <Landmark class="h-3 w-3" /> ownership
+              </p>
+              <p class="mt-1.5 text-xs text-zinc-300">
+                <template v-if="govorFor.owner_id">
+                  owned by <b>{{ govorFor.owner || govorFor.owner_id.slice(0, 8) }}</b>
+                  <span class="font-mono text-[10px] text-zinc-600">({{ govorFor.owner_id.slice(0, 8) }})</span>
+                </template>
+                <template v-else>
+                  <span class="text-zinc-500">unclaimed</span> - anyone signed in can claim it
+                </template>
+              </p>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <button
+                  v-if="govorFor.claimable"
+                  class="rounded-lg border border-emerald-500/40 px-2.5 py-1.5 text-[11px] font-medium text-emerald-300 transition hover:bg-emerald-500/10 disabled:opacity-50"
+                  :disabled="govBusy"
+                  @click="claimHere"
+                >claim for me</button>
+                <template v-else>
+                  <input
+                    v-model="govTransferTo"
+                    class="min-w-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-emerald-500/60"
+                    placeholder="transfer to user id..."
+                  />
+                  <button
+                    class="rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-50"
+                    :disabled="govBusy || !govTransferTo.trim()"
+                    @click="transferHere"
+                  >transfer</button>
+                  <button
+                    class="rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition hover:border-rose-500/40 hover:text-rose-300 disabled:opacity-50"
+                    :disabled="govBusy"
+                    @click="releaseHere"
+                  >release</button>
+                </template>
+              </div>
+            </div>
+
+            <!-- certification -->
+            <div class="mt-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-3">
+              <p class="flex items-center gap-2 text-[11px] font-bold uppercase tracking-wide text-zinc-400">
+                <BadgeCheck class="h-3 w-3" :class="govorFor.certified ? 'text-emerald-400' : ''" /> steward certification
+              </p>
+              <p class="mt-1.5 text-xs text-zinc-400">
+                <template v-if="govorFor.certified">
+                  <span class="text-emerald-300">Certified</span>
+                  <span v-if="govorFor.certified_at" class="text-zinc-600"> - a human vouched for this dataset</span>
+                </template>
+                <template v-else>Not certified - the catalog shows no steward badge.</template>
+              </p>
+              <button
+                class="mt-2 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium transition disabled:opacity-50"
+                :class="govorFor.certified ? 'border-zinc-800 text-zinc-400 hover:border-rose-500/40 hover:text-rose-300' : 'border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10'"
+                :disabled="govBusy"
+                @click="govorFor.certified ? uncertifyHere() : certifyHere()"
+              >{{ govorFor.certified ? 'remove certification' : 'certify this dataset' }}</button>
+            </div>
+
+            <!-- metadata -->
+            <div class="mt-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-3">
+              <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-400">description & tags</p>
+              <textarea
+                v-model="govDesc"
+                rows="2"
+                maxlength="500"
+                class="mt-2 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs outline-none focus:border-emerald-500/60"
+                placeholder="What is this dataset? Where does it come from?"
+              ></textarea>
+              <input
+                v-model="govTags"
+                class="mt-2 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs outline-none focus:border-emerald-500/60"
+                placeholder="tags, comma separated"
+              />
+              <button
+                class="mt-2 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-50"
+                :disabled="govBusy"
+                @click="saveMeta"
+              >save description & tags</button>
+            </div>
+
+            <p v-if="govMsg" class="mt-3 rounded-lg bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-300">{{ govMsg }}</p>
+            <p v-if="govErr" class="mt-3 rounded-lg bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">{{ govErr }}</p>
           </div>
         </div>
       </div>

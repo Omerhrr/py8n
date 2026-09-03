@@ -3,11 +3,11 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Gauge, Loader2, X, Rocket, Square, Save, RefreshCw, Plus, Trash2,
   ChevronDown, ChevronUp, ArrowUp, ArrowDown, Wand2, ExternalLink, BarChart3, Database, Type,
-  Share2, Copy, Check, History,
+  Share2, Copy, Check, History, ImageDown, Link2,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
-const { api } = useApi()
+const { api, download } = useApi()
 const route = useRoute()
 const boardId = route.params.id as string
 
@@ -200,6 +200,37 @@ async function refreshPreview() {
     error.value = e?.data?.detail || e?.message || 'Preview failed'
   } finally {
     previewing.value = false
+  }
+}
+
+// ------------------------------------------------------------------ v54: per-component drilldowns
+const copiedComp = ref<string | null>(null)
+const compPngBusy = ref<string | null>(null)
+
+function compRef(compId: string): string {
+  const slug = board.value?.slug || ''
+  return slug ? `${window.location.origin}/d/${slug}?c=${compId}` : `?c=${compId}`
+}
+
+async function copyCompRef(compId: string) {
+  try {
+    await navigator.clipboard.writeText(compRef(compId))
+    copiedComp.value = compId
+    setTimeout(() => { copiedComp.value = null }, 1500)
+  } catch {
+    error.value = 'Could not copy the link'
+  }
+}
+
+async function compPng(compId: string) {
+  if (!board.value) return
+  compPngBusy.value = compId
+  try {
+    await download(`/dashboards/${board.value.id}/snapshot?fmt=png&component=${encodeURIComponent(compId)}`, `${board.value.slug || board.value.name}.${compId}.png`)
+  } catch (e: any) {
+    error.value = e?.data?.detail || e?.message || 'PNG export failed'
+  } finally {
+    compPngBusy.value = null
   }
 }
 
@@ -579,6 +610,24 @@ const typeColor: Record<string, string> = {
       <section class="lg:col-span-7">
         <div class="flex items-center justify-between">
           <h2 class="text-xs font-semibold uppercase tracking-wide text-zinc-500">Live preview (server-computed)</h2>
+        </div>
+        <!-- v54: per-component drilldown chips -->
+        <div v-if="preview.length" class="mt-2 flex flex-wrap gap-1.5">
+          <span
+            v-for="c in preview"
+            :key="c.id"
+            class="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 px-1.5 py-1 text-[10px] text-zinc-400"
+          >
+            <span class="max-w-[130px] truncate">{{ c.title || c.label || c.id }}</span>
+            <button class="text-zinc-500 transition hover:text-sky-300" :title="'Download this component as PNG'" @click="compPng(c.id)">
+              <Loader2 v-if="compPngBusy === c.id" class="h-3 w-3 animate-spin" />
+              <ImageDown v-else class="h-3 w-3" />
+            </button>
+            <button class="text-zinc-500 transition hover:text-emerald-300" :title="compRef(c.id)" @click="copyCompRef(c.id)">
+              <Check v-if="copiedComp === c.id" class="h-3 w-3 text-emerald-400" />
+              <Link2 v-else class="h-3 w-3" />
+            </button>
+          </span>
         </div>
         <div class="mt-3 grid gap-3 sm:grid-cols-2">
           <DashboardBoard :components="preview" />

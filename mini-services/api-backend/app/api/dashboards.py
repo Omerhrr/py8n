@@ -27,7 +27,7 @@ from __future__ import annotations
 import secrets
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from ..models import Dashboard, DashboardAuditEvent, Dataset
 from ..schemas import DashboardCreate, DashboardOut, DashboardUpdate, ShareToggle
 from ..services import dashboards as db_svc
 from ..services import datasets as ds_svc
+from ..services import reports as report_svc  # v54: snapshot drilldowns
 
 router = APIRouter(prefix="/dashboards", tags=["dashboards"])
 
@@ -329,6 +330,34 @@ async def unpublish_dashboard(dash_ref: str, user=Depends(get_optional_user), db
     await db.commit()
     await db.refresh(row)
     return _out(row)
+
+
+# ------------------------------------------------------------- snapshot (v54)
+@router.get("/{dash_ref}/snapshot")
+async def dashboard_snapshot(
+    dash_ref: str,
+    fmt: str = Query(default="json", pattern="^(json|png)$"),
+    component: str = Query(default="", max_length=80, description="Component id - renders ONLY that component (the drilldown target)"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Snapshot the board as JSON or PNG (v54).
+
+    The JSON payload stamps every rendered component with its drilldown
+    metadata (``dataset`` name + ``ref`` = ``/d/{slug}?c={id}``); the PNG
+    prints the same as caption strips. Pass ``component=<id>`` for a
+    standalone image/payload of ONE component - the target a report
+    drilldown link points at.
+    """
+    row = await _get_or_404(db, dash_ref, user)
+    data, content_type, _ext, filename = await report_svc.dashboard_snapshot(
+        db, row, fmt, component_id=component or None,
+    )
+    if fmt == "png":
+        return Response(content=data, media_type=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'})
+    import json as _json
+
+    return _json.loads(data)
 
 
 # ----------------------------------------------------------------- runtime

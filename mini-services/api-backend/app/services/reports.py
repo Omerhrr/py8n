@@ -434,50 +434,92 @@ async def build_report_bytes(
 
     if source_type == "dashboard":
         from ..models import Dashboard
-        from ..services import dashboards as dash_svc
-        from ..services import datasets as ds_svc
 
         board = await db.get(Dashboard, source_id)
         if board is None:
             raise LookupError("Dashboard not found")
-        components = (board.config or {}).get("components", [])
-        # dedupe dataset ids, preload each referenced frame once
-        ids: list[str] = []
-        for comp in components:
-            dsid = comp.get("dataset_id")
-            if dsid and dsid not in ids:
-                ids.append(dsid)
-        loaders: dict[str, "object"] = {}
-        names: dict[str, str] = {}
-        for dsid in ids:
-            ds = await db.get(Dataset, dsid)
-            if ds is not None:
-                loaders[dsid] = ds_svc.read_parquet_df(ds_svc.parquet_path(ds.id))
-                names[dsid] = ds.name
-        rendered = dash_svc.compute_config(components, loaders)
-        generated_at = datetime.now(timezone.utc)
-        if fmt == "png":  # v49: image snapshot of the rendered board
-            from ..services.report_images import render_dashboard_png
-
-            return (
-                render_dashboard_png(board.name, rendered, generated_at=generated_at),
-                "image/png",
-                "png",
-                f"{board.slug or board.name}.report.png",
-            )
-        import json as _json
-
-        payload = {
-            "dashboard": {"name": board.name, "slug": board.slug},
-            "datasets": names,
-            "generated_at": generated_at.isoformat(),
-            "filters": {},
-            "components": rendered,
-        }
-        data = _json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-        return data, "application/json", "json", f"{board.slug or board.name}.report.json"
+        return await dashboard_snapshot(db, board, fmt)
 
     raise ValueError(f"Unknown report source_type {source_type!r}")
+
+
+async def dashboard_snapshot(
+    db,
+    board,
+    fmt: str,
+    component_id: str | None = None,
+) -> tuple:
+    """Snapshot one dashboard as json or png (v49; per-component drilldowns v54).
+
+    Every rendered component carries its drilldown metadata: ``dataset``
+    (the source dataset's name) and ``ref`` (``/d/{slug}?c={id}`` - the
+    runtime deep link that highlights the component). PNG captions print
+    the same. With ``component_id`` set, only that component renders -
+    the drilldown target as a standalone image.
+    """
+    from ..config import settings
+    from ..services import dashboards as dash_svc
+    from ..services import datasets as ds_svc
+
+    components = (board.config or {}).get("components", [])
+    if component_id:
+        components = [c for c in components if str(c.get("id") or "") == str(component_id)]
+    # dedupe dataset ids, preload each referenced frame once
+    ids: list[str] = []
+    for comp in components:
+        dsid = comp.get("dataset_id")
+        if dsid and dsid not in ids:
+            ids.append(dsid)
+    loaders: dict[str, "object"] = {}
+    names: dict[str, str] = {}
+    for dsid in ids:
+        ds = await db.get(Dataset, dsid)
+        if ds is not None:
+            loaders[dsid] = ds_svc.read_parquet_df(ds_svc.parquet_path(ds.id))
+            names[dsid] = ds.name
+    rendered = dash_svc.compute_config(components, loaders)
+    generated_at = datetime.now(timezone.utc)
+
+    # v54: component id -> source dataset name (rendered comps drop the id ref)
+    ds_by_comp = {
+        str(c.get("id") or ""): names.get(c.get("dataset_id"))
+        for c in components
+        if c.get("id")
+    }
+    drilldown = {
+        "slug": board.slug or "",
+        "base_url": (settings.public_url or "").rstrip("/"),
+        "datasets": ds_by_comp,
+    }
+
+    if fmt == "png":  # v49: image snapshot of the rendered board
+        from ..services.report_images import render_dashboard_png
+
+        return (
+            render_dashboard_png(
+                board.name, rendered, generated_at=generated_at,
+                component_id=component_id, drilldown=drilldown,
+            ),
+            "image/png",
+            "png",
+            f"{board.slug or board.name}.report.png",
+        )
+    import json as _json
+
+    # v54: every rendered component carries its drilldown metadata
+    for rc in rendered:
+        cid = str(rc.get("id") or "")
+        rc["dataset"] = ds_by_comp.get(cid)
+        rc["ref"] = f"/d/{board.slug}?c={cid}" if board.slug and cid else None
+    payload = {
+        "dashboard": {"name": board.name, "slug": board.slug},
+        "datasets": names,
+        "generated_at": generated_at.isoformat(),
+        "filters": {},
+        "components": rendered,
+    }
+    data = _json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    return data, "application/json", "json", f"{board.slug or board.name}.report.json"
 
 
 async def run_report(report_id: str) -> dict:

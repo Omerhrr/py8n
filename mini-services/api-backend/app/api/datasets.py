@@ -30,15 +30,17 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime, timezone
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user, own_or_404, scope_rows
 from ..db import get_db
-from ..models import Dataset, DatasetVersion, IngestionState
+from ..models import Dataset, DatasetVersion, IngestionState, User
 from ..schemas import (
     ContractCheckIn,
     ContractIn,
@@ -67,6 +69,8 @@ def _out(row: Dataset) -> DatasetOut:
         row_count=row.row_count,
         source=row.source,
         tags=row.tags or [],
+        owner_id=row.owner_id,
+        certified_at=row.certified_at,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -469,12 +473,85 @@ async def put_contract(dataset_id: str, body: ContractIn, user=Depends(get_optio
 
 @router.delete("/{dataset_id}/contract", status_code=204)
 async def delete_contract(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Remove the contract - the final state is snapshotted into the history (v54)."""
     row = await _get_or_404(db, dataset_id, user)
-    existing = await contract_svc.get_contract(db, row.id)
-    if existing is not None:
-        await db.delete(existing)
-        await db.commit()
+    await contract_svc.delete_contract(db, row)
+    await db.commit()
     return None
+
+
+@router.get("/{dataset_id}/contract/revisions")
+async def contract_revisions(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The contract's version history (v54) - newest first, current version included.
+
+    Each entry carries the full column snapshot, so the UI can diff any two
+    versions without a second round trip.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    current = await contract_svc.get_contract(db, row.id)
+    revs = await contract_svc.list_revisions(db, row.id)
+    out = [
+        {
+            "version": int(r.version or 0),
+            "on_violation": r.on_violation,
+            "columns": r.columns_json or [],
+            "note": r.note,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in revs
+    ]
+    if current is not None:
+        out.insert(0, {
+            "version": int(current.version or 1),
+            "on_violation": current.on_violation,
+            "columns": current.columns_json or [],
+            "note": "current",
+            "created_at": (current.updated_at or current.created_at).isoformat() if (current.updated_at or current.created_at) else None,
+        })
+    return {"revisions": out, "current_version": int(current.version or 0) if current else 0}
+
+
+@router.get("/{dataset_id}/contract/diff")
+async def contract_diff(
+    dataset_id: str,
+    from_version: int | None = Query(default=None, alias="from", ge=1),
+    to_version: int | None = Query(default=None, alias="to", ge=1),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Diff two contract versions (v54).
+
+    Defaults to the two most recent known versions (current + the newest
+    revision). Versions resolve across the history table and the live
+    contract; unknown versions 404.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    current = await contract_svc.get_contract(db, row.id)
+    revs = await contract_svc.list_revisions(db, row.id)
+
+    states: dict[int, dict] = {}
+    if current is not None:
+        states[int(current.version or 1)] = {
+            "columns": current.columns_json or [],
+            "on_violation": current.on_violation,
+        }
+    for r in revs:
+        states.setdefault(int(r.version or 0), {
+            "columns": r.columns_json or [],
+            "on_violation": r.on_violation,
+        })
+    if not states:
+        raise HTTPException(status_code=400, detail="This dataset has no contract history to diff")
+
+    versions = sorted(states, reverse=True)
+    fv = from_version if from_version is not None else (versions[1] if len(versions) > 1 else versions[0])
+    tv = to_version if to_version is not None else versions[0]
+    if fv not in states or tv not in states:
+        raise HTTPException(status_code=404, detail=f"Unknown contract version - known: {', '.join(map(str, sorted(states)))}")
+
+    report = contract_svc.diff_contract_columns(states[fv]["columns"], states[tv]["columns"])
+    report.update({"from": fv, "to": tv, "from_on_violation": states[fv]["on_violation"], "to_on_violation": states[tv]["on_violation"]})
+    return report
 
 
 @router.post("/{dataset_id}/contract/check")
@@ -521,3 +598,76 @@ async def reset_ingestion_state(dataset_id: str, key: str, user=Depends(get_opti
         await db.delete(st)
         await db.commit()
     return None
+
+
+# ------------------------------------------------------------------ v54: ownership governance
+
+
+class ClaimIn(BaseModel):
+    """Body for the claim/transfer/release endpoint (all fields optional)."""
+
+    owner_id: str | None = Field(default=None, max_length=36, description="Transfer target user id; omit = claim for yourself")
+
+
+@router.post("/{dataset_id}/claim", response_model=DatasetOut)
+async def claim_dataset(dataset_id: str, body: ClaimIn | None = None, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Ownership governance (v54): claim an unclaimed dataset, or, as the
+    owner, transfer it to another user or release it back to unclaimed.
+
+    * unclaimed + signed-in caller  -> caller becomes owner;
+    * unclaimed + owner_id in body  -> the named user becomes owner;
+    * owner + owner_id=null body    -> release (back to unclaimed);
+    * owner + owner_id=<user>       -> transfer (target must exist);
+    * someone else's dataset        -> 404 (estate visibility rules).
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    target = (body or ClaimIn()).owner_id
+    if row.owner_id is None:
+        if user is None and not target:
+            raise HTTPException(status_code=401, detail="Sign in to claim an unclaimed dataset")
+        new_owner = target or user.id
+        if target and target != (user.id if user else None):
+            u = await db.get(User, target)
+            if u is None:
+                raise HTTPException(status_code=400, detail="Transfer target user does not exist")
+        row.owner_id = new_owner
+    elif user is not None and row.owner_id == user.id:
+        if target is None and body is not None:
+            row.owner_id = None  # explicit release: body {"owner_id": null}
+        elif target:
+            if target == row.owner_id:
+                raise HTTPException(status_code=400, detail="Dataset already owned by that user")
+            u = await db.get(User, target)
+            if u is None:
+                raise HTTPException(status_code=400, detail="Transfer target user does not exist")
+            row.owner_id = target
+        # owner POSTing without a body = a no-op reaffirmation
+    else:
+        raise HTTPException(status_code=404, detail="Not found")
+    await db.commit()
+    await db.refresh(row)
+    return _out(row)
+
+
+@router.post("/{dataset_id}/certify", response_model=DatasetOut)
+async def certify_dataset(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Stamp the dataset as steward-certified (v54) - owner only."""
+    row = await _get_or_404(db, dataset_id, user)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to certify a dataset")
+    row.certified_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(row)
+    return _out(row)
+
+
+@router.delete("/{dataset_id}/certify", response_model=DatasetOut)
+async def uncertify_dataset(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Remove the certification stamp (v54) - owner only."""
+    row = await _get_or_404(db, dataset_id, user)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Sign in to manage certification")
+    row.certified_at = None
+    await db.commit()
+    await db.refresh(row)
+    return _out(row)

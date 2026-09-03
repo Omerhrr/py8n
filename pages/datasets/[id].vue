@@ -1045,6 +1045,11 @@ async function resetCheckpoint(key: string) {
                 </p>
               </div>
             </div>
+
+            <!-- v54: version history + diff -->
+            <div class="border-t border-zinc-800/60 px-4 py-3">
+              <ContractHistory v-if="meta" :dataset-id="meta.id" />
+            </div>
           </div>
         </div>
       </div>

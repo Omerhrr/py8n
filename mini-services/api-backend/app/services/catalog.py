@@ -217,6 +217,11 @@ async def build_catalog(
                 "on_violation": contract.on_violation if contract else None,
                 "version": int(contract.version or 1) if contract else 0,
             },
+            # v54 governance: steward certification + ownership status
+            "certified": ds.certified_at is not None,
+            "certified_at": ds.certified_at.isoformat() if ds.certified_at else None,
+            "owner_id": ds.owner_id,
+            "claimable": ds.owner_id is None,
             "producers": producers.get(ds.id, []),
             "consumers": consumers.get(ds.id, []),
         })

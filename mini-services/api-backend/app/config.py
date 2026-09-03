@@ -16,7 +16,10 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.53.0"
+    version: str = "1.54.0"
+    # v54: public base URL for report drilldown links (PNG captions + json refs).
+    # Empty = relative-only links (/d/{slug}?c={id}).
+    public_url: str = ""
     # Audit hardening: dev-only convenience surfaces default OFF. Production
     # docker-compose already pins PY8N_DEBUG=false explicitly.
     debug: bool = False
