@@ -32,6 +32,8 @@ from ..schemas import (
 from ..services.dispatcher import dispatch_execution
 from ..services.scheduler import resync_workflow_jobs, schedule_entries_for_graph, validate_schedule_params
 from ..services.versions import MAX_VERSIONS, snapshot_workflow_version
+from ..services.workflow_intel import workflow_health as _workflow_health
+from ..services.workflow_intel import workflow_version_diff
 
 router = APIRouter(prefix="/workflows", tags=["workflows"])
 
@@ -524,6 +526,47 @@ async def duplicate_workflow(workflow_id: str, user=Depends(get_optional_user), 
 # ----------------------------------------------------------------------
 # Version history (v13) - bounded snapshot list + restore
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Workflow intelligence (v56) - derived health + version diff
+# ----------------------------------------------------------------------
+@router.get("/{workflow_id}/health")
+async def workflow_health_report(
+    workflow_id: str,
+    window_days: int = Query(30, ge=1, le=365, description="Run-history window"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Derived health report: runs, success rate, durations, p95, retries,
+    fallbacks, most-failing and most-expensive node (nothing stored)."""
+    wf = await db.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)  # v37: other users' rows look nonexistent
+    return await _workflow_health(db, wf, window_days=window_days)
+
+
+@router.get("/{workflow_id}/versions/diff")
+async def workflow_versions_diff(
+    workflow_id: str,
+    from_version: int | None = Query(None, alias="from"),
+    to_version: int | None = Query(None, alias="to"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Param-level diff between two version snapshots (defaults: the two
+    most recent) plus an execution-time impact estimate from run history."""
+    wf = await db.get(Workflow, workflow_id)
+    if wf is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    own_or_404(wf.owner_id, user)
+    try:
+        return await workflow_version_diff(db, wf, from_version, to_version)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Version {exc.args[0]} not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/{workflow_id}/versions")
 async def list_versions(workflow_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     wf = await db.get(Workflow, workflow_id)

@@ -8,7 +8,7 @@ import {
   Play, Save, Copy, Check, Zap, Globe, Loader2, AlertTriangle,
   Link2, Trash2, Download, Clock, ShieldAlert, Tag as TagIcon, X,
   History, RotateCcw, Undo2, Redo2, StickyNote, Settings2, Keyboard,
-  MessageCircle,
+  MessageCircle, Gauge, GitCompareArrows, Plus, Minus, Pencil, ArrowRight,
 } from 'lucide-vue-next'
 import { usePy8nStore } from '~/stores/py8n'
 import PNodeCard from '~/components/editor/PNodeCard.vue'
@@ -646,6 +646,8 @@ async function openHistory() {
   showHistory.value = true
   try {
     await store.loadVersions()
+    initCompareSelection()
+    if (diffFrom.value != null && diffTo.value != null) await loadWfDiff()
   } catch {
     toast('Could not load version history', 'error')
   }
@@ -680,6 +682,66 @@ async function doRestore(version: number) {
 const otherWorkflows = computed(() =>
   store.workflows.filter((w) => w.id !== workflowId.value),
 )
+
+// ------------------------------------------------------------------
+// v56: workflow intelligence - derived health report + version diff
+// ------------------------------------------------------------------
+const showIntel = ref(false)
+const intel = ref<any>(null)
+const intelLoading = ref(false)
+
+async function openIntel() {
+  showIntel.value = true
+  intelLoading.value = true
+  try {
+    intel.value = await api.get(`/workflows/${workflowId.value}/health?window_days=30`)
+  } catch (e: any) {
+    toast(e?.data?.detail || e?.message || 'Could not load workflow health', 'error')
+  } finally {
+    intelLoading.value = false
+  }
+}
+
+const intelVerdictMeta: Record<string, { chip: string; label: string }> = {
+  healthy: { chip: 'bg-emerald-500/15 text-emerald-300', label: 'healthy' },
+  degraded: { chip: 'bg-amber-500/15 text-amber-300', label: 'degraded' },
+  unhealthy: { chip: 'bg-rose-500/15 text-rose-300', label: 'unhealthy' },
+  unscored: { chip: 'bg-zinc-800 text-zinc-400', label: 'no runs yet' },
+}
+
+function fmtDur(ms: number | null): string {
+  if (ms == null) return '-'
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`
+}
+
+// version compare (inside the history modal)
+const diffFrom = ref<number | null>(null)
+const diffTo = ref<number | null>(null)
+const wfDiff = ref<any>(null)
+const diffLoading = ref(false)
+
+function initCompareSelection() {
+  const vs = store.versions?.versions || []
+  if (vs.length >= 2) {
+    if (diffFrom.value == null) diffFrom.value = vs[1].version
+    if (diffTo.value == null) diffTo.value = vs[0].version
+  }
+}
+
+async function loadWfDiff() {
+  if (diffFrom.value == null || diffTo.value == null) return
+  diffLoading.value = true
+  try {
+    const params = new URLSearchParams({ from: String(diffFrom.value), to: String(diffTo.value) })
+    wfDiff.value = await api.get(`/workflows/${workflowId.value}/versions/diff?${params}`)
+  } catch (e: any) {
+    toast(e?.data?.detail || e?.message || 'Diff failed', 'error')
+  } finally {
+    diffLoading.value = false
+  }
+}
 
 async function onErrorWorkflowChange(event: Event) {
   const handlerId = (event.target as HTMLSelectElement).value || null
@@ -1046,6 +1108,15 @@ const runningCount = computed(
           @click="openHistory"
         >
           <History class="h-3.5 w-3.5" /> <span class="hidden md:inline">History</span>
+        </button>
+
+        <!-- v56: workflow intelligence -->
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-400 transition hover:border-sky-500/50 hover:text-sky-300"
+          title="Workflow intelligence - health report from run history"
+          @click="openIntel"
+        >
+          <Gauge class="h-3.5 w-3.5" /> <span class="hidden md:inline">Insight</span>
         </button>
 
         <!-- v20: workflow settings -->
@@ -1415,6 +1486,59 @@ const runningCount = computed(
         </div>
 
         <div class="min-h-0 flex-1 overflow-y-auto p-3">
+          <!-- v56: compare bar -->
+          <div v-if="store.versions && store.versions.versions.length >= 2" class="mb-3 flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+            <GitCompareArrows class="h-3.5 w-3.5 text-sky-400" />
+            <span class="text-[10px] font-semibold uppercase tracking-wide text-zinc-500">compare</span>
+            <select v-model.number="diffFrom" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300 outline-none focus:border-sky-500/60" @change="loadWfDiff">
+              <option v-for="v in store.versions.versions" :key="'f' + v.version" :value="v.version">v{{ v.version }}</option>
+            </select>
+            <ArrowRight class="h-3 w-3 text-zinc-600" />
+            <select v-model.number="diffTo" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-300 outline-none focus:border-sky-500/60" @change="loadWfDiff">
+              <option v-for="v in store.versions.versions" :key="'t' + v.version" :value="v.version">v{{ v.version }}</option>
+            </select>
+            <Loader2 v-if="diffLoading" class="ml-auto h-3.5 w-3.5 animate-spin text-zinc-500" />
+          </div>
+
+          <!-- v56: diff panel -->
+          <div v-if="wfDiff && !wfDiff.identical" class="mb-3 space-y-2 rounded-xl border border-sky-500/25 bg-sky-500/5 p-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-[11px] font-bold text-sky-300">v{{ wfDiff.from.version }} → v{{ wfDiff.to.version }}</span>
+              <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] text-zinc-300">{{ wfDiff.summary }}</span>
+            </div>
+            <p v-if="wfDiff.potential_impact?.detail" class="text-[10px] text-zinc-500">
+              <span class="font-semibold text-zinc-400">Potential impact:</span>
+              <template v-if="wfDiff.potential_impact.estimate != null">
+                execution time ~{{ wfDiff.potential_impact.estimate }}% · {{ wfDiff.potential_impact.detail }}
+              </template>
+              <template v-else>{{ wfDiff.potential_impact.detail }}</template>
+            </p>
+            <div v-for="n in wfDiff.added" :key="'a' + n.node_id" class="flex items-center gap-2 rounded-lg bg-emerald-500/10 px-2 py-1.5 text-[11px] text-emerald-300">
+              <Plus class="h-3 w-3 shrink-0" /> <span class="font-mono text-[9px] text-emerald-400/70">{{ n.type }}</span> Added {{ n.name || n.node_id }}
+            </div>
+            <div v-for="n in wfDiff.removed" :key="'r' + n.node_id" class="flex items-center gap-2 rounded-lg bg-rose-500/10 px-2 py-1.5 text-[11px] text-rose-300">
+              <Minus class="h-3 w-3 shrink-0" /> <span class="font-mono text-[9px] text-rose-400/70">{{ n.type }}</span> Removed {{ n.name || n.node_id }}
+            </div>
+            <div v-for="n in wfDiff.changed" :key="'c' + n.node_id" class="rounded-lg bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300">
+              <div class="flex items-center gap-2">
+                <Pencil class="h-3 w-3 shrink-0" /> <span class="font-mono text-[9px] text-amber-400/70">{{ n.type }}</span>
+                <span>{{ n.name || n.node_id }}</span>
+                <span v-if="n.summary" class="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold">{{ n.summary }}</span>
+              </div>
+              <p v-for="ch in n.changes" :key="ch.param" class="mt-0.5 pl-5 font-mono text-[10px] text-amber-200/80">
+                {{ ch.label }}: {{ ch.old }} → {{ ch.new }}
+              </p>
+            </div>
+            <div v-for="n in wfDiff.renamed" :key="'rn' + n.node_id" class="flex items-center gap-2 rounded-lg bg-zinc-800/60 px-2 py-1.5 text-[11px] text-zinc-300">
+              <Pencil class="h-3 w-3 shrink-0" /> Renamed {{ n.old }} → {{ n.new }}
+            </div>
+            <p v-for="(e, i) in wfDiff.edges_added" :key="'ea' + i" class="pl-2 text-[10px] text-emerald-400/80">+ edge {{ e }}</p>
+            <p v-for="(e, i) in wfDiff.edges_removed" :key="'er' + i" class="pl-2 text-[10px] text-rose-400/80">- edge {{ e }}</p>
+          </div>
+          <p v-else-if="wfDiff && wfDiff.identical" class="mb-3 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-center text-[11px] text-zinc-500">
+            v{{ wfDiff.from.version }} and v{{ wfDiff.to.version }} are identical.
+          </p>
+
           <div v-if="!store.versions" class="flex h-32 items-center justify-center text-sm text-zinc-500">
             <Loader2 class="mr-2 h-4 w-4 animate-spin" /> Loading…
           </div>
@@ -1462,6 +1586,104 @@ const runningCount = computed(
         <p class="border-t border-zinc-800 px-5 py-3 text-[10px] leading-relaxed text-zinc-600">
           Snapshots are taken on create and every content save (graph, name, description).
           Restoring never destroys history - it lands as a new version on top.
+        </p>
+      </div>
+    </div>
+
+    <!-- v56: workflow intelligence modal -->
+    <div
+      v-if="showIntel"
+      class="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4 backdrop-blur-sm"
+      @click.self="showIntel = false"
+    >
+      <div class="flex max-h-[80vh] w-full max-w-2xl flex-col rounded-2xl border border-zinc-800 bg-zinc-900 shadow-2xl">
+        <div class="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
+          <div>
+            <h3 class="flex items-center gap-2 text-sm font-bold">
+              <Gauge class="h-4 w-4 text-sky-400" /> Workflow intelligence
+            </h3>
+            <p class="mt-0.5 text-[11px] text-zinc-500">Derived from the last 30 days of run history - nothing stored</p>
+          </div>
+          <button class="rounded-lg p-1.5 text-zinc-500 transition hover:bg-zinc-800 hover:text-zinc-200" title="Close" @click="showIntel = false">
+            <X class="h-4 w-4" />
+          </button>
+        </div>
+
+        <div class="min-h-0 flex-1 overflow-y-auto p-5">
+          <div v-if="intelLoading && !intel" class="flex h-40 items-center justify-center text-sm text-zinc-500">
+            <Loader2 class="mr-2 h-4 w-4 animate-spin" /> Analyzing run history…
+          </div>
+          <template v-else-if="intel">
+            <div class="mb-4 flex flex-wrap items-center gap-2">
+              <span class="rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide" :class="intelVerdictMeta[intel.verdict]?.chip">
+                {{ intelVerdictMeta[intel.verdict]?.label || intel.verdict }}
+              </span>
+              <span class="text-[11px] text-zinc-500">{{ intel.runs }} finished runs · window {{ intel.window_days }}d · {{ intel.nodes_seen }} distinct nodes</span>
+            </div>
+
+            <div class="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">Success rate</p>
+                <p class="mt-1 text-xl font-bold" :class="intel.success_rate == null ? 'text-zinc-400' : intel.success_rate >= 95 ? 'text-emerald-300' : intel.success_rate >= 80 ? 'text-amber-300' : 'text-rose-300'">
+                  {{ intel.success_rate == null ? '-' : `${intel.success_rate}%` }}
+                </p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">Avg duration</p>
+                <p class="mt-1 text-xl font-bold text-zinc-100">{{ fmtDur(intel.avg_duration_ms) }}</p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">P95</p>
+                <p class="mt-1 text-xl font-bold text-zinc-100">{{ fmtDur(intel.p95_duration_ms) }}</p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">Failures</p>
+                <p class="mt-1 text-xl font-bold" :class="intel.failed ? 'text-rose-300' : 'text-zinc-100'">{{ intel.failed }}</p>
+              </div>
+            </div>
+
+            <div class="mt-3 grid grid-cols-2 gap-3">
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">Retries</p>
+                <p class="mt-1 text-lg font-bold text-amber-300">{{ intel.retries }}</p>
+                <p class="text-[10px] text-zinc-600">extra attempts across all nodes</p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] uppercase tracking-wide text-zinc-500">Fallbacks used</p>
+                <p class="mt-1 text-lg font-bold text-violet-300">{{ intel.fallbacks }}</p>
+                <p class="text-[10px] text-zinc-600">runs that continued on fallback values</p>
+              </div>
+            </div>
+
+            <div class="mt-3 grid gap-3 sm:grid-cols-2">
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-rose-400">Most failing node</p>
+                <template v-if="intel.most_failing_node">
+                  <p class="mt-1 text-sm font-bold">{{ intel.most_failing_node.name }}</p>
+                  <p class="font-mono text-[10px] text-zinc-500">{{ intel.most_failing_node.type }} · {{ intel.most_failing_node.errors }} errors</p>
+                </template>
+                <p v-else class="mt-1 text-[11px] text-zinc-600">no node errors recorded</p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 p-3">
+                <p class="text-[10px] font-semibold uppercase tracking-wide text-orange-400">Most expensive node</p>
+                <template v-if="intel.most_expensive_node">
+                  <p class="mt-1 text-sm font-bold">{{ intel.most_expensive_node.name }}</p>
+                  <p class="font-mono text-[10px] text-zinc-500">{{ intel.most_expensive_node.type }} · avg {{ fmtDur(intel.most_expensive_node.avg_ms) }} · {{ intel.most_expensive_node.share_pct }}% of node time</p>
+                </template>
+                <p v-else class="mt-1 text-[11px] text-zinc-600">no timing data recorded</p>
+              </div>
+            </div>
+
+            <div v-if="intel.last_error" class="mt-3 rounded-xl border border-rose-500/30 bg-rose-500/5 p-3">
+              <p class="text-[10px] font-semibold uppercase tracking-wide text-rose-400">Last error · {{ fmtVersionTime(intel.last_failed_at) }}</p>
+              <p class="mt-1 break-all font-mono text-[10px] text-rose-200/90">{{ intel.last_error }}</p>
+            </div>
+          </template>
+        </div>
+
+        <p class="border-t border-zinc-800 px-5 py-3 text-[10px] leading-relaxed text-zinc-600">
+          Open the History dialog to diff two versions - changes come with an execution-time impact
+          estimate computed from this workflow's own run history.
         </p>
       </div>
     </div>
