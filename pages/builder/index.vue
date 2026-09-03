@@ -88,7 +88,7 @@ function fmtSchedule(s: Record<string, any>): string {
 
 async function loadDrafts() {
   try {
-    drafts.value = await api.get('/systems')
+    drafts.value = await api.get('/builder/systems')
   } catch { /* the create form is the primary path */ }
 }
 
@@ -96,7 +96,7 @@ async function openDraft(id: string) {
   loading.value = true
   pageError.value = ''
   try {
-    draft.value = await api.get<Draft>(`/systems/${id}`)
+    draft.value = await api.get<Draft>(`/builder/systems/${id}`)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load the draft'
   } finally {
@@ -112,7 +112,7 @@ async function createDraft() {
   creating.value = true
   pageError.value = ''
   try {
-    draft.value = await api.post('/systems', { description: description.value.trim(), use_llm: useLlm.value })
+    draft.value = await api.post('/builder/systems', { description: description.value.trim(), use_llm: useLlm.value })
     answers.value = {}
     await loadDrafts()
   } catch (e: any) {
@@ -131,7 +131,7 @@ async function submitAnswers() {
   if (!Object.keys(payload).length) return
   answering.value = true
   try {
-    draft.value = await api.post(`/systems/${draft.value.id}/answers`, { answers: payload })
+    draft.value = await api.post(`/builder/systems/${draft.value.id}/answers`, { answers: payload })
     answers.value = {}
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not save the answers'
@@ -144,7 +144,7 @@ async function toggle(c: SpecComponent) {
   if (!draft.value || draft.value.status === 'built') return
   toggling.value = c.id
   try {
-    draft.value = await api.post(`/systems/${draft.value.id}/components`, {
+    draft.value = await api.post(`/builder/systems/${draft.value.id}/components`, {
       component_id: c.id, selected: !c.selected,
     })
   } catch (e: any) {
@@ -159,7 +159,7 @@ async function build() {
   building.value = true
   buildError.value = ''
   try {
-    draft.value = await api.post(`/systems/${draft.value.id}/build`)
+    draft.value = await api.post(`/builder/systems/${draft.value.id}/build`)
     await loadDrafts()
   } catch (e: any) {
     buildError.value = e?.data?.detail || e?.message || 'Build failed'

@@ -832,3 +832,53 @@ class Solution(Base):
     installs: Mapped[int] = mapped_column(Integer, default=0)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Py8nSystem(Base):
+    """A Py8n System (v61) - the operating unit above workflows.
+
+    Where a workflow automates a TASK, a system RUNS A PART OF THE
+    BUSINESS: it binds the workflows, datasets, apps, dashboards, models
+    and reports that belong together into one named, health-scored,
+    ownable unit. Membership is a curated grouping (like folders), so it
+    IS stored - but everything the system REPORTS about itself (health,
+    activity, freshness) is derived from the member objects at read
+    time and can never drift.
+    """
+
+    __tablename__ = "py8n_systems"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    icon: Mapped[str] = mapped_column(String(60), default="boxes")
+    color: Mapped[str] = mapped_column(String(20), default="#f97316")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    components: Mapped[list["SystemComponent"]] = relationship(
+        back_populates="system",
+        cascade="all, delete-orphan",
+        order_by="SystemComponent.added_at",
+    )
+
+
+class SystemComponent(Base):
+    """One object bound to a system (v61).
+
+    ``kind`` is one of workflow | dataset | app | dashboard | model |
+    report - resolved and validated against the live table on attach, so
+    a system can never reference an object that does not exist.
+    """
+
+    __tablename__ = "system_components"
+    __table_args__ = (UniqueConstraint("system_id", "kind", "ref_id", name="uq_system_component"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    system_id: Mapped[str] = mapped_column(ForeignKey("py8n_systems.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    ref_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    system: Mapped[Py8nSystem] = relationship(back_populates="components")

@@ -94,7 +94,7 @@ def test_v59_synthesis_and_interview():
             h = _auth(user["token"])
 
             # --- describe: the data-engineer ask from the roadmap ------------
-            res = await client.post("/systems", headers=h, json={"description": ENGINEER_DESC})
+            res = await client.post("/builder/systems", headers=h, json={"description": ENGINEER_DESC})
             assert res.status_code == 201, res.text
             d = res.json()
             spec = d["spec"]
@@ -110,7 +110,7 @@ def test_v59_synthesis_and_interview():
             assert {"table", "fields", "dedupe_keys", "webhook_url"} <= qkeys
 
             # --- clarify: answer the interview --------------------------------
-            res = await client.post(f"/systems/{d['id']}/answers", headers=h, json={"answers": {
+            res = await client.post(f"/builder/systems/{d['id']}/answers", headers=h, json={"answers": {
                 "table": "orders",
                 "fields": "id:integer, region:text, revenue:number, updated_at:datetime",
                 "dedupe_keys": "id",
@@ -127,25 +127,25 @@ def test_v59_synthesis_and_interview():
 
             # --- design: component toggles with dependency guards -------------
             # untick the contract first, then the quality gate must refuse to stand alone
-            res = await client.post(f"/systems/{d['id']}/components", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                     json={"component_id": "schema_contract", "selected": False})
             assert res.status_code == 200
-            res = await client.post(f"/systems/{d['id']}/components", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                     json={"component_id": "quality_gate", "selected": True})
             assert res.status_code == 400
-            res = await client.post(f"/systems/{d['id']}/components", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                     json={"component_id": "target_dataset", "selected": False})
             assert res.status_code == 400  # the backbone stays
-            res = await client.post(f"/systems/{d['id']}/components", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                     json={"component_id": "nope", "selected": True})
             assert res.status_code == 400
             # put the contract back
-            res = await client.post(f"/systems/{d['id']}/components", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                     json={"component_id": "schema_contract", "selected": True})
             assert res.status_code == 200
 
             # --- business language gets business depth -------------------------
-            res = await client.post("/systems", headers=h, json={"description": BUSINESS_DESC})
+            res = await client.post("/builder/systems", headers=h, json={"description": BUSINESS_DESC})
             assert res.status_code == 201, res.text
             d2 = res.json()
             assert d2["persona"] == "business"
@@ -155,7 +155,7 @@ def test_v59_synthesis_and_interview():
             assert "quality_gate" not in sel2
 
             # --- llm enhancement is fail-soft -----------------------------------
-            res = await client.post("/systems", headers=h, json={
+            res = await client.post("/builder/systems", headers=h, json={
                 "description": ENGINEER_DESC, "use_llm": True,
             })
             assert res.status_code == 201, res.text
@@ -165,9 +165,9 @@ def test_v59_synthesis_and_interview():
 
             # --- scoping + validation --------------------------------------------
             other = await _mk_user(client, f"syn-{tag}", 2)
-            res = await client.get(f"/systems/{d['id']}", headers=_auth(other["token"]))
+            res = await client.get(f"/builder/systems/{d['id']}", headers=_auth(other["token"]))
             assert res.status_code == 404
-            res = await client.post("/systems", headers=h, json={"description": "short"})
+            res = await client.post("/builder/systems", headers=h, json={"description": "short"})
             assert res.status_code in (400, 422)
 
     try:
@@ -184,10 +184,10 @@ def test_v59_build():
             user = await _mk_user(client, f"build-{tag}", 1)
             h = _auth(user["token"])
 
-            res = await client.post("/systems", headers=h, json={"description": ENGINEER_DESC})
+            res = await client.post("/builder/systems", headers=h, json={"description": ENGINEER_DESC})
             assert res.status_code == 201, res.text
             d = res.json()
-            res = await client.post(f"/systems/{d['id']}/answers", headers=h, json={"answers": {
+            res = await client.post(f"/builder/systems/{d['id']}/answers", headers=h, json={"answers": {
                 "table": "orders",
                 "fields": "id:integer, region:text, revenue:number, updated_at:datetime",
                 "dedupe_keys": "id",
@@ -197,12 +197,12 @@ def test_v59_build():
 
             # add the optional pieces the engineer description didn't name
             for cid in ("retry_policy", "dashboard", "scheduled_report", "ai_summary"):
-                res = await client.post(f"/systems/{d['id']}/components", headers=h,
+                res = await client.post(f"/builder/systems/{d['id']}/components", headers=h,
                                         json={"component_id": cid, "selected": True})
                 assert res.status_code == 200, res.text
 
             # --- BUILD --------------------------------------------------------
-            res = await client.post(f"/systems/{d['id']}/build", headers=h)
+            res = await client.post(f"/builder/systems/{d['id']}/build", headers=h)
             assert res.status_code == 200, res.text
             out = res.json()
             assert out["status"] == "built"
@@ -249,20 +249,20 @@ def test_v59_build():
             assert any(r["id"] == built["notification_rule_id"] for r in res.json())
 
             # a built system is frozen: no rebuild, no more interview edits
-            res = await client.post(f"/systems/{d['id']}/build", headers=h)
+            res = await client.post(f"/builder/systems/{d['id']}/build", headers=h)
             assert res.status_code == 400
-            res = await client.post(f"/systems/{d['id']}/answers", headers=h,
+            res = await client.post(f"/builder/systems/{d['id']}/answers", headers=h,
                                     json={"answers": {"table": "other"}})
             assert res.status_code == 400
 
             # the drafts list shows it
-            res = await client.get("/systems", headers=h)
+            res = await client.get("/builder/systems", headers=h)
             row = next(x for x in res.json() if x["id"] == d["id"])
             assert row["status"] == "built" and row["built_refs"]["workflow_id"]
 
             # scoping
             other = await _mk_user(client, f"build-{tag}", 2)
-            res = await client.get(f"/systems/{d['id']}", headers=_auth(other["token"]))
+            res = await client.get(f"/builder/systems/{d['id']}", headers=_auth(other["token"]))
             assert res.status_code == 404
 
     try:

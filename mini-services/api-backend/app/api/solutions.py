@@ -25,7 +25,7 @@ from ..auth import get_optional_user, own_or_404
 from ..db import get_db
 from ..models import Dataset, Solution, Workflow
 from ..api.packs import PackDocument, _import_pack_doc
-from ..services.solutions import ensure_seeded, pack_summary, solution_summary
+from ..services.solutions import ensure_seeded, finalize_pack_dataset_names, pack_summary, solution_summary
 
 router = APIRouter(prefix="/solutions", tags=["solutions"])
 
@@ -34,6 +34,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,120}$")
 
 class SolutionInstallRequest(BaseModel):
     note: str = Field(default="", max_length=300, description="Optional install note for the response")
+    as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything this install created")
 
 
 class SolutionAuthorRequest(BaseModel):
@@ -94,10 +95,31 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
     await ensure_seeded(db)
     await db.commit()
     s = await _get_solution(db, slug)
-    pack = PackDocument.model_validate(s.pack_json or {})
+    pack_dict = await finalize_pack_dataset_names(db, s.pack_json or {})
+    pack = PackDocument.model_validate(pack_dict)
     owner = user.id if user else None
     result = await _import_pack_doc(pack, owner, db)
     s.installs = int(s.installs or 0) + 1
+
+    system_ref = None
+    if body and body.as_system:
+        from ..models import Py8nSystem, SystemComponent
+
+        sys_row = Py8nSystem(
+            name=f"{s.name} system",
+            description=f"Installed from the '{s.name}' solution - " + (body.note or s.tagline or "")[:400],
+            icon=s.icon, color=s.color,
+        )
+        sys_row.owner_id = owner
+        db.add(sys_row)
+        await db.flush()
+        for wf in result.get("workflows", []):
+            db.add(SystemComponent(system_id=sys_row.id, kind="workflow", ref_id=wf["id"]))
+        for ds in result.get("datasets", []):
+            db.add(SystemComponent(system_id=sys_row.id, kind="dataset", ref_id=ds["id"]))
+        await db.flush()
+        system_ref = {"id": sys_row.id, "name": sys_row.name}
+
     await db.commit()
     return {
         "slug": s.slug,
@@ -108,6 +130,7 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         "created_datasets": result.get("datasets", []),
         "skipped": result.get("skipped", []),
         "warnings": result.get("warnings", []),
+        "system": system_ref,
     }
 
 

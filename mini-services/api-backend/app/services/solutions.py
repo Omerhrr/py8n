@@ -318,3 +318,54 @@ async def ensure_seeded(db: AsyncSession) -> int:
     if added:
         await db.flush()
     return added
+
+
+# ---------------------------------------------------------------------------
+# Install-time name finalization - solutions install self-consistently
+# ---------------------------------------------------------------------------
+
+_REF_NODE_TYPES = {"dataset_write", "dataset_read", "sql_query", "dataset_export"}
+
+
+async def finalize_pack_dataset_names(db: AsyncSession, pack: dict) -> dict:
+    """Return a copy of the pack whose dataset names are globally unique.
+
+    Dataset names are unique across the whole instance (single table), but a
+    solution's workflows REFERENCE its datasets BY NAME. Two users installing
+    the same solution would otherwise collide: the second user's datasets land
+    suffixed ('... 2') while their workflow still writes to the bare name -
+    which belongs to the first user. Remapping every graph reference to the
+    FINAL name makes each install a self-consistent system.
+    """
+    from . import datasets as ds_svc
+
+    mapping: dict[str, str] = {}
+    datasets_out: list[dict] = []
+    for d in pack.get("datasets", []):
+        old = str(d.get("name") or "").strip()
+        candidate = old
+        n = 1
+        while await ds_svc.name_taken(db, candidate):
+            n += 1
+            candidate = f"{old} {n}"
+        mapping[old] = candidate
+        datasets_out.append({**d, "name": candidate})
+
+    def _remap_graph(graph: dict) -> dict:
+        g = {**graph, "nodes": [dict(n) for n in graph.get("nodes", [])]}
+        for n in g["nodes"]:
+            params = dict(n.get("parameters") or {})
+            target = str(params.get("dataset") or "").strip()
+            if target in mapping:
+                params["dataset"] = mapping[target]
+                n["parameters"] = params
+            elif n.get("type") in _REF_NODE_TYPES:
+                n["parameters"] = params  # keep as-is, normalized
+        return g
+
+    workflows_out = []
+    for w in pack.get("workflows", []):
+        w2 = {**w, "graph": _remap_graph(w.get("graph") or {"nodes": [], "edges": []})}
+        workflows_out.append(w2)
+
+    return {**pack, "datasets": datasets_out, "workflows": workflows_out}

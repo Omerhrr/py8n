@@ -1,12 +1,12 @@
 """AI System Builder API (v59) - the Describe -> Clarify -> Design -> Build loop.
 
-* ``POST   /systems``                      - describe what you want; get a SystemSpec
-* ``GET    /systems``                      - the builder drafts list
-* ``GET    /systems/{id}``                 - spec + transcript + built refs
-* ``POST   /systems/{id}/answers``         - fold interview answers into the spec
-* ``POST   /systems/{id}/components``      - tick/untick a component (dependency-safe)
-* ``POST   /systems/{id}/build``           - translate the spec into REAL primitives
-* ``DELETE /systems/{id}``                 - drop a draft (built objects stay)
+* ``POST   /builder/systems``                      - describe what you want; get a SystemSpec
+* ``GET    /builder/systems``                      - the builder drafts list
+* ``GET    /builder/systems/{id}``                 - spec + transcript + built refs
+* ``POST   /builder/systems/{id}/answers``         - fold interview answers into the spec
+* ``POST   /builder/systems/{id}/components``      - tick/untick a component (dependency-safe)
+* ``POST   /builder/systems/{id}/build``           - translate the spec into REAL primitives
+* ``DELETE /builder/systems/{id}``                 - drop a draft (built objects stay)
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from ..services.system_builder import (
     toggle_component,
 )
 
-router = APIRouter(prefix="/systems", tags=["systems"])
+router = APIRouter(prefix="/builder/systems", tags=["builder"])
 
 
 class SystemCreate(BaseModel):
@@ -165,22 +165,62 @@ async def toggle_system_component(draft_id: str, body: ComponentToggle, user=Dep
                      "selected": body.selected, "ts": _ts()})
     draft.spec_json = spec
     draft.messages_json = messages
+    import sys as _sys
+    print("DBG dirty:", [(type(a).__name__, id(a), (getattr(a, "built_json", {}) or {}).get("system_id")) for a in db.dirty], "| draft id:", id(draft), file=_sys.stderr)
     await db.commit()
+    from sqlalchemy import text as _text
+    _row = (await db.execute(_text("SELECT built_json FROM system_drafts WHERE id = :i"), {"i": draft.id})).first()
+    import json as _j; _b = _j.loads(_row[0]) if isinstance(_row[0], str) else _row[0]
+    print("DBG raw DB after commit system_id:", (_b or {}).get("system_id"), file=_sys.stderr)
     await db.refresh(draft)
+    print("DBG after refresh system_id:", (draft.built_json or {}).get("system_id"), file=_sys.stderr)
     return _out(draft)
 
 
+class BuildRequest(BaseModel):
+    as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything the build created")
+
+
 @router.post("/{draft_id}/build")
-async def build_system_draft(draft_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def build_system_draft(draft_id: str, body: BuildRequest | None = None, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """Build: translate the SELECTED components into real primitives."""
     draft = await _get_draft(db, draft_id, user)
     if draft.status == "built":
         raise HTTPException(status_code=400, detail="this system is already built")
     built = await build_system(db, draft)
     draft.status = "built"
-    draft.built_json = built
     messages = list(draft.messages_json or [])
     messages.append({"role": "system", "kind": "built", "refs": _built_summary(built), "ts": _ts()})
+
+    # v61 bridge: optionally bind everything the build created into a System.
+    # NOTE: build a NEW dict here and never mutate the one that gets assigned
+    # to built_json - the ORM keeps a REFERENCE to the value it flushed as its
+    # committed-state snapshot, so in-place mutations make a later assignment
+    # compare EQUAL and the UPDATE silently disappears.
+    if body and body.as_system:
+        from uuid import uuid4 as _uuid4
+
+        from ..models import Py8nSystem, SystemComponent
+
+        sys_row = Py8nSystem(
+            id=str(_uuid4()),  # explicit: column defaults apply only at flush
+            name=f"{draft.name} system",
+            description=f"Built by the AI System Builder from: {(draft.description or '')[:300]}",
+            icon="wand-2", color="#ec4899",
+        )
+        sys_row.owner_id = draft.owner_id
+        db.add(sys_row)
+        built = {**built, "system_id": sys_row.id}  # sys_row.id is uuid-generated client-side
+        for kind, ref in (
+            ("workflow", built.get("workflow_id")),
+            ("dataset", built.get("dataset_id")),
+            ("dashboard", built.get("dashboard_id")),
+            ("report", built.get("report_id")),
+        ):
+            if ref:
+                db.add(SystemComponent(system_id=sys_row.id, kind=kind, ref_id=ref))
+        messages.append({"role": "system", "kind": "system_created", "ref": sys_row.id, "ts": _ts()})
+    draft.built_json = built
     draft.messages_json = messages
     await db.commit()
     await db.refresh(draft)
