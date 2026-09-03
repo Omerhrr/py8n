@@ -293,6 +293,14 @@ class Dataset(Base):
     # by the owner via POST /datasets/{id}/certify - a human promise that
     # this dataset is what it says it is, surfaced in the catalog.
     certified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v55 governance layer: who answers for this dataset and how sensitive it
+    # is - the catalog and impact engine read these to answer "who owns this",
+    # "what breaks if it changes" and to rank risk.
+    steward: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    domain: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    classification: Mapped[str | None] = mapped_column(String(20), nullable=True)  # public|internal|confidential|restricted
+    sensitivity: Mapped[str | None] = mapped_column(String(20), nullable=True)  # low|medium|high|critical
+    retention_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 

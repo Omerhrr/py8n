@@ -3,7 +3,7 @@ import { ref, computed, onMounted, watch } from 'vue'
 import {
   Database, Trash2, Loader2, ArrowLeft, Rows3, ChevronLeft, ChevronRight,
   Play, BarChart3, Table2, X, History, Undo2, Plus, Eye, Download, GitBranch, ChevronDown,
-  Activity, ShieldCheck, ShieldAlert, Trash as TrashIcon,
+  Activity, ShieldCheck, ShieldAlert, Trash as TrashIcon, GitCompare,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -195,6 +195,64 @@ const loadingVersions = ref(false)
 const versionPreview = ref<{ version: number; columns: string[]; rows: any[]; shown: number } | null>(null)
 const busyVersion = ref<number | null>(null)
 const versionMsg = ref('')
+
+// ------------------------------------------------------------------ v55: version compare
+const showCompare = ref(false)
+const diffFrom = ref<number | null>(null)
+const diffTo = ref<number | null>(null)
+const diffKey = ref('')
+const versionDiff = ref<any>(null)
+const diffLoading = ref(false)
+const diffErr = ref('')
+
+function initCompare() {
+  showCompare.value = !showCompare.value
+  if (diffFrom.value === null && versions.value.length >= 2) {
+    const sorted = [...versions.value].sort((a, b) => b.version - a.version)
+    diffTo.value = sorted[0].version
+    diffFrom.value = sorted[1].version
+  }
+}
+
+async function runVersionDiff() {
+  if (!meta.value || !diffFrom.value || !diffTo.value) return
+  diffLoading.value = true
+  diffErr.value = ''
+  versionDiff.value = null
+  try {
+    const params = new URLSearchParams({ from: String(diffFrom.value), to: String(diffTo.value) })
+    if (diffKey.value.trim()) params.set('key', diffKey.value.trim())
+    versionDiff.value = await api.get<any>(`/datasets/${meta.value.id}/versions/diff?${params}`)
+  } catch (e: any) {
+    diffErr.value = e?.data?.detail || e?.message || 'Diff failed'
+  } finally {
+    diffLoading.value = false
+  }
+}
+
+// ------------------------------------------------------------------ v55: impact
+const impact = ref<any>(null)
+const impactOpen = ref(false)
+const loadingImpact = ref(false)
+const impactMsg = ref('')
+
+async function loadImpact() {
+  if (!meta.value) return
+  loadingImpact.value = true
+  impactMsg.value = ''
+  try {
+    impact.value = await api.get<any>(`/datasets/${meta.value.id}/impact`)
+  } catch (e: any) {
+    impactMsg.value = e?.data?.detail || e?.message || 'Could not load impact'
+  } finally {
+    loadingImpact.value = false
+  }
+}
+
+function toggleImpact() {
+  impactOpen.value = !impactOpen.value
+  if (impactOpen.value && !impact.value) loadImpact()
+}
 
 const SOURCE_STYLE: Record<string, string> = {
   api: 'bg-sky-500/10 text-sky-400',
@@ -820,7 +878,17 @@ async function resetCheckpoint(key: string) {
               <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
                 <History class="h-3.5 w-3.5 text-violet-400" /> Version timeline
               </h2>
-              <span class="text-[11px] text-zinc-500">{{ versions.length }} snapshot{{ versions.length === 1 ? '' : 's' }} (cap 20)</span>
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] text-zinc-500">{{ versions.length }} snapshot{{ versions.length === 1 ? '' : 's' }} (cap 20)</span>
+                <button
+                  v-if="versions.length >= 2"
+                  class="flex items-center gap-1 rounded-lg border px-2 py-1 text-[10px] font-medium transition"
+                  :class="showCompare ? 'border-violet-500/50 bg-violet-500/10 text-violet-300' : 'border-zinc-800 text-zinc-400 hover:border-violet-500/40 hover:text-violet-300'"
+                  @click="initCompare"
+                >
+                  <GitCompare class="h-3 w-3" /> compare
+                </button>
+              </div>
             </div>
             <p v-if="versionMsg" class="border-b border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-[11px] text-emerald-300">{{ versionMsg }}</p>
             <div v-if="loadingVersions" class="flex items-center justify-center py-6 text-zinc-500">
@@ -862,6 +930,111 @@ async function resetCheckpoint(key: string) {
                 </div>
               </div>
             </div>
+
+            <!-- v55: version compare bar -->
+            <div v-if="showCompare && versions.length >= 2" class="border-t border-zinc-800/60 bg-zinc-900/60 px-4 py-3">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="text-[11px] font-semibold text-zinc-400">compare</span>
+                <select v-model.number="diffFrom" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] outline-none focus:border-violet-500/60">
+                  <option v-for="v in versions" :key="'f' + v.id" :value="v.version">v{{ v.version }} ({{ v.row_count.toLocaleString() }} rows)</option>
+                </select>
+                <GitCompare class="h-3 w-3 text-zinc-600" />
+                <select v-model.number="diffTo" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] outline-none focus:border-violet-500/60">
+                  <option v-for="v in versions" :key="'t' + v.id" :value="v.version">v{{ v.version }} ({{ v.row_count.toLocaleString() }} rows)</option>
+                </select>
+                <input
+                  v-model="diffKey"
+                  class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-[11px] outline-none focus:border-violet-500/60"
+                  placeholder="key column (optional)"
+                  title="Identity column - turns the row diff into inserted/updated/removed"
+                />
+                <button
+                  class="rounded-lg bg-violet-500 px-3 py-1.5 text-[11px] font-bold text-white shadow-lg shadow-violet-500/20 transition hover:bg-violet-400 disabled:opacity-50"
+                  :disabled="diffLoading || !diffFrom || !diffTo"
+                  @click="runVersionDiff"
+                >
+                  <Loader2 v-if="diffLoading" class="inline h-3 w-3 animate-spin" />
+                  diff
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- v55: version diff panel -->
+          <div v-if="versionDiff" class="mt-5 overflow-hidden rounded-2xl border border-violet-500/30 bg-zinc-900/40">
+            <div class="flex flex-wrap items-center gap-2 border-b border-zinc-800/80 px-4 py-2.5">
+              <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+                <GitCompare class="h-3.5 w-3.5 text-violet-400" />
+                v{{ versionDiff.from.version }} → v{{ versionDiff.to.version }}
+              </h2>
+              <span
+                class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
+                :class="(versionDiff.impact?.severity || 'low') === 'critical' ? 'bg-rose-500/15 text-rose-300' : (versionDiff.impact?.severity || 'low') === 'high' ? 'bg-amber-500/15 text-amber-300' : 'bg-zinc-800 text-zinc-400'"
+              >{{ versionDiff.impact?.severity || 'low' }} impact</span>
+              <span class="text-[11px] text-zinc-500">what changed · why it matters · what was affected</span>
+              <button class="ml-auto rounded-lg p-1 text-zinc-500 hover:text-zinc-200" @click="versionDiff = null"><X class="h-3.5 w-3.5" /></button>
+            </div>
+
+            <div class="grid gap-4 px-4 py-4 lg:grid-cols-2">
+              <div class="space-y-3">
+                <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Schema</p>
+                  <div class="mt-1.5 space-y-1">
+                    <p v-for="c in versionDiff.schema.added" :key="'sa' + c.name" class="font-mono text-[11px] text-emerald-300">+ {{ c.name }}:{{ c.dtype }}</p>
+                    <p v-for="c in versionDiff.schema.removed" :key="'sr' + c.name" class="font-mono text-[11px] text-rose-300">- {{ c.name }}:{{ c.dtype }}</p>
+                    <p v-for="c in versionDiff.schema.changed" :key="'sc' + c.name" class="font-mono text-[11px] text-amber-300">~ {{ c.name }}: {{ c.from }} → {{ c.to }}</p>
+                    <p v-if="!versionDiff.schema.added.length && !versionDiff.schema.removed.length && !versionDiff.schema.changed.length" class="text-[11px] text-zinc-600">identical schema</p>
+                  </div>
+                </div>
+                <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Rows</p>
+                  <p class="mt-1 font-mono text-[11px] text-zinc-300">
+                    {{ versionDiff.rows.from.toLocaleString() }} → {{ versionDiff.rows.to.toLocaleString() }}
+                    <span :class="versionDiff.rows.delta >= 0 ? 'text-emerald-400' : 'text-rose-400'">({{ versionDiff.rows.delta >= 0 ? '+' : '' }}{{ versionDiff.rows.delta.toLocaleString() }})</span>
+                  </p>
+                </div>
+                <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Quality</p>
+                  <p class="mt-1 font-mono text-[11px] text-zinc-300">
+                    {{ versionDiff.quality.from.score ?? '-' }} → {{ versionDiff.quality.to.score ?? '-' }}
+                    <span v-if="versionDiff.quality.score_delta !== null" :class="versionDiff.quality.score_delta >= 0 ? 'text-emerald-400' : 'text-rose-400'">({{ versionDiff.quality.score_delta >= 0 ? '+' : '' }}{{ versionDiff.quality.score_delta }})</span>
+                  </p>
+                  <p class="mt-1 text-[10px] text-zinc-600">nulls {{ versionDiff.quality.from.null_rate_pct ?? '-' }}% → {{ versionDiff.quality.to.null_rate_pct ?? '-' }}% · dupes {{ versionDiff.quality.from.duplicate_rows_pct ?? '-' }}% → {{ versionDiff.quality.to.duplicate_rows_pct ?? '-' }}%</p>
+                </div>
+              </div>
+
+              <div class="space-y-3">
+                <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Changed {{ versionDiff.changed.key ? `(by ${versionDiff.changed.key})` : '' }}</p>
+                  <div class="mt-1.5 space-y-1">
+                    <template v-if="versionDiff.changed.key">
+                      <p class="font-mono text-[11px]"><span class="text-emerald-300">{{ versionDiff.changed.inserted.toLocaleString() }} inserted</span> · <span class="text-amber-300">{{ (versionDiff.changed.updated || 0).toLocaleString() }} updated</span> · <span class="text-rose-300">{{ versionDiff.changed.removed.toLocaleString() }} removed</span></p>
+                      <div v-for="s in versionDiff.changed.updated_samples" :key="s.key" class="rounded-lg bg-zinc-900/60 px-2 py-1">
+                        <p class="font-mono text-[10px] text-zinc-400">{{ versionDiff.changed.key }}={{ s.key }} · {{ s.changed_fields }} field(s)</p>
+                        <p v-for="c in s.changes" :key="c.column" class="font-mono text-[10px] text-zinc-500">{{ c.column }}: {{ c.from }} → {{ c.to }}</p>
+                      </div>
+                    </template>
+                    <template v-else>
+                      <p class="font-mono text-[11px]"><span class="text-emerald-300">{{ versionDiff.changed.added.toLocaleString() }} added</span> · <span class="text-rose-300">{{ versionDiff.changed.removed.toLocaleString() }} removed</span> · <span class="text-zinc-400">{{ versionDiff.changed.unchanged.toLocaleString() }} unchanged</span></p>
+                      <p class="text-[10px] text-zinc-600">{{ versionDiff.changed.note }}</p>
+                    </template>
+                  </div>
+                </div>
+                <div class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-500">Affected</p>
+                  <div class="mt-1.5 flex flex-wrap gap-1.5 text-[10px]">
+                    <span class="rounded-full bg-orange-500/10 px-2 py-0.5 text-orange-300">{{ versionDiff.impact.totals.workflows }} workflows</span>
+                    <span class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-300">{{ versionDiff.impact.totals.dashboards }} dashboards</span>
+                    <span class="rounded-full bg-sky-500/10 px-2 py-0.5 text-sky-300">{{ versionDiff.impact.totals.apps }} apps</span>
+                    <span class="rounded-full bg-violet-500/10 px-2 py-0.5 text-violet-300">{{ versionDiff.impact.totals.models }} models</span>
+                    <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">{{ versionDiff.impact.totals.downstream_datasets }} downstream</span>
+                  </div>
+                  <p v-if="versionDiff.impact.highest_risk" class="mt-2 rounded-lg bg-rose-500/10 px-2.5 py-1.5 text-[11px] text-rose-300">
+                    highest risk: <b>{{ versionDiff.impact.highest_risk.name }}</b> ({{ versionDiff.impact.highest_risk.kind }})
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- v47: provenance lineage -->
@@ -900,6 +1073,111 @@ async function resetCheckpoint(key: string) {
             </div>
           </div>
         </section>
+      </div>
+
+      <!-- v55: impact - what breaks if this dataset changes? -->
+      <div class="overflow-hidden rounded-2xl border border-zinc-800/80 bg-zinc-900/40">
+        <button class="flex w-full items-center justify-between border-b border-zinc-800/80 px-4 py-2.5 text-left" @click="toggleImpact">
+          <h2 class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-zinc-400">
+            <GitCompare class="h-3.5 w-3.5 text-rose-400" />
+            Impact
+          </h2>
+          <span class="flex items-center gap-2 text-[11px] text-zinc-500">
+            {{ impact ? `${impact.totals.affected} downstream object${impact.totals.affected === 1 ? '' : 's'} · ${impact.severity} severity` : 'workflows, dashboards, apps and models that depend on this' }}
+            <ChevronDown class="h-3.5 w-3.5 transition" :class="impactOpen && 'rotate-180'" />
+          </span>
+        </button>
+
+        <div v-if="impactOpen">
+          <p class="border-b border-zinc-800/60 bg-zinc-900/60 px-4 py-2.5 text-[11px] leading-relaxed text-zinc-400">
+            Derived from live workflow graphs, dashboard components, app bindings and the model registry - nothing
+            stored, so impact can never go stale. Models rank first: a retype here silently degrades a trained model.
+          </p>
+
+          <p v-if="impactMsg" class="border-b border-rose-500/20 bg-rose-500/10 px-4 py-2 text-[11px] text-rose-300">{{ impactMsg }}</p>
+
+          <div v-if="loadingImpact" class="flex items-center justify-center py-6 text-zinc-500">
+            <Loader2 class="h-4 w-4 animate-spin" />
+          </div>
+
+          <div v-else-if="impact" class="px-4 py-4">
+            <!-- headline -->
+            <div class="mb-4 flex flex-wrap items-center gap-2">
+              <span
+                class="rounded-full px-2.5 py-1 text-[10px] font-bold uppercase"
+                :class="impact.severity === 'critical' ? 'bg-rose-500/15 text-rose-300' : impact.severity === 'high' ? 'bg-amber-500/15 text-amber-300' : impact.severity === 'medium' ? 'bg-sky-500/15 text-sky-300' : 'bg-zinc-800 text-zinc-400'"
+              >{{ impact.severity }} impact</span>
+              <span class="flex flex-wrap gap-1.5 text-[10px]">
+                <span class="rounded-full bg-orange-500/10 px-2 py-0.5 text-orange-300">{{ impact.totals.workflows }} workflows</span>
+                <span class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-cyan-300">{{ impact.totals.dashboards }} dashboards</span>
+                <span class="rounded-full bg-sky-500/10 px-2 py-0.5 text-sky-300">{{ impact.totals.apps }} apps</span>
+                <span class="rounded-full bg-violet-500/10 px-2 py-0.5 text-violet-300">{{ impact.totals.models }} models</span>
+                <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">{{ impact.totals.downstream_datasets }} downstream datasets</span>
+              </span>
+            </div>
+
+            <p v-if="impact.highest_risk" class="mb-4 rounded-xl border border-rose-500/30 bg-rose-500/5 px-3.5 py-2.5 text-xs text-rose-300">
+              highest risk: <b>{{ impact.highest_risk.name }}</b>
+              <span class="text-rose-400/70">({{ impact.highest_risk.kind }})</span>
+            </p>
+
+            <p v-if="!impact.totals.affected" class="py-3 text-center text-[11px] text-zinc-600">
+              Nothing references this dataset yet - it is safe to change.
+            </p>
+
+            <div v-else class="grid gap-4 lg:grid-cols-2">
+              <!-- workflows -->
+              <div v-if="impact.workflows.length" class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                <p class="text-[11px] font-bold uppercase tracking-wide text-orange-400">Consumer workflows</p>
+                <div class="mt-2 space-y-1.5">
+                  <NuxtLink v-for="w in impact.workflows" :key="w.id" :to="w.ref" class="block rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-2.5 py-1.5 transition hover:border-orange-500/40">
+                    <p class="text-xs font-semibold text-zinc-200">{{ w.name }}</p>
+                    <p class="truncate text-[10px] text-zinc-600">{{ w.node_count }} node{{ w.node_count === 1 ? '' : 's' }}: {{ (w.nodes || []).join(', ') }}</p>
+                  </NuxtLink>
+                </div>
+              </div>
+
+              <!-- dashboards + apps -->
+              <div class="space-y-3">
+                <div v-if="impact.dashboards.length" class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-cyan-400">Dashboards</p>
+                  <div class="mt-2 space-y-1.5">
+                    <NuxtLink v-for="d in impact.dashboards" :key="d.id" :to="d.ref" class="block rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-2.5 py-1.5 transition hover:border-cyan-500/40">
+                      <p class="text-xs font-semibold text-zinc-200">{{ d.name }} <span class="text-[10px] text-zinc-600">· {{ d.components }} component{{ d.components === 1 ? '' : 's' }} · {{ d.status }}</span></p>
+                    </NuxtLink>
+                  </div>
+                </div>
+                <div v-if="impact.apps.length" class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-sky-400">Apps</p>
+                  <div class="mt-2 space-y-1.5">
+                    <NuxtLink v-for="a in impact.apps" :key="a.id" :to="a.ref" class="block rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-2.5 py-1.5 transition hover:border-sky-500/40">
+                      <p class="text-xs font-semibold text-zinc-200">{{ a.name }} <span class="text-[10px] text-zinc-600">· {{ a.status }}</span></p>
+                    </NuxtLink>
+                  </div>
+                </div>
+                <div v-if="impact.models.length" class="rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+                  <p class="text-[11px] font-bold uppercase tracking-wide text-violet-400">Models trained on this</p>
+                  <div class="mt-2 space-y-1.5">
+                    <NuxtLink v-for="m in impact.models" :key="m.id" to="/models" class="block rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-2.5 py-1.5 transition hover:border-violet-500/40">
+                      <p class="text-xs font-semibold text-zinc-200">{{ m.name }} <span class="text-[10px] text-zinc-600">v{{ m.version }} · {{ m.algorithm }} · {{ m.active ? 'ACTIVE' : 'inactive' }}</span></p>
+                    </NuxtLink>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- downstream datasets: the lineage propagation -->
+            <div v-if="impact.downstream_datasets.length" class="mt-4 rounded-xl border border-zinc-800/80 bg-zinc-950/60 p-3">
+              <p class="text-[11px] font-bold uppercase tracking-wide text-lime-400">Downstream datasets (written by consumers)</p>
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                <NuxtLink v-for="d in impact.downstream_datasets" :key="d.id" :to="d.ref" class="rounded-lg border border-zinc-800/60 bg-zinc-900/50 px-2.5 py-1.5 text-[11px] text-zinc-200 transition hover:border-lime-500/40">
+                  {{ d.name }}
+                  <span v-if="d.via.length" class="text-[10px] text-zinc-600">via {{ d.via.join(', ') }}</span>
+                </NuxtLink>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- v50: data contract -->

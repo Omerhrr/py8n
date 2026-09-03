@@ -29,6 +29,7 @@ interface CatalogEntry {
   certified_at: string | null
   owner_id: string | null
   claimable: boolean
+  governance: { steward: string | null; domain: string | null; classification: string | null; sensitivity: string | null; retention_days: number | null }
   producers: string[]
   consumers: string[]
 }
@@ -242,6 +243,15 @@ const govErr = ref('')
 const govTransferTo = ref('')
 const govDesc = ref('')
 const govTags = ref('')
+// v55 governance layer
+const govSteward = ref('')
+const govDomain = ref('')
+const govClassification = ref('')
+const govSensitivity = ref('')
+const govRetention = ref('')
+
+const CLASSIFICATIONS = ['public', 'internal', 'confidential', 'restricted']
+const SENSITIVITIES = ['low', 'medium', 'high', 'critical']
 
 function openGovern(e: CatalogEntry) {
   govorFor.value = e
@@ -250,6 +260,11 @@ function openGovern(e: CatalogEntry) {
   govTransferTo.value = ''
   govDesc.value = e.description || ''
   govTags.value = (e.tags || []).join(', ')
+  govSteward.value = e.governance?.steward || ''
+  govDomain.value = e.governance?.domain || ''
+  govClassification.value = e.governance?.classification || ''
+  govSensitivity.value = e.governance?.sensitivity || ''
+  govRetention.value = e.governance?.retention_days != null ? String(e.governance.retention_days) : ''
 }
 
 async function govAct(fn: () => Promise<any>, okMsg: string) {
@@ -282,8 +297,15 @@ const saveMeta = () => govAct(
   () => api.put(`/datasets/${govorFor.value!.id}`, {
     description: govDesc.value,
     tags: govTags.value.split(',').map(s => s.trim()).filter(Boolean),
+    governance: {
+      steward: govSteward.value.trim() || null,
+      domain: govDomain.value.trim() || null,
+      classification: govClassification.value || null,
+      sensitivity: govSensitivity.value || null,
+      retention_days: govRetention.value.trim() ? Number(govRetention.value) : null,
+    },
   }),
-  'Description and tags saved',
+  'Governance metadata saved',
 )
 </script>
 
@@ -387,6 +409,13 @@ const saveMeta = () => govAct(
                   <BadgeCheck class="h-3 w-3" /> certified
                 </span>
                 <span v-if="e.claimable" class="rounded-full border border-dashed border-zinc-700 px-2 py-0.5 text-[10px] text-zinc-500">unclaimed</span>
+                <span v-if="e.governance?.domain" class="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[10px] text-indigo-300" :title="'Governance domain'">{{ e.governance.domain }}</span>
+                <span
+                  v-if="e.governance?.sensitivity"
+                  class="rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                  :class="e.governance.sensitivity === 'critical' ? 'bg-rose-500/15 text-rose-300' : e.governance.sensitivity === 'high' ? 'bg-amber-500/15 text-amber-300' : 'bg-zinc-800 text-zinc-400'"
+                  :title="`Sensitivity: ${e.governance.sensitivity}`"
+                >{{ e.governance.sensitivity }}</span>
                 <span class="flex items-center gap-1 rounded-full bg-zinc-800/80 px-2 py-0.5 text-[10px] text-zinc-400">
                   <span class="h-1.5 w-1.5 rounded-full" :class="tierOf(e).dot" />
                   {{ tierOf(e).label }}
@@ -699,7 +728,45 @@ const saveMeta = () => govAct(
                 class="mt-2 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-[11px] font-medium text-zinc-300 transition hover:border-emerald-500/40 hover:text-emerald-300 disabled:opacity-50"
                 :disabled="govBusy"
                 @click="saveMeta"
-              >save description & tags</button>
+              >save</button>
+            </div>
+
+            <!-- v55: governance layer -->
+            <div class="mt-3 rounded-xl border border-zinc-800/80 bg-zinc-900/50 p-3">
+              <p class="text-[11px] font-bold uppercase tracking-wide text-zinc-400">governance layer</p>
+              <div class="mt-2 grid grid-cols-2 gap-2">
+                <label class="block">
+                  <span class="text-[10px] text-zinc-500">Steward</span>
+                  <input v-model="govSteward" class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500/60" placeholder="who answers for this?" />
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-zinc-500">Domain</span>
+                  <input v-model="govDomain" class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500/60" placeholder="sales, finance, hr..." />
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-zinc-500">Classification</span>
+                  <select v-model="govClassification" class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-emerald-500/60">
+                    <option value="">- none -</option>
+                    <option v-for="c in CLASSIFICATIONS" :key="c" :value="c">{{ c }}</option>
+                  </select>
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-zinc-500">Sensitivity</span>
+                  <select v-model="govSensitivity" class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-xs outline-none focus:border-emerald-500/60">
+                    <option value="">- none -</option>
+                    <option v-for="s in SENSITIVITIES" :key="s" :value="s">{{ s }}</option>
+                  </select>
+                </label>
+                <label class="block">
+                  <span class="text-[10px] text-zinc-500">Retention (days)</span>
+                  <input v-model="govRetention" type="number" min="0" class="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500/60" placeholder="e.g. 365" />
+                </label>
+              </div>
+              <button
+                class="mt-2 rounded-lg border border-emerald-500/40 px-2.5 py-1.5 text-[11px] font-medium text-emerald-300 transition hover:bg-emerald-500/10 disabled:opacity-50"
+                :disabled="govBusy"
+                @click="saveMeta"
+              >save governance</button>
             </div>
 
             <p v-if="govMsg" class="mt-3 rounded-lg bg-emerald-500/10 px-3 py-2 text-[11px] text-emerald-300">{{ govMsg }}</p>

@@ -137,11 +137,15 @@ async def build_catalog(
     owner_id: str | None = None,
     q: str = "",
     tag: str = "",
+    domain: str = "",
+    classification: str = "",
+    sensitivity: str = "",
 ) -> list[dict]:
     """Catalog entries for every dataset visible to the caller.
 
     Visibility mirrors the rest of the estate: with ``owner_id`` set,
     another owner's datasets are invisible (NULL owner_id stays public).
+    v55 adds governance filters (domain / classification / sensitivity).
     """
     stmt = select(Dataset).order_by(Dataset.updated_at.desc())
     if owner_id is not None:
@@ -157,6 +161,12 @@ async def build_catalog(
         ]
     if tag_l:
         datasets = [ds for ds in datasets if tag_l in [str(t).lower() for t in (ds.tags or [])]]
+    if domain.strip():
+        datasets = [ds for ds in datasets if (ds.domain or "").lower() == domain.strip().lower()]
+    if classification.strip():
+        datasets = [ds for ds in datasets if (ds.classification or "").lower() == classification.strip().lower()]
+    if sensitivity.strip():
+        datasets = [ds for ds in datasets if (ds.sensitivity or "").lower() == sensitivity.strip().lower()]
 
     ids = [ds.id for ds in datasets]
     producers = await _producer_map(db, ids)
@@ -222,6 +232,14 @@ async def build_catalog(
             "certified_at": ds.certified_at.isoformat() if ds.certified_at else None,
             "owner_id": ds.owner_id,
             "claimable": ds.owner_id is None,
+            # v55 governance layer
+            "governance": {
+                "steward": ds.steward,
+                "domain": ds.domain,
+                "classification": ds.classification,
+                "sensitivity": ds.sensitivity,
+                "retention_days": ds.retention_days,
+            },
             "producers": producers.get(ds.id, []),
             "consumers": consumers.get(ds.id, []),
         })

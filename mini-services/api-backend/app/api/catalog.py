@@ -23,6 +23,9 @@ router = APIRouter(prefix="/catalog", tags=["catalog"])
 async def catalog_entries(
     q: str = Query(default="", max_length=200, description="Search name + description"),
     tag: str = Query(default="", max_length=100, description="Filter by tag"),
+    domain: str = Query(default="", max_length=80, description="v55: filter by governance domain"),
+    classification: str = Query(default="", max_length=20, description="v55: public|internal|confidential|restricted"),
+    sensitivity: str = Query(default="", max_length=20, description="v55: low|medium|high|critical"),
     user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -32,5 +35,8 @@ async def catalog_entries(
     plus unclaimed ones; anonymous callers see unclaimed only.
     """
     owner_id = getattr(user, "id", None) if user is not None else None
-    entries = await catalog_svc.build_catalog(db, owner_id=owner_id, q=q, tag=tag)
+    entries = await catalog_svc.build_catalog(
+        db, owner_id=owner_id, q=q, tag=tag,
+        domain=domain, classification=classification, sensitivity=sensitivity,
+    )
     return {"entries": entries, "count": len(entries)}

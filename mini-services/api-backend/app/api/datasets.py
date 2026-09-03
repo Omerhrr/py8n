@@ -49,15 +49,28 @@ from ..schemas import (
     DatasetQueryIn,
     DatasetRowsIn,
     DatasetUpdate,
+    GovernanceOut,
 )
 from ..services import contracts as contract_svc
 from ..services import datasets as ds_svc
 from ..services import health as health_svc
+from ..services import impact as impact_svc
 from ..services import ingestion as ing_svc
+from ..services import version_diff as vdiff_svc
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def _governance_out(row: Dataset) -> GovernanceOut:
+    return GovernanceOut(
+        steward=row.steward,
+        domain=row.domain,
+        classification=row.classification,
+        sensitivity=row.sensitivity,
+        retention_days=row.retention_days,
+    )
 
 
 def _out(row: Dataset) -> DatasetOut:
@@ -71,6 +84,7 @@ def _out(row: Dataset) -> DatasetOut:
         tags=row.tags or [],
         owner_id=row.owner_id,
         certified_at=row.certified_at,
+        governance=_governance_out(row),
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -280,6 +294,21 @@ async def update_dataset(dataset_id: str, body: DatasetUpdate, user=Depends(get_
         row.description = body.description.strip()
     if body.tags is not None:  # v44: omitted = untouched; [] clears all
         row.tags = body.tags or []
+    if body.governance is not None:  # v55 governance layer patch
+        g = body.governance
+        row.steward = g.steward.strip() if g.steward else None
+        row.domain = g.domain.strip() if g.domain else None
+        if g.classification is not None:
+            c = g.classification.strip().lower()
+            if c and c not in ("public", "internal", "confidential", "restricted"):
+                raise HTTPException(status_code=400, detail="classification must be public|internal|confidential|restricted")
+            row.classification = c or None
+        if g.sensitivity is not None:
+            s = g.sensitivity.strip().lower()
+            if s and s not in ("low", "medium", "high", "critical"):
+                raise HTTPException(status_code=400, detail="sensitivity must be low|medium|high|critical")
+            row.sensitivity = s or None
+        row.retention_days = g.retention_days
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -370,6 +399,9 @@ async def dataset_lineage(dataset_id: str, user=Depends(get_optional_user), db: 
         "name": row.name,
         "created_at": row.created_at,
         "row_count": row.row_count,
+        # v55: ownership propagates into the lineage view - the chain answers
+        # "who owns this" at every hop, not just on the dataset page
+        "governance": _governance_out(row).model_dump(),
         "workflow_versions": sum(1 for s in steps if s["origin"] == "workflow"),
         "steps": steps,
     }
@@ -671,3 +703,43 @@ async def uncertify_dataset(dataset_id: str, user=Depends(get_optional_user), db
     await db.commit()
     await db.refresh(row)
     return _out(row)
+
+
+# ------------------------------------------------------------------ v55: impact & lineage intelligence
+
+
+@router.get("/{dataset_id}/impact")
+async def dataset_impact(dataset_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Impact report (v55) - what breaks if this dataset changes?
+
+    Derived from live graphs and registries: consumer workflows, charting
+    dashboards, bound apps, models trained on it, and the datasets those
+    consumers write (one hop downstream). Ranked by risk; models first,
+    sensitivity bumps the headline severity.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    return await impact_svc.compute_impact(db, row)
+
+
+@router.get("/{dataset_id}/versions/diff")
+async def diff_dataset_versions(
+    dataset_id: str,
+    from_version: int = Query(alias="from", ge=1),
+    to_version: int = Query(alias="to", ge=1),
+    key: str = Query(default="", max_length=120, description="Identity column - turns the row diff into inserted/updated/removed"),
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Two-version diff (v55) - what changed, why does it matter, what was affected?
+
+    Schema (added/removed/retyped), rows (version-record counts + delta),
+    quality (completeness/nulls/duplicates per snapshot, score delta), the
+    row-level truth (keyed: inserted/updated/removed with sample updates;
+    keyless: full-row-hash added/removed), and the impact section ranked by
+    risk.
+    """
+    row = await _get_or_404(db, dataset_id, user)
+    try:
+        return await vdiff_svc.diff_versions(db, row, from_version, to_version, key or None)
+    except vdiff_svc.VersionDiffError as exc:
+        raise HTTPException(status_code=404 if "unknown version" in str(exc).lower() or "pruned" in str(exc).lower() else 400, detail=str(exc))

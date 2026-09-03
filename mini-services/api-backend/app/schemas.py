@@ -377,8 +377,19 @@ class DatasetOut(BaseModel):
     tags: list[str] = Field(default_factory=list)
     owner_id: str | None = None  # v54 governance surface: NULL = unclaimed
     certified_at: datetime | None = None  # v54 governance: steward certification
+    governance: GovernanceOut | None = None  # v55 governance layer
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class GovernanceOut(BaseModel):
+    """v55 governance layer - who answers for this dataset and how sensitive it is."""
+
+    steward: str | None = None
+    domain: str | None = None
+    classification: str | None = None
+    sensitivity: str | None = None
+    retention_days: int | None = None
 
 
 class DatasetCreate(BaseModel):
@@ -392,10 +403,21 @@ class DatasetRowsIn(BaseModel):
     rows: list[dict] = Field(min_length=1, max_length=10_000)
 
 
+class GovernanceUpdate(BaseModel):
+    """v55: per-field governance patch (owner-only via the dataset update path)."""
+
+    steward: str | None = Field(default=None, max_length=120)
+    domain: str | None = Field(default=None, max_length=80)
+    classification: str | None = Field(default=None, max_length=20, description="public|internal|confidential|restricted")
+    sensitivity: str | None = Field(default=None, max_length=20, description="low|medium|high|critical")
+    retention_days: int | None = Field(default=None, ge=0, le=36500)
+
+
 class DatasetUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     description: str | None = Field(default=None, max_length=500)
     tags: list[str] | None = Field(default=None, max_length=20, description="Omitted = untouched; [] clears all")
+    governance: GovernanceUpdate | None = Field(default=None, description="v55 governance layer patch")
 
 
 class DatasetQueryIn(BaseModel):

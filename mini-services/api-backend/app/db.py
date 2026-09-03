@@ -99,5 +99,16 @@ async def init_db() -> None:
             ds54_cols = {c["name"] for c in insp.get_columns("datasets")}
             if "certified_at" not in ds54_cols:
                 sync_conn.execute(text("ALTER TABLE datasets ADD COLUMN certified_at TIMESTAMP"))
+            # v55: the governance layer - steward, domain, classification,
+            # sensitivity, retention
+            for col, ddl in (
+                ("steward", "VARCHAR(120)"),
+                ("domain", "VARCHAR(80)"),
+                ("classification", "VARCHAR(20)"),
+                ("sensitivity", "VARCHAR(20)"),
+                ("retention_days", "INTEGER"),
+            ):
+                if col not in ds54_cols:
+                    sync_conn.execute(text(f"ALTER TABLE datasets ADD COLUMN {col} {ddl}"))
 
         await conn.run_sync(_add_missing_columns)
