@@ -766,3 +766,36 @@ class DatasetContractRevision(Base):
     on_violation: Mapped[str] = mapped_column(String(10), default="warn", nullable=False)
     note: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
+class SystemDraft(Base):
+    """One AI System Builder session (v59).
+
+    The roadmap's Describe -> Discover -> Clarify -> Design -> Build loop:
+    the user describes what they want in plain language, the builder
+    synthesizes a SystemSpec (purpose, persona, component checklist with
+    selected flags, clarifying questions), the interview + toggles refine
+    it, and the build step translates the SELECTED components into real
+    py8n primitives - datasets, workflow graphs, contracts, policies,
+    dashboards, reports and notification rules.
+
+    ``spec_json`` is the living SystemSpec; ``messages_json`` is the
+    interview transcript; ``built_json`` holds the refs the build created
+    (so review is one GET). Nothing here is derived - it IS the source of
+    truth for the conversation - but every BUILT artifact is a normal
+    py8n object owned by the user.
+    """
+
+    __tablename__ = "system_drafts"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), default="")
+    description: Mapped[str] = mapped_column(Text, default="")  # the original ask
+    persona: Mapped[str] = mapped_column(String(20), default="business")  # business|data_engineer
+    status: Mapped[str] = mapped_column(String(20), default="interview", index=True)  # interview|built
+    spec_json: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    messages_json: Mapped[list] = mapped_column(JSONVariant, default=list)
+    built_json: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
