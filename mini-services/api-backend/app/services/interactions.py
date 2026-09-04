@@ -137,10 +137,17 @@ async def channel_matrix(db: AsyncSession, owner_id: str | None) -> list[dict]:
 
 
 def _extract_reply(output: object) -> str:
-    """The handler convention: the LAST node's output supplies the reply."""
+    """The handler convention: the LAST node's output supplies the reply.
+
+    Understands the code node's standard ``{"result": ...}`` wrapper (a
+    code node is the offline-friendly handler, so its output shape is
+    unwrapped before the reply keys are tried).
+    """
     if output is None:
         return ""
     if isinstance(output, dict):
+        if set(output.keys()) == {"result"}:
+            return _extract_reply(output["result"])
         for key in _REPLY_KEYS:
             if key in output and output[key] is not None:
                 return str(output[key])

@@ -1097,3 +1097,120 @@ class InteractionMessage(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False, default="")
     payload: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelEndpoint(Base):
+    """A channel endpoint (v69) - the REAL provider adapter surface.
+
+    v68's universal ingress accepted already-normalized messages; v69 makes
+    py8n itself the adapter: a ChannelEndpoint is a stored handle that turns
+    a provider's NATIVE webhook (Meta Cloud API, Telegram Bot API, Discord
+    interactions) into interaction-layer ingests, and knows the exact
+    outbound request each provider's send API expects.
+
+    One endpoint = one provider connection = one owner = one handler
+    workflow. The provider-specific secrets (verify_token, app_secret,
+    bot_token, secret_token, public_key) live in ``config`` and are always
+    MASKED in API output - the raw values are only used at verification and
+    delivery time. The webhook URLs are public (providers can't log in);
+    each receiver verifies its provider's credentials before anything runs.
+    """
+
+    __tablename__ = "channel_endpoints"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    # provider id inside PROVIDER_ADAPTERS: meta_cloud_api | telegram_bot_api | discord_bot
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    # the interaction channel this provider delivers: whatsapp | telegram | discord
+    channel: Mapped[str] = mapped_column(String(30), nullable=False)
+    handler_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # provider-specific secrets + settings; masked in every API output
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    # derived-at-write event counters (the transcript lives in interactions)
+    events_received: Mapped[int] = mapped_column(Integer, default=0)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class VoiceSession(Base):
+    """A voice session (v69) - the call as a first-class primitive.
+
+    One phone conversation as py8n sees it: a call-state machine
+    (initiated -> ringing -> in_progress -> ended, with no_answer / busy /
+    voicemail endings), an optional link to the interaction-layer
+    conversation (so the voice transcript lives in the SAME place as
+    whatsapp/app transcripts), and the barge-in bookkeeping. The event
+    timeline (VoiceEvent) is the record; everything reported about the
+    call (duration, barge-in count, turn count) is derived from it.
+    """
+
+    __tablename__ = "voice_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    direction: Mapped[str] = mapped_column(String(10), nullable=False, default="inbound")  # inbound|outbound
+    provider: Mapped[str] = mapped_column(String(40), nullable=False, default="twilio")
+    # provider-side call identifiers (CallSid, provider call id, ...)
+    call_ref: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    from_ref: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    to_ref: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    # the answering workflow (voice_turn runs it exactly like the interaction handler)
+    handler_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # optional link into the interaction layer - one customer, one transcript
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # initiated | ringing | in_progress | on_hold | voicemail | ended
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="initiated", index=True)
+    end_reason: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    # context holds live call state (active_tts event id) + provider extras
+    context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VoiceEvent(Base):
+    """One event on a voice session (v69) - the append-only call timeline.
+
+    Kinds: call.ringing | call.answered | speech.started | speech.ended |
+    dtmf | asr.final | tts.started | tts.ended | barge_in | hold | unhold |
+    transfer | no_answer | busy | voicemail_detected | hangup | failed.
+    Barge-in semantics live here: a barge_in event references the
+    tts.started event it interrupted, and the tts.ended carries
+    cancelled=true.
+    """
+
+    __tablename__ = "voice_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DeploymentTokenPolicy(Base):
+    """Rate-shaping/quotas on a serving token (v69).
+
+    A token may carry a policy: a per-minute rate cap (sliding window,
+    in-process) and a UTC calendar-day quota. Enforcement happens right
+    after token auth succeeds on the serving webhook / stream endpoints -
+    a shape-limited request gets 429 with Retry-After and X-RateLimit-*
+    headers; an exhausted quota gets 429 with the UTC reset time. Zero
+    policy (the default) keeps the token unlimited - rate shaping is
+    opt-in per token, exactly like auth is opt-in per deployment.
+
+    The policy row is the ONLY stored part; the counters are in-process
+    sliding windows (same trade as the v23 limiter: per-process, honest).
+    """
+
+    __tablename__ = "deployment_token_policies"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
+    rate_per_min: Mapped[int | None] = mapped_column(Integer, nullable=True)   # requests/minute, NULL = unlimited
+    daily_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)    # requests/UTC day, NULL = unlimited
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

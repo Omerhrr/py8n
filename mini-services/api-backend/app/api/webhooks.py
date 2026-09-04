@@ -183,11 +183,20 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
     # v68: serving tokens - a deployment-backed workflow with >=1 active
     # token demands it (Bearer / X-Deployment-Token) before the flow runs.
     try:
+        from ..services import serving_limits
         from ..services.deployments import check_serving_auth
 
-        await check_serving_auth(db, workflow_id, request)
+        token = await check_serving_auth(db, workflow_id, request)
+        if token is not None:
+            # read-only on the request session is safe; the policy gates
+            # BEFORE the flow runs on its own sessions (single-writer SQLite)
+            policy = await serving_limits.policy_for_token(db, token.id)
+            serving_limits.admit(token.id, policy)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except serving_limits.LimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=exc.detail,
+                            headers=exc.headers) from exc
     response_mode = params.get("response_mode", "immediately")
     envelope = _request_envelope(request, body)
 

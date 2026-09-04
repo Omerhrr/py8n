@@ -37,6 +37,7 @@ from ..auth import get_optional_user
 from ..db import get_db
 from ..models import ModelDeployment
 from ..services import deployments as dep_svc
+from ..services import serving_limits
 
 router = APIRouter(prefix="/deployments", tags=["deployments"])
 
@@ -105,6 +106,8 @@ async def delete_deployment(deployment_id: str, user=Depends(get_optional_user),
 
 class TokenCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=120)
+    rate_per_min: int | None = Field(default=None, ge=1, description="v69: max requests/minute (sliding window); null = unlimited")
+    daily_quota: int | None = Field(default=None, ge=1, description="v69: max requests per UTC day; null = unlimited")
 
 
 async def _own_deployment(db: AsyncSession, deployment_id: str, user) -> ModelDeployment:
@@ -122,9 +125,42 @@ async def mint_token(deployment_id: str, body: TokenCreate,
     await _own_deployment(db, deployment_id, user)
     try:
         return await dep_svc.mint_token(db, owner_id=getattr(user, "id", None),
-                                        deployment_id=deployment_id, name=body.name)
+                                        deployment_id=deployment_id, name=body.name,
+                                        rate_per_min=body.rate_per_min,
+                                        daily_quota=body.daily_quota)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class TokenLimits(BaseModel):
+    rate_per_min: int | None = Field(default=None, ge=1, description="max requests/minute; null = unlimited")
+    daily_quota: int | None = Field(default=None, ge=1, description="max requests/UTC day; null = unlimited")
+
+
+@router.put("/{deployment_id}/tokens/{token_id}/limits")
+async def set_token_limits(deployment_id: str, token_id: str, body: TokenLimits,
+                           user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Upsert a token's rate-shaping/quotas (v69). Clears a limit with null."""
+    await _own_deployment(db, deployment_id, user)
+    try:
+        out = await dep_svc.set_token_limits(db, deployment_id, token_id,
+                                             body.rate_per_min, body.daily_quota)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if out is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return out
+
+
+@router.get("/{deployment_id}/tokens/{token_id}/usage")
+async def token_usage(deployment_id: str, token_id: str,
+                      user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The token's policy + live in-process usage counters (v69)."""
+    await _own_deployment(db, deployment_id, user)
+    out = await dep_svc.get_token_usage(db, deployment_id, token_id)
+    if out is None:
+        raise HTTPException(status_code=404, detail="Not found")
+    return out
 
 
 @router.get("/{deployment_id}/tokens")
@@ -205,11 +241,16 @@ class StreamBody(BaseModel):
 async def stream_generation(deployment_id: str, body: StreamBody, request: Request,
                             user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _own_deployment(db, deployment_id, user)
-    # Serving tokens gate the stream exactly like the webhook endpoint.
+    # Serving tokens gate the stream exactly like the webhook endpoint -
+    # and the matched token's rate-shaping/quotas apply (v69).
     try:
-        await dep_svc.check_deployment_token(db, row, request)
+        token = await dep_svc.check_deployment_token(db, row, request)
+        await dep_svc.enforce_serving_limits(token)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except serving_limits.LimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=exc.detail,
+                            headers=exc.headers) from exc
     return StreamingResponse(
         dep_svc.stream_generation(db, row, owner_id=getattr(user, "id", None),
                                   prompt=body.prompt, max_tokens=body.max_tokens,

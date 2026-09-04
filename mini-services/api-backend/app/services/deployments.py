@@ -48,8 +48,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..engine.runner import validate_graph_document
-from ..models import (DeploymentRevision, DeploymentToken, ExecutionLog,
-                      ModelDeployment, TrainedModel, Workflow)
+from ..models import (DeploymentRevision, DeploymentToken,
+                      DeploymentTokenPolicy, ExecutionLog, ModelDeployment,
+                      TrainedModel, Workflow)
+from . import serving_limits
 from . import models as model_svc
 
 ENVIRONMENTS = ("dev", "staging", "prod")
@@ -67,8 +69,8 @@ def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def token_out(row: DeploymentToken) -> dict:
-    return {
+def token_out(row: DeploymentToken, policy: DeploymentTokenPolicy | None = None) -> dict:
+    out = {
         "id": row.id,
         "name": row.name,
         "prefix": row.prefix,
@@ -76,14 +78,27 @@ def token_out(row: DeploymentToken) -> dict:
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
         "revoked": row.revoked_at is not None,
         "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+        # v69: the token's traffic policy + live usage (None = unlimited)
+        "limits": {"rate_per_min": policy.rate_per_min if policy else None,
+                   "daily_quota": policy.daily_quota if policy else None},
+        "usage": serving_limits.usage_snapshot(row.id, policy),
     }
+    return out
 
 
 async def list_tokens(db: AsyncSession, deployment_id: str) -> list[dict]:
     q = (select(DeploymentToken)
          .where(DeploymentToken.deployment_id == deployment_id)
          .order_by(DeploymentToken.created_at.desc()))
-    return [token_out(r) for r in (await db.execute(q)).scalars().all()]
+    rows = (await db.execute(q)).scalars().all()
+    ids = [r.id for r in rows]
+    policies: dict[str, DeploymentTokenPolicy] = {}
+    if ids:
+        for p in (await db.execute(
+                select(DeploymentTokenPolicy)
+                .where(DeploymentTokenPolicy.token_id.in_(ids)))).scalars().all():
+            policies[p.token_id] = p
+    return [token_out(r, policies.get(r.id)) for r in rows]
 
 
 async def active_token_count(db: AsyncSession, deployment_id: str) -> int:
@@ -94,10 +109,18 @@ async def active_token_count(db: AsyncSession, deployment_id: str) -> int:
 
 
 async def mint_token(db: AsyncSession, *, owner_id: str | None, deployment_id: str,
-                     name: str) -> dict:
-    """Create a serving token. The raw value is returned EXACTLY once."""
+                     name: str, rate_per_min: int | None = None,
+                     daily_quota: int | None = None) -> dict:
+    """Create a serving token. The raw value is returned EXACTLY once.
+
+    v69: optional rate-shaping/quotas ride along - a policy row is created
+    when either limit is set; without one the token stays unlimited.
+    """
     if not name or not name.strip():
         raise ValueError("a token name is required")
+    for label, value in (("rate_per_min", rate_per_min), ("daily_quota", daily_quota)):
+        if value is not None and value < 1:
+            raise ValueError(f"{label} must be >= 1 (or null for unlimited)")
     raw = TOKEN_PREFIX + secrets.token_urlsafe(24)
     row = DeploymentToken(
         deployment_id=deployment_id,
@@ -109,7 +132,13 @@ async def mint_token(db: AsyncSession, *, owner_id: str | None, deployment_id: s
     db.add(row)
     await db.flush()
     await db.refresh(row)
-    out = token_out(row)
+    policy = None
+    if rate_per_min is not None or daily_quota is not None:
+        policy = DeploymentTokenPolicy(token_id=row.id, rate_per_min=rate_per_min,
+                                       daily_quota=daily_quota)
+        db.add(policy)
+        await db.flush()
+    out = token_out(row, policy)
     out["token"] = raw  # shown once
     return out
 
@@ -125,14 +154,17 @@ async def revoke_token(db: AsyncSession, deployment_id: str, token_id: str) -> d
     return token_out(row)
 
 
-async def check_deployment_token(db: AsyncSession, dep: ModelDeployment, request) -> None:
-    """Enforce serving-token auth for ONE deployment row (v68).
+async def check_deployment_token(db: AsyncSession, dep: ModelDeployment, request
+                                 ) -> DeploymentToken | None:
+    """Enforce serving-token auth for ONE deployment row (v68, v69 return).
 
     Used by the webhook catcher (after it resolves the workflow's
     deployment) and by the SSE stream endpoint directly. Zero active
-    tokens = open endpoint; otherwise the request must carry the token
-    via ``Authorization: Bearer`` or ``X-Deployment-Token`` - timing-safe
-    compares against stored sha256 hashes, success stamps last_used_at.
+    tokens = open endpoint (returns None); otherwise the request must
+    carry the token via ``Authorization: Bearer`` or ``X-Deployment-Token``
+    - timing-safe compares against stored sha256 hashes, success stamps
+    last_used_at and RETURNS the matched token row so the caller can
+    apply the v69 rate-shaping/quotas.
 
     The last_used stamp is written on its OWN short-lived session and
     committed immediately: the webhook request session must stay
@@ -144,7 +176,7 @@ async def check_deployment_token(db: AsyncSession, dep: ModelDeployment, request
         .where(DeploymentToken.deployment_id == dep.id,
                DeploymentToken.revoked_at.is_(None)))).scalars().all()
     if not tokens:
-        return  # auth off - no credentials ever minted (or all revoked)
+        return None  # auth off - no credentials ever minted (or all revoked)
 
     provided = ""
     auth_header = request.headers.get("authorization", "")
@@ -161,7 +193,7 @@ async def check_deployment_token(db: AsyncSession, dep: ModelDeployment, request
     for tok in tokens:
         if hmac_compare(provided_hash, tok.key_hash):
             await _stamp_token_used(tok.id)
-            return
+            return tok
     raise PermissionError("invalid serving token for this deployment")
 
 
@@ -176,19 +208,71 @@ async def _stamp_token_used(token_id: str) -> None:
             await session.commit()
 
 
-async def check_serving_auth(db: AsyncSession, workflow_id: str, request) -> None:
+async def check_serving_auth(db: AsyncSession, workflow_id: str, request
+                             ) -> DeploymentToken | None:
     """Enforce deployment-token auth on a serving workflow's HTTP call.
 
     Called from the webhook catcher BEFORE the flow runs. No deployment
-    for this workflow, or no active tokens -> open endpoint (v67 behavior).
+    for this workflow, or no active tokens -> open endpoint (v67
+    behavior, returns None). Returns the matched token (v69) so the
+    catcher can enforce its rate-shaping/quotas right after.
     """
     q = (select(ModelDeployment)
          .where(ModelDeployment.workflow_id == workflow_id)
          .order_by(ModelDeployment.created_at.desc()))
     dep = (await db.execute(q)).scalars().first()
     if dep is None:
-        return
-    await check_deployment_token(db, dep, request)
+        return None
+    return await check_deployment_token(db, dep, request)
+
+
+async def enforce_serving_limits(token: DeploymentToken | None) -> dict[str, str]:
+    """Apply a token's rate-shaping/quotas (v69) and admit the request.
+
+    Zero policy = unlimited (no headers). Raises LimitExceeded -> the
+    API layers map that to 429 with Retry-After + X-RateLimit headers.
+    Callers must pass the token they got from check_serving_auth /
+    check_deployment_token - the limits belong to THAT credential.
+    """
+    if token is None:
+        return {}
+    from ..db import AsyncSessionLocal
+
+    # the request session must stay read-only (single-writer SQLite), so
+    # the policy read rides its own short-lived session like last_used
+    async with AsyncSessionLocal() as session:
+        policy = await serving_limits.policy_for_token(session, token.id)
+        await session.commit()
+    return serving_limits.admit(token.id, policy)
+
+
+async def set_token_limits(db: AsyncSession, deployment_id: str, token_id: str,
+                           rate_per_min: int | None, daily_quota: int | None) -> dict | None:
+    """Upsert a token's traffic policy (v69). None = unlimited for that axis."""
+    tok = await db.get(DeploymentToken, token_id)
+    if tok is None or tok.deployment_id != deployment_id:
+        return None
+    for label, value in (("rate_per_min", rate_per_min), ("daily_quota", daily_quota)):
+        if value is not None and value < 1:
+            raise ValueError(f"{label} must be >= 1 (or null for unlimited)")
+    policy = await serving_limits.policy_for_token(db, token_id)
+    if policy is None:
+        policy = DeploymentTokenPolicy(token_id=token_id, rate_per_min=rate_per_min,
+                                       daily_quota=daily_quota)
+    else:
+        policy.rate_per_min = rate_per_min
+        policy.daily_quota = daily_quota
+    db.add(policy)
+    await db.flush()
+    return token_out(tok, policy)
+
+
+async def get_token_usage(db: AsyncSession, deployment_id: str, token_id: str) -> dict | None:
+    tok = await db.get(DeploymentToken, token_id)
+    if tok is None or tok.deployment_id != deployment_id:
+        return None
+    policy = await serving_limits.policy_for_token(db, token_id)
+    return {"token": token_out(tok, policy), "usage": serving_limits.usage_snapshot(token_id, policy)}
 
 
 def hmac_compare(a: str, b: str) -> bool:
