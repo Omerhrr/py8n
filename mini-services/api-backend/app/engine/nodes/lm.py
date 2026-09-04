@@ -681,6 +681,54 @@ async def _resolve_registry_artifact(model_ref: str, owner_id: str | None) -> tu
     return info, payload
 
 
+# ---------------------------------------------------------------- streaming
+def stream_generate(net, prompt_ids: list[int], max_new: int, temperature: float = 0.8,
+                    top_k: int = 0, seed: int = 42, cond: list | None = None):
+    """Token-by-token sampling shared by BOTH cores (v68 SSE serving).
+
+    A generator that yields one sampled token id per step - the exact math
+    of ``_TinyLM.generate`` / ``_TorchLM.generate`` (same <bos> prefix, same
+    sliding window ``ids[-n_ctx:]``, same temperature/top-k/seed semantics),
+    factored so the deployment surface can stream tokens over SSE without
+    duplicating the sampling loop per backend. Works against either core
+    because both expose ``_forward(x, cond)`` -> logits and carry
+    ``n_ctx`` / ``vocab_size``.
+    """
+    if getattr(net, "W_cond", None) is not None and cond is None:
+        raise ValueError("this LM is conditioned - a condition vector is required")
+    rng = np.random.default_rng(seed)
+    is_torch = type(net).__module__.endswith("torch_backend")
+    ct = None
+    if getattr(net, "W_cond", None) is not None and cond is not None:
+        if is_torch:
+            torch = __import__("torch")
+            ct = torch.tensor([cond], dtype=torch.float64, device=getattr(net, "torch_device", None))
+        else:
+            ct = np.array([cond], dtype=np.float64)
+
+    ids = [1] + list(prompt_ids)  # <bos> prefix - identical to both cores' generate
+    for _ in range(max_new):
+        if is_torch:
+            torch = __import__("torch")
+            x = torch.tensor([ids[-net.n_ctx:]], dtype=torch.long, device=getattr(net, "torch_device", None))
+            with torch.no_grad():
+                logits = net._forward(x, ct)
+            row = logits[0, -1].detach().cpu().numpy().astype(np.float64)
+        else:
+            x = np.array([ids[-net.n_ctx:]])
+            row = np.asarray(net._forward(x, cond=ct))[0, -1].astype(np.float64).copy()
+        row /= max(float(temperature), 1e-3)
+        if top_k and 0 < top_k < net.vocab_size:
+            kth = np.sort(row)[-top_k]
+            row = np.where(row < kth, -1e9, row)
+        shifted = row - row.max()
+        p = np.exp(shifted)
+        p /= p.sum()
+        nxt = int(rng.choice(net.vocab_size, p=p))
+        ids.append(nxt)
+        yield nxt
+
+
 # ----------------------------------------------------------------- node: train
 class LMTrainNode(BaseNode):
     """v64 from-scratch LM training + continued pretraining; v66 adds the

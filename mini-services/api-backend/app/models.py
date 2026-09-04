@@ -992,3 +992,108 @@ class ModelDeployment(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DeploymentToken(Base):
+    """Serving token (v68) - credential for a deployed model's endpoint.
+
+    A deployment that has at least one ACTIVE (non-revoked) token demands
+    ``Authorization: Bearer <token>`` (or ``X-Deployment-Token``) on every
+    call to its serving workflow; zero active tokens = open endpoint (the
+    v67 behavior, kept for backward compatibility). The full token
+    (``py8nd_`` + 32 url-safe chars) is shown exactly once at creation;
+    storage keeps only the sha256 hash plus a display prefix - the same
+    discipline as v41 API keys, but scoped to ONE deployment instead of
+    the whole API. Tokens never grant API access: they only open the
+    serving webhook they belong to.
+    """
+
+    __tablename__ = "deployment_tokens"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    deployment_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(24), default="")  # display form, e.g. py8nd_ab12cd34
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # sha256 hex
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class DeploymentRevision(Base):
+    """Deployment revision (v68) - the redeploy/rollback ledger.
+
+    Every time a deployment is created, redeployed to another registry
+    version, or rolled back, a revision row records WHICH registry row the
+    serving endpoint pointed at, when, and why. Exactly one revision is
+    active at a time and it mirrors deployment.model_registry_id; the
+    ledger itself is append-only event history (like the execution log),
+    so rolling back is just activating an older ledger entry and patching
+    the serving workflow's model parameter in place.
+    """
+
+    __tablename__ = "deployment_revisions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    deployment_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # monotonic per deployment: 1 = the initial deploy
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    model_registry_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    # snapshot of the registry row at activation time (the row may vanish later)
+    model_name: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    model_version: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    algorithm: Mapped[str] = mapped_column(String(60), nullable=False, default="")
+    action: Mapped[str] = mapped_column(String(20), nullable=False, default="deploy")  # deploy|redeploy|rollback
+    note: Mapped[str] = mapped_column(Text, default="")
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    deployed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class InteractionConversation(Base):
+    """A conversation (v68) - the interaction layer's unit of continuity.
+
+    Channels (voice, whatsapp, telegram, discord, web, app, api, sms,
+    email) are interchangeable ADAPTERS; the conversation is the thing
+    that persists underneath them. A participant can move between
+    channels mid-conversation (conversation_ref rebinds) and the same
+    handler workflow, history and context carry over - one customer, one
+    context, one AI, regardless of how they reached us.
+    """
+
+    __tablename__ = "interaction_conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # the channel the conversation STARTED on (per-message channels live on the messages)
+    channel: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    participant_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    participant_name: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    # the workflow that answers inbound text (last node's output supplies the reply)
+    handler_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="open", index=True)  # open|closed
+    outcome: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+    last_message_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class InteractionMessage(Base):
+    """One message inside a conversation (v68).
+
+    ``role`` is user | agent | human_agent | system; ``channel`` records
+    the adapter the message actually traveled through, so a transcript
+    shows the channel hops (phone -> whatsapp -> app) without the business
+    logic ever caring about them.
+    """
+
+    __tablename__ = "interaction_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    conversation_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user|agent|human_agent|system
+    channel: Mapped[str] = mapped_column(String(30), nullable=False, default="")
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    payload: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

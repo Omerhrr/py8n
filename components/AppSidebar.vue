@@ -4,7 +4,7 @@ import {
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
   FileBarChart, BookOpen, Radio, Wand2, Store, Boxes, Trash2, Unlink, BrainCircuit,
-  Globe, Rocket,
+  Globe, Rocket, MessagesSquare,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -42,6 +42,7 @@ const nav = [
   { to: '/models', label: 'Models', icon: Network, match: ['/models'] },  // v46 model registry
   { to: '/model-systems', label: 'Model Systems', icon: BrainCircuit, match: ['/model-systems'] },  // v63 model-building units
   { to: '/deployments', label: 'Deployments', icon: Rocket, match: ['/deployments'] },  // v67 live model endpoints
+  { to: '/interactions', label: 'Interactions', icon: MessagesSquare, match: ['/interactions'] },  // v68 channel-agnostic conversation layer
   { to: '/documents', label: 'Documents', icon: FileText, match: ['/documents'] },
   { to: '/apps', label: 'Apps', icon: LayoutGrid, match: ['/apps'] },
   { to: '/dashboards', label: 'Dashboards', icon: Gauge, match: ['/dashboards'] },

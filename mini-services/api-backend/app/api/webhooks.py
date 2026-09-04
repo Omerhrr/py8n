@@ -180,6 +180,14 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
     node = wf.webhook_nodes()[0]
     params = node.get("parameters") or {}
     _enforce_webhook_auth(request, params)  # v23: 401 before the flow runs
+    # v68: serving tokens - a deployment-backed workflow with >=1 active
+    # token demands it (Bearer / X-Deployment-Token) before the flow runs.
+    try:
+        from ..services.deployments import check_serving_auth
+
+        await check_serving_auth(db, workflow_id, request)
+    except PermissionError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
     response_mode = params.get("response_mode", "immediately")
     envelope = _request_envelope(request, body)
 
