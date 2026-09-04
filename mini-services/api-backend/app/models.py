@@ -1241,3 +1241,50 @@ class DeploymentTokenHit(Base):
     admitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
     # UTC calendar-day key for the quota count ("2026-09-04")
     quota_day: Mapped[str] = mapped_column(String(10), nullable=False)
+
+
+class VoiceAgent(Base):
+    """A voice agent (v71) - the composable configuration of a phone agent.
+
+    v69/v70 built the voice PRIMITIVES (state machine, barge-in, ASR/TTS
+    contracts, the websocket media transport); a VoiceAgent is the
+    BUILDER object that composes them into one deployable persona:
+
+    * ``greeting_text`` - spoken (interruptible, barge-in-able) the moment
+      the call is answered, through the agent's own TTS configuration;
+    * ``asr_provider`` / ``tts_provider`` / ``tts_voice`` / ``tts_format``
+      / ``language`` - the speech configuration every session of this
+      agent inherits (the media stream resolves its ASR engine and the
+      turn loop resolves its TTS request from here; explicit per-call
+      parameters still win);
+    * ``barge_in`` - whether the caller may interrupt (False turns the
+      greeting and turns into non-interruptible utterances);
+    * ``system_prompt`` - the persona text injected into the handler
+      envelope's metadata so AI handlers (ai_agent nodes) speak with the
+      agent's voice;
+    * ``handler_workflow_id`` - the workflow that answers. When none is
+      bound, the builder SCAFFOLDS one (trigger -> code node preloaded
+      with a voice-agent template) so a new agent is runnable immediately.
+
+    An agent is CONFIGURATION, not state: sessions copy the relevant
+    fields into their context at creation time, so editing an agent never
+    rewrites history on live calls.
+    """
+
+    __tablename__ = "voice_agents"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    greeting_text: Mapped[str] = mapped_column(Text, default="")
+    asr_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="py8n_local")
+    tts_provider: Mapped[str] = mapped_column(String(40), nullable=False, default="openai_tts")
+    tts_voice: Mapped[str] = mapped_column(String(80), nullable=False, default="alloy")
+    tts_format: Mapped[str] = mapped_column(String(10), nullable=False, default="wav")
+    language: Mapped[str] = mapped_column(String(20), nullable=False, default="en-US")
+    barge_in: Mapped[bool] = mapped_column(Boolean, default=True)
+    system_prompt: Mapped[str] = mapped_column(Text, default="")
+    handler_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

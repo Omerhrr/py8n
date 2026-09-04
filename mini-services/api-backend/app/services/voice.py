@@ -213,6 +213,11 @@ def session_out(row: VoiceSession, events: list[VoiceEvent] | None = None,
         "handler_workflow_id": row.handler_workflow_id,
         "conversation_id": row.conversation_id,
         "conversation": conversation_summary,
+        # v71: the VoiceAgent config this session copied at creation
+        # (config is copied, not referenced - editing the agent never
+        # rewrites a live call's history)
+        "agent": {k: v for k, v in ((row.context or {}).get("voice_agent") or {}).items()
+                  if k != "system_prompt"} or None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
         "answered_at": row.answered_at.isoformat() if row.answered_at else None,
         "ended_at": row.ended_at.isoformat() if row.ended_at else None,
@@ -284,13 +289,17 @@ async def _add_event(db: AsyncSession, session: VoiceSession, kind: str,
 async def create_session(db: AsyncSession, *, owner_id: str | None, direction: str = "inbound",
                          provider: str = "twilio", call_ref: str = "", from_ref: str = "",
                          to_ref: str = "", handler_workflow_id: str | None = None,
-                         conversation_ref: str | None = None) -> dict:
+                         conversation_ref: str | None = None,
+                         agent_id: str | None = None) -> dict:
     """Open a call. Links (or opens) the interaction-layer conversation.
 
     The conversation link is the point: the SAME customer talking on
     voice then whatsapp is ONE transcript. Outbound dials start in
     'initiated' and reach 'ringing' via events; inbound calls arrive
-    already ringing.
+    already ringing. ``agent_id`` (v71) copies the VoiceAgent's config
+    into the session context at creation and falls the handler back to
+    the agent's workflow when none is given - the greeting, the ASR
+    engine and the TTS voice of every turn then come from the agent.
     """
     direction = (direction or "inbound").strip().lower()
     if direction not in ("inbound", "outbound"):
@@ -301,6 +310,7 @@ async def create_session(db: AsyncSession, *, owner_id: str | None, direction: s
                           and wf.owner_id != owner_id):
             raise VoiceError(f"handler workflow {handler_workflow_id!r} not found")
 
+    agent_handler_id: str | None = None
     from .interactions import create_conversation, get_conversation
     if conversation_ref:
         conv = await get_conversation(db, conversation_ref, owner_id)
@@ -326,6 +336,24 @@ async def create_session(db: AsyncSession, *, owner_id: str | None, direction: s
     )
     row.owner_id = owner_id
     db.add(row)
+    await db.flush()
+
+    if agent_id:
+        from . import voice_agents
+        try:
+            agent_handler_id = await voice_agents.bind_to_session(db, row, agent_id, owner_id)
+        except voice_agents.VoiceAgentError as exc:
+            raise VoiceError(str(exc)) from exc
+        if agent_handler_id and not row.handler_workflow_id:
+            row.handler_workflow_id = agent_handler_id
+            db.add(row)
+            if agent_handler_id:
+                # the conversation's handler rides the agent's workflow too
+                from ..models import InteractionConversation
+                conv_row = await db.get(InteractionConversation, conversation_id)
+                if conv_row is not None and not conv_row.handler_workflow_id:
+                    conv_row.handler_workflow_id = agent_handler_id
+                    db.add(conv_row)
     await db.flush()
     await db.refresh(row)
     return await get_session(db, row.id, owner_id)  # type: ignore[return-value]
@@ -420,6 +448,9 @@ async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> st
         raise VoiceError("the bound handler workflow no longer exists")
     history = await _conv_messages(db, session.conversation_id) if session.conversation_id else []
     tail = [{"role": m.role, "channel": m.channel, "text": m.text} for m in history[-10:]]
+    # v71: the VoiceAgent's persona rides the envelope so AI handlers speak
+    # with the agent's voice (the scaffold reads metadata.system_prompt)
+    agent = (session.context or {}).get("voice_agent") or {}
     envelope = {
         "conversation_id": session.conversation_id,
         "channel": "voice",
@@ -427,7 +458,9 @@ async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> st
         "participant": {"id": session.from_ref, "name": ""},
         "text": text,
         "history": tail,
-        "metadata": {"provider": session.provider, "call_ref": session.call_ref},
+        "metadata": {"provider": session.provider, "call_ref": session.call_ref,
+                     "voice_agent_id": agent.get("voice_agent_id") or "",
+                     "system_prompt": agent.get("system_prompt") or ""},
     }
     result = await execute_workflow(
         session.handler_workflow_id, trigger_type="webhook",
@@ -440,15 +473,17 @@ async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> st
 
 async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str,
                      confidence: float = 1.0, language: str = "",
-                     tts_provider: str = "openai_tts", voice: str = "alloy",
-                     tts_format: str = "wav") -> dict:
+                     tts_provider: str | None = None, voice: str | None = None,
+                     tts_format: str | None = None) -> dict:
     """One conversational turn: ASR result -> handler -> TTS contract.
 
     Requires an in_progress (or on_hold refused) session with an answered
     call. The caller's words are recorded on the LINKED conversation
     (channel=voice), the handler replies through the SAME conversation,
     and the reply comes back wrapped in the TTS contract + an interruptible
-    tts.started utterance (barge-in cancels it).
+    tts.started utterance (barge-in cancels it). TTS parameters (v71)
+    default to the session's VoiceAgent config when not given explicitly -
+    explicit parameters still win.
     """
     if session.state == "ended":
         raise VoiceError("the call already ended")
@@ -487,12 +522,17 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
                                            "handler_workflow_id": session.handler_workflow_id}))
         await db.flush()
 
-    tts_request = build_tts_request(reply or "", provider=tts_provider,
-                                    voice=voice, fmt=tts_format) if reply else None
+    # v71: the TTS configuration - explicit parameter -> the session's
+    # VoiceAgent config -> the historical defaults
+    from .voice_agents import resolve_turn_tts
+    eff_tts_provider, eff_voice, eff_tts_format = resolve_turn_tts(
+        session, tts_provider=tts_provider, voice=voice, tts_format=tts_format)
+    tts_request = build_tts_request(reply or "", provider=eff_tts_provider,
+                                    voice=eff_voice, fmt=eff_tts_format) if reply else None
     if tts_request is not None:
         tts_event = await _add_event(db, session, "tts.started",
-                                     {"text": reply[:500], "provider": tts_provider,
-                                      "voice": voice, "barge_in_ok": tts_request["barge_in_ok"]})
+                                     {"text": reply[:500], "provider": eff_tts_provider,
+                                      "voice": eff_voice, "barge_in_ok": tts_request["barge_in_ok"]})
         ctx = dict(session.context or {})
         ctx["active_tts"] = tts_event.id
         session.context = ctx

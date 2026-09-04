@@ -31,6 +31,7 @@ was delivered when it wasn't.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 from datetime import datetime, timezone
 
@@ -95,16 +96,30 @@ def _extract_sender_to(msg: adapters.NormalizedInbound) -> str:
         return msg.sender_id
     if msg.channel == "discord":
         return ""  # the endpoint's configured webhook_url IS the destination
+    if msg.channel == "sms":
+        return msg.sender_id
+    if msg.channel == "email":
+        return msg.sender_id  # SMTP replies go to the sender's address
     return msg.sender_id
 
 
+def _email_subject_from(msg: adapters.NormalizedInbound) -> str:
+    """Reply subject for an inbound email: Re: <original>, once."""
+    subject = str((msg.extra or {}).get("subject") or "").strip()
+    if not subject:
+        return ""
+    return subject if subject.lower().startswith("re:") else f"Re: {subject}"
+
+
 async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
-                           buttons: list[dict] | None = None) -> dict:
+                           buttons: list[dict] | None = None,
+                           *, subject: str = "") -> dict:
     """Build the provider request and (when possible) actually send it.
 
     ``buttons`` (v70) switches the request to the provider's INTERACTIVE
     shape - WhatsApp reply buttons only; other providers refuse loudly
-    instead of silently degrading to plain text.
+    instead of silently degrading to plain text. ``subject`` (v71) rides
+    the email SMTP request; other providers ignore it.
 
     Returns a delivery record: {delivery, detail, request} where request
     carries the url + json body (auth headers masked) for traceability.
@@ -117,12 +132,38 @@ async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
                     f"provider {endpoint.provider} does not support interactive buttons - "
                     "only meta_cloud_api (WhatsApp) carries reply buttons")
             request = adapters.meta_build_interactive(config, to, text, buttons)
+        elif endpoint.provider == "email_inbound":
+            request = adapters.email_build_outbound(config, to, text, subject=subject)
         else:
             request = adapters.build_outbound(endpoint.provider, config, to, text)
     except ChannelEndpointError:
         raise
     except ValueError as exc:  # Meta's interactive limits refuse loudly -> 400
         raise ChannelEndpointError(str(exc)) from exc
+
+    # --- the SMTP transport (v71): email does not ride httpx ---
+    if request.get("transport") == "smtp":
+        masked_request = {"transport": "smtp", "host": request.get("host"),
+                          "port": request.get("port"), "to": request.get("to"),
+                          "subject": request.get("subject"),
+                          "message_bytes": len(request.get("message") or "")}
+        cred_keys = adapters.REQUIRED_CONFIG.get(endpoint.provider, {}).get("credential", [])
+        missing = [k for k in cred_keys if not str(config.get(k) or "").strip()
+                   and k not in ("smtp_port",)]
+        if missing:
+            return {"delivery": "skipped",
+                    "detail": f"no outbound credential configured (missing {', '.join(missing)}) - "
+                              "the reply is recorded in the transcript but NOT delivered",
+                    "request": masked_request}
+        try:
+            request["password"] = str(config.get("smtp_pass") or "")
+            result = await asyncio.to_thread(adapters.email_send_smtp, request)
+            result["request"] = masked_request
+            return result
+        except Exception as exc:  # noqa: BLE001 - SMTP failures are honest records
+            return {"delivery": "failed", "detail": f"smtp send failed: {exc}",
+                    "request": masked_request}
+
     masked_request = {"method": request["method"], "url": request["url"],
                       "json": request.get("json")}
     cred_keys = adapters.REQUIRED_CONFIG.get(endpoint.provider, {}).get("credential", [])
@@ -155,12 +196,20 @@ async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
 
 async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
                           raw_body: bytes, headers: dict,
-                          query_params: dict | None = None) -> dict:
+                          query_params: dict | None = None,
+                          form_fields: dict | None = None,
+                          method: str = "POST", target: str = "") -> dict:
     """The shared receiver: verify -> parse -> ingest each -> deliver replies.
 
     Raises ChannelEndpointError on verification failure (the API layer
     maps that to 401/403). Provider status events (delivery receipts,
     edits) are counted and reported as skips - they are not messages.
+    ``form_fields`` (v71) carries the multipart form an email inbound
+    parse posts (SendGrid-style: ``email`` = the raw MIME) - the API
+    layer parses the form, this layer normalizes it into the generic
+    JSON shape before the email adapter sees it. ``method``/``target``
+    matter to RFC 9421 signers (telnyx_sms): the signature base is
+    derived from the request's actual method and target path.
     """
     if not endpoint.enabled:
         raise ChannelEndpointError("this endpoint is disabled")
@@ -169,13 +218,25 @@ async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
     # 1. verify - provider-native, always, before anything else runs
     ok, detail = adapters.verify_request(provider, endpoint.config or {},
                                          raw_body=raw_body, headers={
-                                             k.lower(): v for k, v in headers.items()})
+                                             k.lower(): v for k, v in headers.items()},
+                                         method=method, target=target)
     if not ok:
         raise ChannelEndpointError(detail or "webhook verification failed")
     try:
         payload = _json.loads(raw_body.decode("utf-8")) if raw_body else {}
     except (ValueError, UnicodeDecodeError):
         payload = {}
+    if provider == "email_inbound" and form_fields:
+        # the raw-MIME multipart shape: normalize into the generic JSON
+        # shape (raw MIME parsed with the stdlib parser), then reuse the
+        # exact same parse path as the signed-JSON contract
+        raw_mime = str(form_fields.get("email") or form_fields.get("body-mime") or "")
+        if raw_mime:
+            parsed_mime = adapters.email_parse_mime(raw_mime)
+            payload = {**parsed_mime, "via_mime": True}
+        else:  # fields-only form (from/to/subject/text as separate fields)
+            payload = {k: v for k, v in form_fields.items()
+                       if isinstance(v, str) and k not in ("headers",)}
 
     # 2. parse the provider dialect
     result = adapters.parse_inbound(provider, payload if isinstance(payload, dict) else {})
@@ -189,8 +250,11 @@ async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
             handler_workflow_id=endpoint.handler_workflow_id,
             metadata={"provider": provider, "endpoint_id": endpoint.id,
                       "event_id": msg.event_id, **(msg.extra or {})})
-        # 4. deliver the reply through the provider's send API
-        delivery = await deliver_outbound(endpoint, _extract_sender_to(msg), ingest.get("reply") or "")
+        # 4. deliver the reply through the provider's send API (email
+        # threads its reply subject; other providers ignore it)
+        delivery = await deliver_outbound(
+            endpoint, _extract_sender_to(msg), ingest.get("reply") or "",
+            subject=_email_subject_from(msg) if provider == "email_inbound" else "")
         handled.append({"sender_id": msg.sender_id, "text": msg.text[:200],
                         "conversation_id": ingest["conversation_id"],
                         "reply": ingest.get("reply"), **delivery})
@@ -216,7 +280,9 @@ async def _find_or_create_voice_session(db: AsyncSession, endpoint: ChannelEndpo
 
     Returns (VoiceSession row, created). The session binds the endpoint's
     handler workflow, so gather-turns answer through the SAME workflow
-    every other channel uses.
+    every other channel uses; when the endpoint's config names a
+    ``agent_id`` (v71), the created session inherits that VoiceAgent -
+    its greeting, ASR engine and TTS voice ride the call.
     """
     from ..models import VoiceSession
     q = (select(VoiceSession).where(VoiceSession.call_ref == ev.call_control_id)
@@ -227,10 +293,11 @@ async def _find_or_create_voice_session(db: AsyncSession, endpoint: ChannelEndpo
         return row, False
     from .voice import create_session as _voice_create
     direction = "inbound" if ev.direction != "outgoing" else "outbound"
+    agent_id = str((endpoint.config or {}).get("agent_id") or "") or None
     await _voice_create(
         db, owner_id=endpoint.owner_id, direction=direction, provider="telnyx",
         call_ref=ev.call_control_id, from_ref=ev.from_ref, to_ref=ev.to_ref,
-        handler_workflow_id=endpoint.handler_workflow_id)
+        handler_workflow_id=endpoint.handler_workflow_id, agent_id=agent_id)
     await db.flush()
     row = (await db.execute(q)).scalars().first()
     return row, True
@@ -314,6 +381,21 @@ async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
                 actions.append("answer_built")
             elif ev.kind == "call.answered":
                 await apply_event(db, session, "call.answered", {})
+                # v71: the session's VoiceAgent greets the caller - an
+                # interruptible tts.started from the agent's own TTS
+                # config, spoken through the provider's speak command
+                # (honestly attempted like every other command)
+                from .voice_agents import on_answered as _on_agent_answered
+                greeting = await _on_agent_answered(db, session)
+                if greeting:
+                    await db.commit()
+                    await db.refresh(session)
+                    cmd = adapters.telnyx_build_command(
+                        config, ev.call_control_id, "speak",
+                        {"payload": greeting["text"], "voice": greeting["voice"],
+                         "language": (session.context or {}).get("voice_agent", {}).get("language", "en-US")})
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("greeting_speak_built")
             elif ev.kind == "dtmf":
                 # gather.ended - the caller 'said' digits; run the SAME turn
                 await apply_event(db, session, "dtmf", {"digits": ev.digits})
@@ -432,7 +514,8 @@ async def delete_endpoint(db: AsyncSession, row: ChannelEndpoint) -> dict:
 
 
 async def preview_outbound(row: ChannelEndpoint, to: str, text: str,
-                           buttons: list[dict] | None = None) -> dict:
+                           buttons: list[dict] | None = None,
+                           *, subject: str = "") -> dict:
     """Dry-run: the exact request py8n would send, secrets masked."""
     try:
         if buttons:
@@ -441,19 +524,29 @@ async def preview_outbound(row: ChannelEndpoint, to: str, text: str,
                     f"provider {row.provider} does not support interactive buttons - "
                     "only meta_cloud_api (WhatsApp) carries reply buttons")
             request = adapters.meta_build_interactive(row.config or {}, to, text, buttons)
+        elif row.provider == "email_inbound":
+            request = adapters.email_build_outbound(row.config or {}, to, text, subject=subject)
         else:
             request = adapters.build_outbound(row.provider, row.config or {}, to, text)
     except ChannelEndpointError:
         raise
     except ValueError as exc:  # Meta's interactive limits refuse loudly -> 400
         raise ChannelEndpointError(str(exc)) from exc
+    cred_keys = adapters.REQUIRED_CONFIG.get(row.provider, {}).get("credential", [])
+    missing = [k for k in cred_keys if not str((row.config or {}).get(k) or "").strip()
+               and k != "smtp_port"]
+    if request.get("transport") == "smtp":
+        return {"transport": "smtp", "host": request.get("host"), "port": request.get("port"),
+                "from": request.get("from"), "to": request.get("to"),
+                "subject": request.get("subject"),
+                "message_preview": (request.get("message") or "")[:400],
+                "would_deliver": not missing,
+                "missing_credentials": missing}
     headers = dict(request.get("headers") or {})
     for key in list(headers):
         if key.lower() in ("authorization", "x-telegram-bot-api-secret-token"):
             v = str(headers[key])
             headers[key] = f"{v[:8]}...({len(v)} chars)" if len(v) > 8 else v
-    cred_keys = adapters.REQUIRED_CONFIG.get(row.provider, {}).get("credential", [])
-    missing = [k for k in cred_keys if not str((row.config or {}).get(k) or "").strip()]
     return {"method": request["method"], "url": request["url"],
             "headers": headers, "json": request.get("json"),
             "would_deliver": not missing,

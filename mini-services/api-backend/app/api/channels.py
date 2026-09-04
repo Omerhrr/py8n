@@ -144,9 +144,10 @@ async def delete_endpoint(endpoint_id: str, user=Depends(get_optional_user),
 
 
 class OutboundBody(BaseModel):
-    to: str = Field(..., min_length=1, max_length=180, description="Chat id / wa id / channel id / webhook URL")
+    to: str = Field(..., min_length=1, max_length=180, description="Chat id / wa id / phone number / email address")
     text: str = Field(..., min_length=1, max_length=4000)
     buttons: list[dict] | None = Field(default=None, description="WhatsApp interactive reply buttons [{id, title}] (meta_cloud_api only, 1..3, title <= 20 chars)")
+    subject: str | None = Field(default=None, max_length=200, description="Email subject (email_inbound only; other providers ignore it)")
 
 
 @router.post("/endpoints/{endpoint_id}/preview-outbound")
@@ -154,7 +155,8 @@ async def preview_outbound(endpoint_id: str, body: OutboundBody,
                            user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _own_endpoint(db, endpoint_id, user)
     try:
-        return await ep_svc.preview_outbound(row, body.to, body.text, buttons=body.buttons)
+        return await ep_svc.preview_outbound(row, body.to, body.text, buttons=body.buttons,
+                                             subject=body.subject or "")
     except ChannelEndpointError as exc:
         raise _http(exc) from exc
 
@@ -167,7 +169,8 @@ async def deliver(endpoint_id: str, body: OutboundBody,
     if not row.enabled:
         raise HTTPException(status_code=400, detail="this endpoint is disabled")
     try:
-        return await ep_svc.deliver_outbound(row, body.to, body.text, buttons=body.buttons)
+        return await ep_svc.deliver_outbound(row, body.to, body.text, buttons=body.buttons,
+                                             subject=body.subject or "")
     except ChannelEndpointError as exc:
         raise _http(exc) from exc
 
@@ -265,3 +268,75 @@ async def telnyx_webhook(endpoint_id: str, request: Request, db: AsyncSession = 
         return JSONResponse({"ok": True, **out}, status_code=200)
     except ChannelEndpointError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# v71 receivers: SMS (telnyx_sms + generic_sms) and email (email_inbound)
+# ---------------------------------------------------------------------------
+
+@router.post("/telnyx-sms/{endpoint_id}/webhook")
+async def telnyx_sms_webhook(endpoint_id: str, request: Request,
+                             db: AsyncSession = Depends(get_db)):
+    """Telnyx Messaging events - the SAME RFC 9421 signatures as the voice
+    webhooks (one public key covers the whole Telnyx connection);
+    message.received ingests into the interaction layer, delivery
+    statuses are honest skips."""
+    row = await _load_receiver(db, endpoint_id)
+    raw = await request.body()
+    try:
+        out = await ep_svc.receive_webhook(
+            db, row, raw_body=raw, headers=dict(request.headers),
+            method=request.method, target=request.url.path +
+            (f"?{request.url.query}" if request.url.query else ""))
+        return JSONResponse({"ok": True, **out}, status_code=200)
+    except ChannelEndpointError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/sms/{endpoint_id}/webhook")
+async def generic_sms_webhook(endpoint_id: str, request: Request,
+                              db: AsyncSession = Depends(get_db)):
+    """The any-gateway SMS contract: POST {from, to, text} JSON with an
+    X-Py8n-Signature: sha256=<hmac(secret, body)> header. Twilio relays,
+    Vonage, Africa's Talking, GSM modem boxes - any gateway that can
+    speak it carries SMS through py8n."""
+    row = await _load_receiver(db, endpoint_id)
+    raw = await request.body()
+    try:
+        out = await ep_svc.receive_webhook(
+            db, row, raw_body=raw, headers=dict(request.headers))
+        return JSONResponse({"ok": True, **out}, status_code=200)
+    except ChannelEndpointError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/email/{endpoint_id}/webhook")
+async def email_webhook(endpoint_id: str, request: Request,
+                        db: AsyncSession = Depends(get_db)):
+    """Email inbound parse webhooks, both webhook-native shapes:
+
+    * signed JSON (the generic mail contract, X-Py8n-Signature HMAC) -
+      any mail gateway / relay speaks it;
+    * raw-MIME multipart (SendGrid Inbound Parse style: ``email`` = the
+      full RFC 5322 message) - parsed with the stdlib email parser,
+      text/plain extracted, attachments counted and honestly skipped.
+
+    The reply is recorded in the transcript and delivered via SMTP when
+    the endpoint carries credentials (honestly skipped otherwise).
+    """
+    row = await _load_receiver(db, endpoint_id)
+    raw = await request.body()
+    ctype = request.headers.get("content-type", "")
+    form_fields: dict | None = None
+    if "multipart/form-data" in ctype or "application/x-www-form-urlencoded" in ctype:
+        form = await request.form()
+        form_fields = {k: (v if isinstance(v, str) else f"<{type(v).__name__}>")
+                       for k, v in form.items()}
+        # the HMAC covers the RAW multipart body the provider posted
+    try:
+        out = await ep_svc.receive_webhook(
+            db, row, raw_body=raw, headers=dict(request.headers),
+            form_fields=form_fields)
+        return JSONResponse({"ok": True, **out}, status_code=200)
+    except ChannelEndpointError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc

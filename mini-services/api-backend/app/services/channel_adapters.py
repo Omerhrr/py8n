@@ -1,12 +1,14 @@
-"""Real provider adapters (v69+v70) - py8n IS the webhook receiver.
+"""Real provider adapters (v69+v70+v71) - py8n IS the webhook receiver.
 
 v68 made channels interchangeable METADATA with a universal ingress that
 expected already-normalized messages. v69 closed the last mile for the
 chat channels; v70 adds voice (Telnyx Call Control - SIP and PSTN both
-ride the same call-control webhooks) and WhatsApp interactive buttons.
-Everything here is PURE (parse/verify/build); the HTTP plumbing lives in
-services/channel_endpoints.py, so every rule below is unit-testable
-without network.
+ride the same call-control webhooks) and WhatsApp interactive buttons;
+v71 completes the matrix with the messaging and long-form channels
+(telnyx_sms, the any-gateway generic_sms contract, and email inbound
+parse + SMTP outbound). Everything here is PURE (parse/verify/build);
+the HTTP plumbing lives in services/channel_endpoints.py, so every rule
+below is unit-testable without network.
 
 The webhook-native adapters:
 
@@ -715,6 +717,370 @@ def telnyx_build_command(config: dict, call_control_id: str, command: str,
 
 
 # ---------------------------------------------------------------------------
+# telnyx_sms (v71) - SMS through Telnyx Messaging
+# ---------------------------------------------------------------------------
+# Telnyx carries SMS on the same webhook infrastructure as voice: the
+# events arrive as ``{data: {event_type, payload}}`` and are signed with
+# the SAME RFC 9421 HTTP Message Signatures (one public key covers the
+# whole Telnyx connection - voice and messaging alike). The messaging
+# event that matters is ``message.received``: an inbound text. Everything
+# else (message.finalized delivery receipts, message.sent) is a status,
+# honestly skipped. Outbound: ``POST /v2/messages`` with the messaging
+# profile's sender number.
+
+TELNYX_SMS_EVENTS = ("message.received",)
+TELNYX_SMS_STATUS_EVENTS = ("message.finalized", "message.sent", "message.queued",
+                            "message.scheduled", "message.failed")
+
+
+def telnyx_sms_parse_webhook(payload: dict) -> ParseResult:
+    """Translate a Telnyx Messaging webhook into SMS messages.
+
+    ``message.received`` becomes ONE normalized SMS; the payload's
+    ``from``/``to`` are Telnyx phone-number objects (``{phone_number:
+    "+..."}``, ``to`` a list) and are flattened to plain E.164 strings.
+    Delivery statuses are skipped honestly - they are not messages.
+    """
+    result = ParseResult()
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        result.skipped.append({"reason": "unsupported_payload",
+                               "detail": "telnyx webhooks carry {data: {...}}"})
+        return result
+    data = payload["data"]
+    event_type = str(data.get("event_type") or "")
+    p = data.get("payload") or {}
+    if not isinstance(p, dict):
+        p = {}
+    if event_type in TELNYX_SMS_STATUS_EVENTS:
+        result.skipped.append({"reason": "status_update",
+                               "detail": f"{event_type} is a delivery status - not a message"})
+        return result
+    if event_type != "message.received":
+        result.skipped.append({"reason": "unhandled_event_type",
+                               "detail": f"event_type {event_type!r} is not applied "
+                                         "(telnyx_sms carries message.received)"})
+        return result
+    text = str(p.get("text") or "")
+    if not text.strip():
+        result.skipped.append({"reason": "non_text_message",
+                               "detail": "message.received carried no text"})
+        return result
+    frm = p.get("from") or {}
+    to_list = p.get("to") or []
+    sender = str(frm.get("phone_number") if isinstance(frm, dict) else frm or "")
+    to_ref = ""
+    if isinstance(to_list, list) and to_list:
+        first = to_list[0]
+        to_ref = str(first.get("phone_number") if isinstance(first, dict) else first or "")
+    elif isinstance(to_list, dict):
+        to_ref = str(to_list.get("phone_number") or "")
+    result.messages.append(NormalizedInbound(
+        channel="sms",
+        sender_id=sender,
+        sender_name="",
+        text=text,
+        event_id=str(p.get("id") or ""),
+        extra={"to": to_ref, "from_number": str((p.get("profile_id") or ""))[:40]},
+    ))
+    return result
+
+
+def telnyx_sms_build_outbound(config: dict, to: str, text: str) -> dict:
+    """The Messaging API request that sends one SMS.
+
+    A missing from_number builds an empty sender and lets the delivery
+    layer report the missing credential honestly (the standard
+    "skipped: missing <key>" record) instead of raising here.
+    """
+    api_key = str(config.get("api_key") or "")
+    from_number = str(config.get("from_number") or "")
+    return {
+        "method": "POST",
+        "url": f"{TELNYX_API_BASE}/messages",
+        "headers": {"Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"},
+        "json": {"to": to, "from": from_number, "text": text},
+    }
+
+
+# ---------------------------------------------------------------------------
+# generic_sms (v71) - the any-gateway SMS contract
+# ---------------------------------------------------------------------------
+# The py8n thesis taken to its conclusion: py8n does not need each SMS
+# vendor named in code. ANY gateway that can (a) POST ``{from, to, text}``
+# JSON to py8n's webhook with an ``X-Py8n-Signature: sha256=<hmac>`` header
+# and (b) accept a JSON POST (or be relayed to by a 3-line py8n workflow)
+# can carry SMS. This adapter IS the contract; Twilio relays, Vonage,
+# Africa's Talking, a GSM modem box on the wall - all speak it with a
+# thin translation workflow on their side, or natively.
+
+SIGNATURE_HEADER = "x-py8n-signature"
+
+
+def hmac_verify(secret: str, raw_body: bytes, header_value: str) -> bool:
+    """``X-Py8n-Signature: sha256=<hex hmac-sha256(secret, raw_body)>``.
+
+    The shared scheme for the any-gateway adapters (generic_sms,
+    email_inbound): one header, one algorithm, timing-safe. Missing
+    secret or header fails closed.
+    """
+    if not secret or not header_value:
+        return False
+    provided = header_value.strip()
+    if provided.lower().startswith("sha256="):
+        provided = provided[7:]
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(provided, expected)
+
+
+def generic_sms_sign(secret: str, raw_body: bytes) -> str:
+    """The sender side of the same contract (tests + relay workflows use it)."""
+    return "sha256=" + hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+
+
+def generic_sms_parse_webhook(payload: dict) -> ParseResult:
+    """The any-gateway inbound shape: ``{from, to, text, id?}``."""
+    result = ParseResult()
+    if not isinstance(payload, dict):
+        result.skipped.append({"reason": "unsupported_payload",
+                               "detail": "generic_sms webhooks carry a JSON object"})
+        return result
+    text = str(payload.get("text") or payload.get("body") or "")
+    sender = str(payload.get("from") or payload.get("msisdn") or "")
+    if not text.strip():
+        result.skipped.append({"reason": "non_text_message",
+                               "detail": "webhook carried no text/body"})
+        return result
+    if not sender:
+        result.skipped.append({"reason": "no_sender",
+                               "detail": "webhook carried no from/msisdn"})
+        return result
+    result.messages.append(NormalizedInbound(
+        channel="sms",
+        sender_id=sender,
+        sender_name=str(payload.get("name") or ""),
+        text=text,
+        event_id=str(payload.get("id") or payload.get("message_id") or ""),
+        extra={"to": str(payload.get("to") or "")},
+    ))
+    return result
+
+
+def generic_sms_build_outbound(config: dict, to: str, text: str) -> dict:
+    """The JSON POST any gateway (or its relay) accepts.
+
+    A missing send_url builds an empty destination; the delivery layer
+    reports the missing credential honestly ("skipped: missing
+    send_url") - the reply is still recorded in the transcript.
+    """
+    headers = {"Content-Type": "application/json"}
+    token = str(config.get("bearer_token") or "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return {
+        "method": "POST",
+        "url": str(config.get("send_url") or ""),
+        "headers": headers,
+        "json": {"to": to, "from": str(config.get("from_number") or ""), "text": text},
+    }
+
+
+# ---------------------------------------------------------------------------
+# email_inbound (v71) - the long-form channel
+# ---------------------------------------------------------------------------
+# Email rides TWO webhook-native shapes, both normalized here:
+#
+# * the generic signed-JSON contract (same HMAC as generic_sms): any mail
+#   gateway / relay can POST ``{from, to, subject, text, ...}`` - SendGrid,
+#   Mailgun and SES relays included with a 3-line translation workflow;
+# * raw-MIME multipart (the SendGrid Inbound Parse / MoonMail shape): the
+#   provider POSTs the FULL RFC 5322 message as form fields (``email`` =
+#   the raw MIME); py8n parses it with the stdlib email parser - headers,
+#   text/plain body, attachments counted then honestly skipped.
+#
+# Threading: conversations key on the SENDER address (the interaction
+# layer's find-or-create), so one inbox thread per sender per endpoint;
+# subject / message-id / in-reply-to ride the message payload as evidence.
+# Outbound is SMTP: ``email_build_outbound`` returns an RFC 5322 message +
+# envelope (``transport: smtp``), and channel_endpoints.deliver_outbound
+# owns the actual smtplib send.
+
+EMAIL_MAX_BODY = 200_000  # guard rail before truncation
+
+
+def email_parse_webhook(payload: dict) -> ParseResult:
+    """The signed-JSON mail shape -> one email message."""
+    result = ParseResult()
+    if not isinstance(payload, dict):
+        result.skipped.append({"reason": "unsupported_payload",
+                               "detail": "email webhooks carry a JSON object or MIME multipart"})
+        return result
+    sender = str(payload.get("from") or payload.get("sender") or "")
+    if isinstance(payload.get("from"), dict):  # {"from": {"address": ..., "name": ...}}
+        addr = payload["from"]
+        sender = str(addr.get("address") or addr.get("email") or "")
+        sender_name = str(addr.get("name") or "")
+    else:
+        sender_name = str(payload.get("from_name") or payload.get("name") or "")
+    text = str(payload.get("text") or payload.get("body") or "")
+    if not sender:
+        result.skipped.append({"reason": "no_sender",
+                               "detail": "email webhook carried no from address"})
+        return result
+    if not text.strip():
+        result.skipped.append({"reason": "non_text_message",
+                               "detail": "email webhook carried no text body "
+                                         "(html-only mail is not transcribed)"})
+        return result
+    attachments = payload.get("attachments") or []
+    extra = {
+        "subject": str(payload.get("subject") or ""),
+        "message_id": str(payload.get("message_id") or payload.get("Message-Id") or ""),
+        "in_reply_to": str(payload.get("in_reply_to") or ""),
+        "to": str(payload.get("to") or ""),
+        "attachment_count": len(attachments) if isinstance(attachments, list) else 0,
+    }
+    if extra["attachment_count"]:
+        result.skipped.append({"reason": "attachments_noted",
+                               "detail": f"{extra['attachment_count']} attachment(s) recorded, "
+                                         "not transcribed"})
+    result.messages.append(NormalizedInbound(
+        channel="email", sender_id=sender, sender_name=sender_name,
+        text=text[:EMAIL_MAX_BODY], event_id=extra["message_id"], extra=extra,
+    ))
+    return result
+
+
+def email_parse_mime(raw_mime: str | bytes) -> dict:
+    """Raw RFC 5322 MIME -> the generic JSON shape (pure, stdlib parser).
+
+    Extracts From/To/Subject, the first text/plain part (html-only mail
+    is honest about not transcribing), Message-ID/In-Reply-To for
+    threading evidence, and counts attachments without saving them.
+    """
+    import email as _email
+    from email import policy as _policy
+
+    if isinstance(raw_mime, str):
+        raw_mime = raw_mime.encode("utf-8", errors="replace")
+    msg = _email.message_from_bytes(raw_mime, policy=_policy.default)
+    from_addr = str(msg.get("From") or "")
+    from_name = ""
+    if from_addr:
+        addresses = msg.get_all("From") or []
+        if addresses:
+            import email.utils as _utils
+            real, addr = _utils.getaddresses([str(addresses[0])])[0]
+            from_name = real or ""
+            from_addr = addr or from_addr
+    text = ""
+    attachment_count = 0
+    if msg.is_multipart():
+        for part in msg.walk():
+            ctype = part.get_content_type()
+            disp = str(part.get_content_disposition() or "")
+            if disp == "attachment":
+                attachment_count += 1
+                continue
+            if ctype == "text/plain" and not text:
+                try:
+                    text = part.get_content()
+                except Exception:  # noqa: BLE001 - malformed part bodies vary
+                    payload_bytes = part.get_payload(decode=True) or b""
+                    text = payload_bytes.decode("utf-8", errors="replace")
+    else:
+        try:
+            content = msg.get_content()
+            text = content if isinstance(content, str) else str(content)
+        except Exception:  # noqa: BLE001
+            payload_bytes = msg.get_payload(decode=True) or b""
+            text = payload_bytes.decode("utf-8", errors="replace")
+    return {
+        "from": from_addr, "from_name": from_name,
+        "to": str(msg.get("To") or ""),
+        "subject": str(msg.get("Subject") or ""),
+        "text": text, "attachment_count": attachment_count,
+        "message_id": str(msg.get("Message-ID") or ""),
+        "in_reply_to": str(msg.get("In-Reply-To") or ""),
+    }
+
+
+def email_build_outbound(config: dict, to: str, text: str, subject: str = "") -> dict:
+    """The SMTP delivery: an RFC 5322 message + envelope (``transport: smtp``).
+
+    Email does not ride HTTP - the request shape carries the fully built
+    message (headers + body via the stdlib EmailMessage) and the SMTP
+    envelope; ``deliver_outbound`` recognizes ``transport == 'smtp'`` and
+    sends with smtplib (credentials only touched at delivery time).
+    A missing from_address builds an empty envelope sender and lets the
+    delivery layer report the missing credential honestly.
+    """
+    from email.message import EmailMessage
+    from email.utils import formataddr, make_msgid
+
+    from_address = str(config.get("from_address") or "")
+    msg = EmailMessage()
+    msg["From"] = formataddr((str(config.get("from_name") or "py8n"), from_address)) \
+        if from_address else ""
+    msg["To"] = to
+    msg["Subject"] = subject or "Message from py8n"
+    msg["X-Py8n-Channel"] = "email"
+    msg.set_content(text)
+    if from_address:
+        msg["Message-ID"] = make_msgid(domain=(from_address.split("@")[-1] or "py8n.local"))
+    return {
+        "transport": "smtp",
+        "host": str(config.get("smtp_host") or ""),
+        "port": int(config.get("smtp_port") or 587),
+        "user": str(config.get("smtp_user") or ""),
+        "message": msg.as_string(),
+        "to": to,
+        "from": from_address,
+        "subject": msg["Subject"],
+    }
+
+
+def email_send_smtp(request: dict) -> dict:
+    """The blocking SMTP send (run in a thread by deliver_outbound).
+
+    STARTTLS on 587, implicit SSL on 465, plain otherwise - the three
+    shapes every submission port speaks. Failures raise; the caller
+    records them honestly.
+    """
+    import smtplib
+
+    host = request.get("host") or ""
+    port = int(request.get("port") or 587)
+    user = str(request.get("user") or "")
+    password = str(request.get("password") or "")
+    if not host:
+        raise ValueError("no smtp_host configured")
+    if port == 465:
+        client = smtplib.SMTP_SSL(host, port, timeout=10)
+    else:
+        client = smtplib.SMTP(host, port, timeout=10)
+        try:
+            client.ehlo()
+            if port != 25 and client.has_extn("starttls"):
+                client.starttls()
+                client.ehlo()
+        except Exception:  # noqa: BLE001 - a broken TLS handshake still lets us try AUTH
+            pass
+    try:
+        if user:
+            client.login(user, password)
+        refusal = client.sendmail(request["from"], [request["to"]], request["message"].encode("utf-8"))
+        if refusal:
+            raise ValueError(f"SMTP refused recipients: {list(refusal)}")
+    finally:
+        try:
+            client.quit()
+        except Exception:  # noqa: BLE001
+            pass
+    return {"delivery": "delivered", "detail": f"smtp accepted the message for {request['to']}"}
+
+
+# ---------------------------------------------------------------------------
 # The adapter registry - provider id -> contract
 # ---------------------------------------------------------------------------
 
@@ -733,6 +1099,19 @@ REQUIRED_CONFIG: dict[str, dict[str, list[str]]] = {
     "telnyx_call_control": {"channel": "voice", "secret": ["public_key"],
                             "credential": ["api_key"],
                             "description": "Telnyx Call Control (SIP + PSTN voice)"},
+    # v71: the messaging + long-form channels complete the matrix
+    "telnyx_sms": {"channel": "sms", "secret": ["public_key"],
+                   "credential": ["api_key", "from_number"],
+                   "description": "SMS through Telnyx Messaging (same RFC 9421 signatures as voice)"},
+    "generic_sms": {"channel": "sms", "secret": ["secret"],
+                    "credential": ["send_url", "bearer_token", "from_number"],
+                    "description": "Any SMS gateway that can POST JSON + HMAC - "
+                                   "Twilio relays, Vonage, Africa's Talking, GSM modem boxes"},
+    "email_inbound": {"channel": "email", "secret": ["secret"],
+                      "credential": ["smtp_host", "smtp_port", "smtp_user", "smtp_pass",
+                                     "from_address"],
+                      "description": "Email: inbound parse webhooks (signed JSON or raw-MIME "
+                                     "multipart) in, SMTP out - the long-form channel"},
 }
 
 
@@ -745,6 +1124,12 @@ def parse_inbound(provider: str, payload: dict) -> ParseResult:
     if provider == "discord_bot":
         _resp, result = discord_parse_interaction(payload)
         return result
+    if provider == "telnyx_sms":
+        return telnyx_sms_parse_webhook(payload)
+    if provider == "generic_sms":
+        return generic_sms_parse_webhook(payload)
+    if provider == "email_inbound":
+        return email_parse_webhook(payload)
     raise ValueError(f"unknown provider {provider!r}")
 
 
@@ -771,6 +1156,17 @@ def verify_request(provider: str, endpoint_config: dict, *, raw_body: bytes,
     if provider == "telnyx_call_control":
         return telnyx_verify_signature(str(endpoint_config.get("public_key") or ""),
                                        headers, raw_body, method=method, target=target)
+    if provider == "telnyx_sms":
+        return telnyx_verify_signature(str(endpoint_config.get("public_key") or ""),
+                                       headers, raw_body, method=method, target=target)
+    if provider == "generic_sms":
+        ok = hmac_verify(str(endpoint_config.get("secret") or ""), raw_body,
+                         headers.get("x-py8n-signature", ""))
+        return (True, None) if ok else (False, "X-Py8n-Signature verification failed")
+    if provider == "email_inbound":
+        ok = hmac_verify(str(endpoint_config.get("secret") or ""), raw_body,
+                         headers.get("x-py8n-signature", ""))
+        return (True, None) if ok else (False, "X-Py8n-Signature verification failed")
     raise ValueError(f"unknown provider {provider!r}")
 
 
@@ -782,6 +1178,12 @@ def build_outbound(provider: str, config: dict, to: str, text: str) -> dict:
         return telegram_build_outbound(config, to, text)
     if provider == "discord_bot":
         return discord_build_outbound(config, to, text)
+    if provider == "telnyx_sms":
+        return telnyx_sms_build_outbound(config, to, text)
+    if provider == "generic_sms":
+        return generic_sms_build_outbound(config, to, text)
+    if provider == "email_inbound":
+        return email_build_outbound(config, to, text)
     raise ValueError(f"unknown provider {provider!r}")
 
 
@@ -793,7 +1195,8 @@ def mask_config(config: dict) -> dict:
         if not s:
             out[key] = ""
         elif key in ("verify_token", "app_secret", "bot_token", "secret_token",
-                     "access_token", "public_key", "api_key"):
+                     "access_token", "public_key", "api_key", "secret",
+                     "smtp_pass", "bearer_token"):
             out[key] = f"{s[:4]}...({len(s)} chars)"
         else:
             out[key] = s
@@ -809,4 +1212,7 @@ PROVIDER_PATHS: dict[str, str] = {
     "telegram_bot_api": "telegram",
     "discord_bot": "discord",
     "telnyx_call_control": "telnyx",
+    "telnyx_sms": "telnyx-sms",
+    "generic_sms": "sms",
+    "email_inbound": "email",
 }

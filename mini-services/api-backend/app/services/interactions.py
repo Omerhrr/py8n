@@ -92,16 +92,18 @@ CHANNEL_CATALOG: dict[str, dict] = {
     "sms": {
         "label": "SMS", "builtin": False,
         "description": "Plain text messaging - the retry lane when calls go unanswered.",
-        "providers": ["twilio", "telnyx", "messagebird"],
-        "adapter": {"inbound": "provider webhook -> universal ingress",
-                    "outbound": "provider API via credential (adapter's job)"},
+        "providers": ["telnyx_sms", "generic_sms", "twilio_relay"],
+        "adapter": {"inbound": "provider webhook -> universal ingress (telnyx_sms RFC 9421-signed; "
+                    "generic_sms = the any-gateway HMAC contract)",
+                    "outbound": "Telnyx Messaging API / gateway send_url via credential"},
     },
     "email": {
         "label": "Email", "builtin": False,
         "description": "Inbound parse webhooks and SMTP send - the long-form channel.",
-        "providers": ["smtp_imap", "sendgrid", "provider_webhook"],
-        "adapter": {"inbound": "parse webhook -> universal ingress",
-                    "outbound": "SMTP / provider API via credential (adapter's job)"},
+        "providers": ["email_inbound", "smtp_imap", "sendgrid_relay"],
+        "adapter": {"inbound": "signed JSON or raw-MIME multipart -> universal ingress "
+                    "(X-Py8n-Signature HMAC; MIME parsed with the stdlib parser)",
+                    "outbound": "SMTP via credential (smtplib, STARTTLS/SSL by port)"},
     },
 }
 

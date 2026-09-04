@@ -37,14 +37,105 @@ from ..config import settings
 from ..db import get_db
 from ..models import VoiceSession
 from ..services import voice as voice_svc
+from ..services import voice_agents as agent_svc
 from ..services import voice_transport as transport
 from ..services.voice import VoiceError
 
 router = APIRouter(prefix="/voice", tags=["voice"])
 
 
-def _http(exc: VoiceError, status: int = 400) -> HTTPException:
+def _http(exc: Exception, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# v71: voice agents - the builder object over the voice primitives
+# ---------------------------------------------------------------------------
+
+
+class AgentCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=140)
+    description: str = Field(default="", max_length=2000)
+    greeting_text: str = Field(default="", max_length=4000, description="spoken the moment the call is answered (interruptible)")
+    asr_provider: str = Field(default="py8n_local", max_length=40, description="openai_whisper | deepgram | assemblyai | py8n_local")
+    tts_provider: str = Field(default="openai_tts", max_length=40, description="openai_tts | elevenlabs | piper_local | meta_mms")
+    tts_voice: str = Field(default="alloy", max_length=80)
+    tts_format: str = Field(default="wav", max_length=10)
+    language: str = Field(default="en-US", max_length=20)
+    barge_in: bool = Field(default=True, description="may the caller interrupt the greeting and turns")
+    system_prompt: str = Field(default="", max_length=8000, description="the persona injected into the handler envelope's metadata")
+    handler_workflow_id: str | None = None
+    scaffold_handler: bool = Field(default=False, description="scaffold a runnable trigger -> code handler when none is bound")
+
+
+@router.post("/agents", status_code=201)
+async def create_agent(body: AgentCreate, user=Depends(get_optional_user),
+                       db: AsyncSession = Depends(get_db)):
+    try:
+        return await agent_svc.create_agent(
+            db, owner_id=getattr(user, "id", None), name=body.name,
+            description=body.description, greeting_text=body.greeting_text,
+            asr_provider=body.asr_provider, tts_provider=body.tts_provider,
+            tts_voice=body.tts_voice, tts_format=body.tts_format,
+            language=body.language, barge_in=body.barge_in,
+            system_prompt=body.system_prompt,
+            handler_workflow_id=body.handler_workflow_id,
+            scaffold_handler=body.scaffold_handler)
+    except agent_svc.VoiceAgentError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/agents")
+async def list_agents(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    return {"agents": await agent_svc.list_agents(db, getattr(user, "id", None))}
+
+
+@router.get("/agents/{agent_id}")
+async def get_agent(agent_id: str, user=Depends(get_optional_user),
+                    db: AsyncSession = Depends(get_db)):
+    try:
+        return await agent_svc.get_agent(db, agent_id, getattr(user, "id", None))
+    except agent_svc.VoiceAgentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class AgentUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=140)
+    description: str | None = Field(default=None, max_length=2000)
+    greeting_text: str | None = Field(default=None, max_length=4000)
+    asr_provider: str | None = Field(default=None, max_length=40)
+    tts_provider: str | None = Field(default=None, max_length=40)
+    tts_voice: str | None = Field(default=None, max_length=80)
+    tts_format: str | None = Field(default=None, max_length=10)
+    language: str | None = Field(default=None, max_length=20)
+    barge_in: bool | None = None
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    handler_workflow_id: str | None = None
+
+
+@router.put("/agents/{agent_id}")
+async def update_agent(agent_id: str, body: AgentUpdate,
+                       user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    try:
+        return await agent_svc.update_agent(
+            db, agent_id, getattr(user, "id", None),
+            name=body.name, description=body.description,
+            greeting_text=body.greeting_text, asr_provider=body.asr_provider,
+            tts_provider=body.tts_provider, tts_voice=body.tts_voice,
+            tts_format=body.tts_format, language=body.language,
+            barge_in=body.barge_in, system_prompt=body.system_prompt,
+            handler_workflow_id=body.handler_workflow_id)
+    except agent_svc.VoiceAgentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/agents/{agent_id}")
+async def delete_agent(agent_id: str, user=Depends(get_optional_user),
+                       db: AsyncSession = Depends(get_db)):
+    try:
+        return await agent_svc.delete_agent(db, agent_id, getattr(user, "id", None))
+    except agent_svc.VoiceAgentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 async def _own_session(db: AsyncSession, session_id: str, user) -> VoiceSession:
@@ -64,6 +155,7 @@ class SessionCreate(BaseModel):
     to_ref: str = Field(default="", max_length=180)
     handler_workflow_id: str | None = None
     conversation_ref: str | None = Field(default=None, description="Attach the call to an existing conversation (channel hop continuity)")
+    agent_id: str | None = Field(default=None, description="VoiceAgent whose greeting/speech config this call inherits (v71)")
 
 
 @router.post("/sessions", status_code=201)
@@ -74,7 +166,7 @@ async def create_session(body: SessionCreate, user=Depends(get_optional_user),
             db, owner_id=getattr(user, "id", None), direction=body.direction,
             provider=body.provider, call_ref=body.call_ref, from_ref=body.from_ref,
             to_ref=body.to_ref, handler_workflow_id=body.handler_workflow_id,
-            conversation_ref=body.conversation_ref)
+            conversation_ref=body.conversation_ref, agent_id=body.agent_id)
     except VoiceError as exc:
         raise _http(exc) from exc
 
@@ -105,7 +197,17 @@ async def apply_event(session_id: str, body: EventBody,
                       user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _own_session(db, session_id, user)
     try:
-        return await voice_svc.apply_event(db, row, body.kind, body.payload)
+        out = await voice_svc.apply_event(db, row, body.kind, body.payload)
+        # v71: the agent's greeting rides call.answered - an interruptible
+        # tts.started built from the agent's own TTS configuration
+        greeting_tts = None
+        if body.kind == "call.answered":
+            from ..services.voice_agents import on_answered
+            greeting_tts = await on_answered(db, row)
+            if greeting_tts is not None:
+                await db.commit()
+        out["greeting_tts"] = greeting_tts
+        return out
     except VoiceError as exc:
         raise _http(exc) from exc
 
@@ -114,9 +216,9 @@ class TurnBody(BaseModel):
     transcript: str = Field(..., min_length=1, max_length=8000)
     confidence: float = Field(default=1.0, ge=0, le=1)
     language: str = Field(default="", max_length=20)
-    tts_provider: str = Field(default="openai_tts", max_length=40)
-    voice: str = Field(default="alloy", max_length=80)
-    tts_format: str = Field(default="wav", max_length=10)
+    tts_provider: str | None = Field(default=None, max_length=40, description="default: the session's VoiceAgent config, else openai_tts")
+    voice: str | None = Field(default=None, max_length=80, description="default: the session's VoiceAgent config, else alloy")
+    tts_format: str | None = Field(default=None, max_length=10, description="default: the session's VoiceAgent config, else wav")
 
 
 @router.post("/sessions/{session_id}/turn")
@@ -246,16 +348,29 @@ async def media_stream(websocket: WebSocket, session_id: str):
         return
 
     await websocket.accept()
+    # v71: the session may carry a VoiceAgent - the connected frame reports
+    # the binding and the engine the stream will consult (honest: whether
+    # it is actually registered in THIS process)
+    agent_cfg = ((session.context or {}).get("voice_agent") or {}) if session else {}
+    engine_name = str(agent_cfg.get("asr_provider") or "py8n_local")
     await websocket.send_text(json.dumps({
         "event": "connected", "protocol": "py8n-media", "version": settings.version,
         "session_id": session_id, "state": session.state,
         "asr_engines": transport.registered_asr_engines(),
+        "asr_engine": engine_name,
+        "asr_engine_registered": engine_name in transport.registered_asr_engines(),
+        "agent": ({"id": agent_cfg.get("voice_agent_id"), "name": agent_cfg.get("voice_agent_name"),
+                   "barge_in": bool(agent_cfg.get("barge_in", True))}
+                  if agent_cfg else None),
     }))
 
     stats = transport.MediaStreamStats()
     segmenter = transport.UtteranceSegmenter()
     stream_open = False
     chunks_since_flush = 0
+    # the start frame's customParameters (encoding, sample_rate, asr_engine...)
+    # govern the WHOLE stream - providers send them once at fork start
+    stream_custom_params: dict = {}
 
     async def _load_session() -> VoiceSession | None:
         async with AsyncSessionLocal() as db:
@@ -317,9 +432,11 @@ async def media_stream(websocket: WebSocket, session_id: str):
             if frame.event == "start":
                 stream_open = True
                 stats.stream_sid = frame.stream_sid
+                stream_custom_params = dict(frame.custom_parameters or {})
                 await _record("media.stream_started",
                               {"stream_sid": frame.stream_sid, "call_ref": frame.call_ref,
-                               "encoding": frame.encoding, "sample_rate": frame.sample_rate})
+                               "encoding": frame.encoding, "sample_rate": frame.sample_rate,
+                               "asr_engine": stream_custom_params.get("asr_engine") or None})
                 await _save_media_context(opened=True)
                 await _send({"event": "stream_started", "stream_sid": frame.stream_sid,
                              "state": session.state})
@@ -358,12 +475,17 @@ async def media_stream(websocket: WebSocket, session_id: str):
                                                        "end_ms": seg.end_ms,
                                                        "duration_ms": seg.duration_ms})
                         await _send({"event": "speech.ended", "segment": seg.out()})
-                        engine = transport.get_asr_engine(
-                            (frame.custom_parameters or {}).get("asr_engine") or "py8n_local")
+                        # v71: engine resolution - the start frame's
+                        # customParameters win, else the session's VoiceAgent,
+                        # else py8n_local
+                        live_row = await _load_session()
+                        engine_name = agent_svc.resolve_asr_engine_name(
+                            live_row, stream_custom_params)
+                        engine = transport.get_asr_engine(engine_name)
                         if engine is None:
                             await _send({"event": "asr.unavailable",
-                                         "detail": "no ASR engine is registered for this "
-                                                   "process - bind one with "
+                                         "detail": f"no ASR engine is registered for "
+                                                   f"{engine_name!r} in this process - bind one with "
                                                    "voice_transport.register_asr_engine; "
                                                    "the utterance's audio was measured, "
                                                    "not transcribed",

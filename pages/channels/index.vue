@@ -1,12 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear } from 'lucide-vue-next'
+import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear, Bot, Wand2 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 // v69: the REAL adapter surface. A channel endpoint registers a provider
 // connection (Meta Cloud API, Telegram Bot API, Discord) and turns its
 // NATIVE webhook into interaction-layer ingests + outbound sends. Voice
 // sessions are first-class calls: state machine, barge-in, ASR/TTS turns.
+// v71: the matrix completes (Telnyx SMS, the any-gateway SMS contract,
+// email inbound parse + SMTP) and VOICE AGENTS compose the primitives
+// (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into
+// one deployable phone persona.
 
 interface Endpoint {
   id: string; name: string; provider: string; channel: string; enabled: boolean
@@ -26,6 +30,13 @@ interface VoiceSession {
   conversation_id: string | null; duration_seconds: number | null
   barge_in_count: number; turn_count: number; active_tts: boolean
   started_at: string | null; events: VoiceEvent[] | null
+  agent: Record<string, any> | null
+}
+interface VoiceAgent {
+  id: string; name: string; description: string; greeting_text: string
+  speech: Record<string, any>; system_prompt: string
+  handler_workflow_id: string | null; handler_workflow_name: string | null
+  handler_is_scaffold: boolean; wiring: Record<string, any>
 }
 
 const { api } = useApi()
@@ -38,12 +49,24 @@ const selected = ref<VoiceSession | null>(null)
 const copied = ref('')
 
 const workflows = ref<any[]>([])
+const agents = ref<VoiceAgent[]>([])
 const showCreate = ref(false)
 const busy = ref(false)
 const form = ref({ name: '', provider: 'telegram_bot_api', handler_workflow_id: '', secret: '', credential: '' })
 const preview = ref<any>(null)
 const previewTo = ref('')
 const previewText = ref('Hello from py8n!')
+
+// v71 voice agent builder state
+const showAgentCreate = ref(false)
+const agentBusy = ref(false)
+const agentForm = ref({
+  name: '', greeting_text: '', asr_provider: 'py8n_local', tts_provider: 'openai_tts',
+  tts_voice: 'alloy', language: 'en-US', barge_in: true, system_prompt: '',
+  handler_workflow_id: '', scaffold_handler: true,
+})
+const ASR_PROVIDERS = ['py8n_local', 'openai_whisper', 'deepgram', 'assemblyai']
+const TTS_PROVIDERS = ['openai_tts', 'elevenlabs', 'piper_local', 'meta_mms']
 
 const stateChip: Record<string, string> = {
   initiated: 'bg-zinc-500/10 text-zinc-300 border-zinc-500/25',
@@ -63,14 +86,15 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    const [eps, ads, vss, wfs] = await Promise.all([
+    const [eps, ads, vss, wfs, ags] = await Promise.all([
       api('/channels/endpoints'), api('/channels/adapters'),
-      api('/voice/sessions'), api('/workflows?limit=200'),
+      api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
     sessions.value = vss.sessions || []
     workflows.value = wfs.workflows || wfs || []
+    agents.value = ags.agents || []
   } catch (e: any) {
     pageError.value = e?.message || 'failed to load channels'
   } finally {
@@ -79,7 +103,11 @@ async function load() {
 }
 
 function providerLabel(id: string) {
-  return ({ meta_cloud_api: 'Meta Cloud API', telegram_bot_api: 'Telegram Bot API', discord_bot: 'Discord', telnyx_call_control: 'Telnyx (SIP + PSTN)' } as Record<string, string>)[id] || id
+  return ({
+    meta_cloud_api: 'Meta Cloud API', telegram_bot_api: 'Telegram Bot API', discord_bot: 'Discord',
+    telnyx_call_control: 'Telnyx (SIP + PSTN)', telnyx_sms: 'Telnyx SMS',
+    generic_sms: 'Any-Gateway SMS', email_inbound: 'Email (parse + SMTP)',
+  } as Record<string, string>)[id] || id
 }
 
 function fullWebhookUrl(path: string) {
@@ -150,6 +178,37 @@ async function bargeIn(s: VoiceSession) {
   } catch (e: any) { pageError.value = e?.data?.detail || e?.message || 'barge-in refused' }
 }
 
+async function createAgent() {
+  if (!agentForm.value.name) return
+  agentBusy.value = true
+  try {
+    await api('/voice/agents', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: agentForm.value.name, greeting_text: agentForm.value.greeting_text,
+        asr_provider: agentForm.value.asr_provider, tts_provider: agentForm.value.tts_provider,
+        tts_voice: agentForm.value.tts_voice, language: agentForm.value.language,
+        barge_in: agentForm.value.barge_in, system_prompt: agentForm.value.system_prompt,
+        handler_workflow_id: agentForm.value.handler_workflow_id || null,
+        scaffold_handler: !agentForm.value.handler_workflow_id && agentForm.value.scaffold_handler,
+      }),
+    })
+    showAgentCreate.value = false
+    agentForm.value = { name: '', greeting_text: '', asr_provider: agentForm.value.asr_provider,
+      tts_provider: agentForm.value.tts_provider, tts_voice: 'alloy', language: 'en-US',
+      barge_in: true, system_prompt: '', handler_workflow_id: '', scaffold_handler: true }
+    await load()
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'agent create failed'
+  } finally { agentBusy.value = false }
+}
+
+async function removeAgent(a: VoiceAgent) {
+  if (!confirm(`Delete voice agent "${a.name}"? Sessions keep the config they copied.`)) return
+  await api(`/voice/agents/${a.id}`, { method: 'DELETE' })
+  await load()
+}
+
 const liveSessions = computed(() => sessions.value.filter(s => s.state !== 'ended'))
 const endedSessions = computed(() => sessions.value.filter(s => s.state === 'ended'))
 
@@ -165,16 +224,22 @@ onMounted(load)
         </h1>
         <p class="text-sm text-zinc-400 mt-1 max-w-3xl">
           Real provider adapters - Meta Cloud API (WhatsApp, interactive buttons included), Telegram,
-          Discord, Telnyx Call Control for SIP + PSTN voice - each webhook-native and verified
-          with its own credentials, feeding the SAME conversation layer. Voice sessions are first-class
-          calls with a state machine, barge-in, the ASR/TTS contract and the v70 media transport:
-          a websocket media stream (base64 mulaw/linear16) that py8n decodes, VAD-segments into
-          utterances and transcribes through pluggable ASR engines.
+          Discord, Telnyx Call Control for SIP + PSTN voice, Telnyx SMS, the any-gateway SMS contract
+          and Email (inbound parse + SMTP) - each webhook-native and verified with its own
+          credentials, feeding the SAME conversation layer. Voice Agents compose the voice stack
+          (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into one deployable phone
+          persona; sessions inherit the agent's config and the v70 media transport transcribes
+          through the agent's engine.
         </p>
       </div>
-      <button class="btn btn-primary shrink-0 flex items-center gap-2" @click="showCreate = true">
-        <Plus class="w-4 h-4" /> New endpoint
-      </button>
+      <div class="flex gap-2 shrink-0">
+        <button class="btn btn-ghost flex items-center gap-2" @click="showAgentCreate = true">
+          <Bot class="w-4 h-4" /> New voice agent
+        </button>
+        <button class="btn btn-primary flex items-center gap-2" @click="showCreate = true">
+          <Plus class="w-4 h-4" /> New endpoint
+        </button>
+      </div>
     </header>
 
     <div v-if="pageError" class="rounded-lg border border-rose-500/30 bg-rose-500/10 text-rose-300 px-4 py-3 text-sm">{{ pageError }}</div>
@@ -233,6 +298,43 @@ onMounted(load)
 
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
+          <Bot class="w-4 h-4 text-fuchsia-400" /> Voice agents ({{ agents.length }})
+          <span class="text-xs text-zinc-500 normal-case font-normal">greeting · ASR engine · TTS voice · barge-in · scaffolded handler</span>
+        </h2>
+        <p v-if="!agents.length" class="text-sm text-zinc-500">No agents yet - create one to compose the voice primitives into a deployable phone persona.</p>
+        <div v-for="a in agents" :key="a.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-medium text-zinc-100">{{ a.name }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-300">asr: {{ a.speech.asr_provider }}<span v-if="!a.speech.asr_engine_registered" class="text-amber-400"> (unregistered)</span></span>
+              <span class="text-xs px-2 py-0.5 rounded-full border border-sky-500/25 bg-sky-500/10 text-sky-300">tts: {{ a.speech.tts_provider }}/{{ a.speech.tts_voice }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-300">{{ a.speech.language }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border"
+                    :class="a.speech.barge_in ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-zinc-600/40 bg-zinc-700/20 text-zinc-400'">
+                {{ a.speech.barge_in ? 'barge-in ok' : 'no barge-in' }}
+              </span>
+              <span v-if="a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">scaffolded handler</span>
+            </div>
+            <button class="btn btn-ghost text-rose-300 text-xs" @click="removeAgent(a)"><Ban class="w-3.5 h-3.5" /></button>
+          </div>
+          <div class="text-xs text-zinc-500">
+            greeting: <span class="text-zinc-300">{{ a.greeting_text || 'none - the call starts silent' }}</span>
+            · handler: <span class="text-zinc-300">{{ a.handler_workflow_name || 'none' }}</span>
+            <span v-if="a.system_prompt"> · persona: <span class="text-zinc-400">{{ a.system_prompt.slice(0, 60) }}{{ a.system_prompt.length > 60 ? '…' : '' }}</span></span>
+          </div>
+          <details class="text-xs">
+            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">Wiring (provider webhook + media stream)</summary>
+            <div class="mt-2 space-y-1">
+              <p class="text-zinc-400">{{ a.wiring.inbound_webhook }}</p>
+              <p class="text-zinc-400">{{ a.wiring.media_stream }}</p>
+              <p class="text-amber-300/80">{{ a.wiring.asr_note }}</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <section class="space-y-3">
+        <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Phone class="w-4 h-4 text-sky-400" /> Voice sessions
           <span class="text-xs text-zinc-500 normal-case font-normal">call state machine · barge-in · ASR/TTS turns</span>
         </h2>
@@ -244,6 +346,7 @@ onMounted(load)
                 <span class="text-xs px-2 py-0.5 rounded-full border" :class="stateChip[s.state]">{{ s.state }}</span>
                 <span class="text-zinc-300">{{ s.direction }}</span>
                 <span class="text-zinc-500">{{ s.from }} → {{ s.to }}</span>
+                <span v-if="s.agent" class="text-xs px-2 py-0.5 rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-300">agent: {{ s.agent.voice_agent_name }}</span>
                 <span v-if="s.active_tts" class="text-xs text-emerald-300 flex items-center gap-1"><Mic class="w-3 h-3" /> speaking</span>
                 <span v-if="s.barge_in_count" class="text-xs text-amber-300 flex items-center gap-1"><Ear class="w-3 h-3" /> {{ s.barge_in_count }} barge-in</span>
               </div>
@@ -313,6 +416,48 @@ onMounted(load)
         <div class="flex justify-end gap-2">
           <button class="btn btn-ghost" @click="showCreate = false">Cancel</button>
           <button class="btn btn-primary" :disabled="busy || !form.name || !primarySecret" @click="createEndpoint">Create</button>
+        </div>
+      </div>
+    </div>
+    <div v-if="showAgentCreate" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showAgentCreate = false">
+      <div class="rounded-xl border border-zinc-700 bg-zinc-900 p-6 w-full max-w-lg space-y-4 max-h-[90vh] overflow-y-auto">
+        <h3 class="text-lg font-medium text-zinc-100 flex items-center gap-2"><Wand2 class="w-4 h-4 text-fuchsia-400" /> New voice agent</h3>
+        <label class="block text-sm text-zinc-400">Name
+          <input v-model="agentForm.name" class="input mt-1 w-full" placeholder="Front Desk" /></label>
+        <label class="block text-sm text-zinc-400">Greeting (spoken when the call is answered)
+          <input v-model="agentForm.greeting_text" class="input mt-1 w-full" placeholder="Hello, you have reached the front desk." /></label>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block text-sm text-zinc-400">ASR engine
+            <select v-model="agentForm.asr_provider" class="input mt-1 w-full">
+              <option v-for="p in ASR_PROVIDERS" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+          <label class="block text-sm text-zinc-400">TTS provider
+            <select v-model="agentForm.tts_provider" class="input mt-1 w-full">
+              <option v-for="p in TTS_PROVIDERS" :key="p" :value="p">{{ p }}</option>
+            </select>
+          </label>
+          <label class="block text-sm text-zinc-400">TTS voice
+            <input v-model="agentForm.tts_voice" class="input mt-1 w-full" /></label>
+          <label class="block text-sm text-zinc-400">Language
+            <input v-model="agentForm.language" class="input mt-1 w-full" placeholder="en-US" /></label>
+        </div>
+        <label class="block text-sm text-zinc-400">System prompt (rides the handler envelope's metadata)
+          <textarea v-model="agentForm.system_prompt" class="input mt-1 w-full" rows="2"
+                    placeholder="You are the polite front desk agent." /></label>
+        <label class="block text-sm text-zinc-400">Handler workflow
+          <select v-model="agentForm.handler_workflow_id" class="input mt-1 w-full">
+            <option value="">- scaffold one for me -</option>
+            <option v-for="w in workflows" :key="w.id" :value="w.id">{{ w.name }}</option>
+          </select>
+        </label>
+        <label class="flex items-center gap-2 text-sm text-zinc-400">
+          <input v-model="agentForm.barge_in" type="checkbox" class="accent-fuchsia-500" />
+          the caller may barge-in over the greeting and turns
+        </label>
+        <div class="flex justify-end gap-2">
+          <button class="btn btn-ghost" @click="showAgentCreate = false">Cancel</button>
+          <button class="btn btn-primary" :disabled="agentBusy || !agentForm.name" @click="createAgent">Create agent</button>
         </div>
       </div>
     </div>
