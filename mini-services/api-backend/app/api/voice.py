@@ -14,20 +14,30 @@
 * ``POST /voice/sessions/{id}/tts/complete`` - the utterance played out
 * ``POST /voice/webhooks/twilio/{id}``     - Twilio call-status callback
   translated into session events (the first real voice provider adapter)
+* ``WS   /voice/sessions/{id}/media``      - v70 media transport: the
+  provider streams the call's audio (base64 mulaw chunks) over a
+  websocket; py8n decodes it, runs voice-activity detection, closes
+  utterances, transcribes through a registered ASR engine, triggers the
+  SAME turns/barge-in primitives (or honestly reports asr.unavailable)
 * ``GET  /voice/contracts``                - the ASR/TTS contract shapes +
-  the provider mapping tables (derived, nothing stored)
+  the provider mapping tables + the media transport spec (derived,
+  nothing stored)
 """
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+import json
+
+from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..auth import get_optional_user
+from ..auth import decode_token, get_optional_user
+from ..config import settings
 from ..db import get_db
 from ..models import VoiceSession
 from ..services import voice as voice_svc
+from ..services import voice_transport as transport
 from ..services.voice import VoiceError
 
 router = APIRouter(prefix="/voice", tags=["voice"])
@@ -175,4 +185,254 @@ async def contracts():
         "call_states": list(voice_svc.STATES),
         "transitions": {k: sorted(v) for k, v in voice_svc._TRANSITIONS.items()},
         "event_kinds": list(voice_svc.EVENT_KINDS),
+        "media": {"events": list(transport.MEDIA_EVENTS),
+                  "encodings": list(transport.AUDIO_ENCODINGS),
+                  "sample_rate": transport.MEDIA_SAMPLE_RATE,
+                  "asr_engines_registered": transport.registered_asr_engines()},
     }
+
+
+# ---------------------------------------------------------------------------
+# v70: the media transport - providers push call audio over a websocket
+# ---------------------------------------------------------------------------
+
+# Websockets cannot send Authorization headers on the handshake (and media
+# streams are PROVIDER-facing, not browser-facing), so this router is
+# included WITHOUT the enforced gate and authenticates like ws.py: the
+# JWT rides ?token= when the platform runs enforced; provider streams pass
+# their own credentials via the stream's customParameters instead.
+media_router = APIRouter(prefix="/voice", tags=["voice-media"])
+
+
+@media_router.websocket("/sessions/{session_id}/media")
+async def media_stream(websocket: WebSocket, session_id: str):
+    """The call's audio, streamed in.
+
+    Protocol (JSON frames, the de-facto provider dialect):
+
+    client -> server: ``{event: "start", start: {streamSid, callSid,
+    customParameters}}``, ``{event: "media", media: {payload: <base64
+    mulaw/linear16>, track, chunk}}``, ``{event: "mark", ...}``,
+    ``{event: "stop", ...}``.
+
+    server -> client: ``connected`` on open; ``speech.started`` /
+    ``speech.ended`` as the VAD closes utterances; ``asr.final`` with the
+    transcript (when an ASR engine is registered) or ``asr.unavailable``
+    (honest - the transport never invents words); ``turn`` with the TTS
+    contract result of the handler run; ``barge_in`` when speech starts
+    over an active utterance; ``stream_stopped`` with the final counters.
+
+    The voice session owns all the semantics: media events run through the
+    SAME state machine, turns run the SAME handler workflow, barge-in is
+    the SAME primitive the HTTP endpoint exposes.
+    """
+    token = websocket.query_params.get("token") or ""
+    user_id = decode_token(token) if token else None
+    if settings.require_auth and user_id is None:
+        await websocket.close(code=4401)  # unauthenticated
+        return
+
+    from ..db import AsyncSessionLocal
+    from ..services.voice import VoiceError
+
+    async with AsyncSessionLocal() as db:
+        session = await db.get(VoiceSession, session_id)
+        if session is None:
+            await websocket.close(code=4404)
+            return
+        owner_id = session.owner_id
+    if user_id is not None and owner_id is not None and owner_id != user_id:
+        await websocket.close(code=4404)  # looks nonexistent
+        return
+
+    await websocket.accept()
+    await websocket.send_text(json.dumps({
+        "event": "connected", "protocol": "py8n-media", "version": settings.version,
+        "session_id": session_id, "state": session.state,
+        "asr_engines": transport.registered_asr_engines(),
+    }))
+
+    stats = transport.MediaStreamStats()
+    segmenter = transport.UtteranceSegmenter()
+    stream_open = False
+    chunks_since_flush = 0
+
+    async def _load_session() -> VoiceSession | None:
+        async with AsyncSessionLocal() as db:
+            return await db.get(VoiceSession, session_id)
+
+    async def _record(kind: str, payload: dict, *, apply: bool = False) -> VoiceSession | None:
+        """One event on the session, on its own short-lived write."""
+        async with AsyncSessionLocal() as db:
+            row = await db.get(VoiceSession, session_id)
+            if row is None:
+                return None
+            try:
+                if apply:
+                    await voice_svc.apply_event(db, row, kind, payload)
+                else:
+                    await voice_svc._add_event(db, row, kind, payload)
+                    await db.commit()
+            except VoiceError:
+                await db.rollback()
+                return None
+            return row
+
+    async def _save_media_context(**extra) -> None:
+        async with AsyncSessionLocal() as db:
+            row = await db.get(VoiceSession, session_id)
+            if row is None:
+                return
+            ctx = dict(row.context or {})
+            media_ctx = dict(ctx.get("media") or {})
+            media_ctx.update(stats.snapshot())
+            media_ctx.update(extra)
+            ctx["media"] = media_ctx
+            row.context = ctx
+            db.add(row)
+            await db.commit()
+
+    async def _send(frame: dict) -> bool:
+        try:
+            await websocket.send_text(json.dumps(frame, default=str))
+            return True
+        except Exception:  # noqa: BLE001 - client vanished mid-stream
+            return False
+
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                frame_in = json.loads(raw)
+            except (ValueError, TypeError):
+                frame_in = None
+            frame, skip = transport.parse_media_frame(frame_in) if frame_in is not None \
+                else (None, {"reason": "bad_json", "detail": "frame was not JSON"})
+            if frame is None:
+                stats.skipped_frames += 1
+                if not await _send({"event": "skipped", **(skip or {})}):
+                    break
+                continue
+
+            if frame.event == "start":
+                stream_open = True
+                stats.stream_sid = frame.stream_sid
+                await _record("media.stream_started",
+                              {"stream_sid": frame.stream_sid, "call_ref": frame.call_ref,
+                               "encoding": frame.encoding, "sample_rate": frame.sample_rate})
+                await _save_media_context(opened=True)
+                await _send({"event": "stream_started", "stream_sid": frame.stream_sid,
+                             "state": session.state})
+                continue
+
+            if frame.event == "media":
+                pcm, duration_ms, dskip = transport.decode_audio_chunk(frame)
+                if dskip is not None:
+                    stats.skipped_frames += 1
+                    await _send({"event": "skipped", **dskip})
+                    continue
+                stats.chunks += 1
+                stats.audio_bytes += len(frame.payload_b64) * 3 // 4  # base64 ratio
+                stats.audio_ms += duration_ms
+                chunks_since_flush += 1
+
+                for seg in segmenter.feed(pcm, duration_ms):
+                    if seg.kind == "speech.started":
+                        row = await _load_session()
+                        if row and (row.context or {}).get("active_tts") and row.state != "ended":
+                            # THE barge-in trigger: the caller spoke over the agent
+                            async with AsyncSessionLocal() as db:
+                                live = await db.get(VoiceSession, session_id)
+                                try:
+                                    result = await voice_svc.barge_in(db, live)
+                                    await db.commit()
+                                except VoiceError:
+                                    await db.rollback()
+                                    result = None
+                            if result:
+                                await _send({"event": "barge_in", **result})
+                        await _record("speech.started", {"start_ms": seg.start_ms})
+                        await _send({"event": "speech.started", "segment": seg.out()})
+                    else:  # speech.ended - the utterance is complete
+                        await _record("speech.ended", {"start_ms": seg.start_ms,
+                                                       "end_ms": seg.end_ms,
+                                                       "duration_ms": seg.duration_ms})
+                        await _send({"event": "speech.ended", "segment": seg.out()})
+                        engine = transport.get_asr_engine(
+                            (frame.custom_parameters or {}).get("asr_engine") or "py8n_local")
+                        if engine is None:
+                            await _send({"event": "asr.unavailable",
+                                         "detail": "no ASR engine is registered for this "
+                                                   "process - bind one with "
+                                                   "voice_transport.register_asr_engine; "
+                                                   "the utterance's audio was measured, "
+                                                   "not transcribed",
+                                         "segment": seg.out()})
+                        else:
+                            try:
+                                asr_raw = engine(seg.pcm, frame.sample_rate)
+                                asr = voice_svc.validate_asr_result(asr_raw)
+                            except voice_svc.VoiceError as exc:
+                                await _send({"event": "asr.error", "detail": str(exc),
+                                             "segment": seg.out()})
+                                continue
+                            await _send({"event": "asr.final", "asr": asr,
+                                         "segment": seg.out()})
+                            # the turn ONLY runs when the transport knows how to
+                            # drive it: session in_progress + handler bound
+                            async with AsyncSessionLocal() as db:
+                                live = await db.get(VoiceSession, session_id)
+                                if live is None or live.state != "in_progress":
+                                    await _send({"event": "turn.skipped",
+                                                 "detail": f"voice turns need an "
+                                                           f"in_progress call, got "
+                                                           f"{live.state if live else 'gone'}"})
+                                    continue
+                                try:
+                                    turn = await voice_svc.voice_turn(
+                                        db, live, transcript=asr["transcript"],
+                                        confidence=asr["confidence"],
+                                        language=asr["language"])
+                                    await db.commit()
+                                except VoiceError as exc:
+                                    await db.rollback()
+                                    turn = {"error": str(exc)}
+                            # spread the turn MINUS its internal "event" dict -
+                            # the protocol frame's event key must stay "turn"
+                            turn_frame = {k: v for k, v in turn.items() if k != "event"}
+                            await _send({"event": "turn", **turn_frame})
+
+                if chunks_since_flush >= 25:
+                    chunks_since_flush = 0
+                    await _save_media_context()
+                continue
+
+            if frame.event == "mark":
+                await _send({"event": "mark", "name": frame.mark_name})
+                continue
+
+            if frame.event == "stop":
+                for seg in segmenter.flush():
+                    if seg.kind == "speech.ended":
+                        await _record("speech.ended", {"start_ms": seg.start_ms,
+                                                       "end_ms": seg.end_ms,
+                                                       "flushed": True,
+                                                       "duration_ms": seg.duration_ms})
+                await _record("media.stream_stopped", {**stats.snapshot()})
+                await _save_media_context(opened=False, stopped=True)
+                await _send({"event": "stream_stopped", "stats": stats.snapshot()})
+                break
+
+            # "connected" frames from the provider side: acknowledged, nothing stored
+    except (WebSocketDisconnect, RuntimeError):
+        pass
+    finally:
+        if stream_open:
+            try:
+                await _record("media.stream_stopped", {**stats.snapshot(), "aborted": True})
+            except Exception:  # noqa: BLE001 - socket teardown best-effort
+                pass
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass

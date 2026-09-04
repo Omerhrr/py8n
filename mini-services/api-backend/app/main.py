@@ -90,6 +90,7 @@ from .api.model_systems import router as model_systems_router  # noqa: E402 (v63
 from .api.deployments import router as deployments_router  # noqa: E402 (v67)
 from .api.channels import router as channels_router  # noqa: E402 (v69)
 from .api.voice import router as voice_router  # noqa: E402 (v69)
+from .api.voice import media_router as voice_media_router  # noqa: E402 (v70 media transport)
 from .api.interactions import router as interactions_router  # noqa: E402 (v68)
 from .api.platform import router as platform_router  # noqa: E402 (v67)
 from .api.ops import router as ops_router  # noqa: E402 (v57)
@@ -154,6 +155,7 @@ app.include_router(deployments_router, prefix=API, dependencies=ENFORCED)  # v67
 app.include_router(interactions_router, prefix=API, dependencies=ENFORCED)  # v68 interaction layer
 app.include_router(channels_router, prefix=API)  # v69: endpoint mgmt ENFORCED + public provider receivers
 app.include_router(voice_router, prefix=API, dependencies=ENFORCED)  # v69 voice primitives
+app.include_router(voice_media_router, prefix=API)  # v70: provider media streams - token-auth inside the handler (ws.py pattern)
 app.include_router(platform_router, prefix=API, dependencies=ENFORCED)  # v67
 app.include_router(ops_router, prefix=API, dependencies=ENFORCED)  # v57
 app.include_router(ws_router)  # /ws/...

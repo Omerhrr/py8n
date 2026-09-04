@@ -79,7 +79,7 @@ async function load() {
 }
 
 function providerLabel(id: string) {
-  return ({ meta_cloud_api: 'Meta Cloud API', telegram_bot_api: 'Telegram Bot API', discord_bot: 'Discord' } as Record<string, string>)[id] || id
+  return ({ meta_cloud_api: 'Meta Cloud API', telegram_bot_api: 'Telegram Bot API', discord_bot: 'Discord', telnyx_call_control: 'Telnyx (SIP + PSTN)' } as Record<string, string>)[id] || id
 }
 
 function fullWebhookUrl(path: string) {
@@ -164,9 +164,12 @@ onMounted(load)
           <Webhook class="w-6 h-6 text-violet-400" /> Channels
         </h1>
         <p class="text-sm text-zinc-400 mt-1 max-w-3xl">
-          Real provider adapters — Meta Cloud API, Telegram, Discord — each webhook-native and verified
+          Real provider adapters - Meta Cloud API (WhatsApp, interactive buttons included), Telegram,
+          Discord, Telnyx Call Control for SIP + PSTN voice - each webhook-native and verified
           with its own credentials, feeding the SAME conversation layer. Voice sessions are first-class
-          calls with a state machine, barge-in and the ASR/TTS contract.
+          calls with a state machine, barge-in, the ASR/TTS contract and the v70 media transport:
+          a websocket media stream (base64 mulaw/linear16) that py8n decodes, VAD-segments into
+          utterances and transcribes through pluggable ASR engines.
         </p>
       </div>
       <button class="btn btn-primary shrink-0 flex items-center gap-2" @click="showCreate = true">
@@ -188,7 +191,7 @@ onMounted(load)
 
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide">Provider endpoints ({{ endpoints.length }})</h2>
-        <p v-if="!endpoints.length" class="text-sm text-zinc-500">No endpoints yet — register a provider connection to receive its native webhooks.</p>
+        <p v-if="!endpoints.length" class="text-sm text-zinc-500">No endpoints yet - register a provider connection to receive its native webhooks.</p>
         <div v-for="ep in endpoints" :key="ep.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2">
@@ -233,7 +236,7 @@ onMounted(load)
           <Phone class="w-4 h-4 text-sky-400" /> Voice sessions
           <span class="text-xs text-zinc-500 normal-case font-normal">call state machine · barge-in · ASR/TTS turns</span>
         </h2>
-        <p v-if="!sessions.length" class="text-sm text-zinc-500">No calls yet — open one via <code class="font-mono">POST /api/v1/voice/sessions</code> (the Twilio status callback adapter rides <code class="font-mono">/voice/webhooks/twilio/&#123;id&#125;</code>).</p>
+        <p v-if="!sessions.length" class="text-sm text-zinc-500">No calls yet - open one via <code class="font-mono">POST /api/v1/voice/sessions</code> (the Twilio status callback adapter rides <code class="font-mono">/voice/webhooks/twilio/&#123;id&#125;</code>).</p>
         <div v-if="liveSessions.length" class="space-y-2">
           <div v-for="s in liveSessions" :key="s.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
             <div class="flex items-center justify-between gap-3 flex-wrap">
@@ -295,7 +298,7 @@ onMounted(load)
         </label>
         <label class="block text-sm text-zinc-400">Handler workflow
           <select v-model="form.handler_workflow_id" class="input mt-1 w-full">
-            <option value="">— none yet —</option>
+            <option value="">- none yet -</option>
             <option v-for="w in workflows" :key="w.id" :value="w.id">{{ w.name }}</option>
           </select>
         </label>
@@ -304,7 +307,7 @@ onMounted(load)
           <input v-model="form.secret" type="password" class="input mt-1 w-full" />
         </label>
         <label v-if="credentialKeys[0]" class="block text-sm text-zinc-400">
-          <span class="font-mono">{{ credentialKeys[0] }}</span> <span class="text-zinc-600">(optional — delivers outbound)</span>
+          <span class="font-mono">{{ credentialKeys[0] }}</span> <span class="text-zinc-600">(optional - delivers outbound)</span>
           <input v-model="form.credential" type="password" class="input mt-1 w-full" />
         </label>
         <div class="flex justify-end gap-2">

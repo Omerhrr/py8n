@@ -191,7 +191,10 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
             # read-only on the request session is safe; the policy gates
             # BEFORE the flow runs on its own sessions (single-writer SQLite)
             policy = await serving_limits.policy_for_token(db, token.id)
-            serving_limits.admit(token.id, policy)
+            # v70: admit records the hit in the SHARED hit table (its own
+            # session - the request session stays read-only) before the
+            # flow dispatches, so a shaped request never reaches the model
+            await serving_limits.admit(token.id, policy)
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except serving_limits.LimitExceeded as exc:

@@ -25,11 +25,16 @@ own credentials before anything runs):
   X-Telegram-Bot-Api-Secret-Token verified
 * ``POST /channels/discord/{endpoint_id}/webhook``       - signed Discord
   interactions: Ed25519 verification, PING handshake answered
+* ``POST /channels/telnyx/{endpoint_id}/webhook``        - v70: Telnyx
+  Call Control (SIP + PSTN voice): RFC 9421 signature verification, the
+  call_control_id finds-or-creates the voice session, events run the
+  SAME state machine, commands are built and honestly attempted
 
-Every receiver funnels into the SAME receive path: verify -> parse the
-native dialect -> interactions.ingest() per message -> deliver the reply
-through the provider's send API. Status events (delivery receipts, edits)
-are counted and reported as honest skips - they are not messages.
+Every chat receiver funnels into the SAME receive path: verify -> parse
+the native dialect -> interactions.ingest() per message -> deliver the
+reply through the provider's send API (WhatsApp optionally as
+INTERACTIVE buttons). Status events (delivery receipts, edits) are
+counted and reported as honest skips - they are not messages.
 """
 
 from __future__ import annotations
@@ -141,13 +146,17 @@ async def delete_endpoint(endpoint_id: str, user=Depends(get_optional_user),
 class OutboundBody(BaseModel):
     to: str = Field(..., min_length=1, max_length=180, description="Chat id / wa id / channel id / webhook URL")
     text: str = Field(..., min_length=1, max_length=4000)
+    buttons: list[dict] | None = Field(default=None, description="WhatsApp interactive reply buttons [{id, title}] (meta_cloud_api only, 1..3, title <= 20 chars)")
 
 
 @router.post("/endpoints/{endpoint_id}/preview-outbound")
 async def preview_outbound(endpoint_id: str, body: OutboundBody,
                            user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     row = await _own_endpoint(db, endpoint_id, user)
-    return await ep_svc.preview_outbound(row, body.to, body.text)
+    try:
+        return await ep_svc.preview_outbound(row, body.to, body.text, buttons=body.buttons)
+    except ChannelEndpointError as exc:
+        raise _http(exc) from exc
 
 
 @router.post("/endpoints/{endpoint_id}/deliver")
@@ -157,7 +166,10 @@ async def deliver(endpoint_id: str, body: OutboundBody,
     row = await _own_endpoint(db, endpoint_id, user)
     if not row.enabled:
         raise HTTPException(status_code=400, detail="this endpoint is disabled")
-    return await ep_svc.deliver_outbound(row, body.to, body.text)
+    try:
+        return await ep_svc.deliver_outbound(row, body.to, body.text, buttons=body.buttons)
+    except ChannelEndpointError as exc:
+        raise _http(exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -231,5 +243,25 @@ async def discord_webhook(endpoint_id: str, request: Request, db: AsyncSession =
             return JSONResponse({"type": 4, "data": {"content": str(reply)[:2000]}},
                                 status_code=200)
         return JSONResponse({"type": 5}, status_code=200)
+    except ChannelEndpointError as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+
+
+@router.post("/telnyx/{endpoint_id}/webhook")
+async def telnyx_webhook(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    """Telnyx Call Control events (SIP + PSTN) - RFC 9421 signed, voice-native.
+
+    The provider identifies the call itself via call_control_id; py8n
+    finds-or-creates the session, runs the SAME voice state machine, and
+    honestly attempts the matching commands (answer / speak).
+    """
+    row = await _load_receiver(db, endpoint_id)
+    raw = await request.body()
+    try:
+        out = await ep_svc.receive_voice_webhook(
+            db, row, raw_body=raw, headers=dict(request.headers),
+            method=request.method, target=request.url.path +
+            (f"?{request.url.query}" if request.url.query else ""))
+        return JSONResponse({"ok": True, **out}, status_code=200)
     except ChannelEndpointError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc

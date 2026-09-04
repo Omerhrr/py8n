@@ -1,15 +1,25 @@
-"""Channel endpoints (v69) - CRUD and delivery for the REAL adapter surface.
+"""Channel endpoints (v69+v70) - CRUD and delivery for the REAL adapter surface.
 
 A ChannelEndpoint turns a provider's native webhook into interaction-layer
 ingests. This module owns the storage and the HTTP plumbing; the dialect
 rules live in channel_adapters.py (pure, unit-testable).
 
-The receive path (one call, shared by all three receivers):
+The chat receive path (one call, shared by whatsapp/telegram/discord):
 
   verify (provider-native) -> parse (native dialect -> normalized
   messages + honest skips) -> for each message: interactions.ingest()
   (find-or-create conversation, run the bound handler, record both sides)
   -> deliver the reply through the provider's send API.
+
+The voice receive path (v70, telnyx_call_control):
+
+  verify (RFC 9421) -> parse call-control events -> find-or-create the
+  VoiceSession by call_control_id -> run each event through the SAME
+  voice state machine -> act: answer on initiated, run a voice turn on
+  gather digits (the handler replies), complete the utterance on
+  speak.ended -> build (and honestly attempt) the matching call-control
+  command. The provider identifies the call; py8n never needs a session
+  id in the webhook URL.
 
 Delivery is honest about the last mile: with a credential configured the
 built request is actually sent (httpx, short timeout) and the provider's
@@ -88,14 +98,31 @@ def _extract_sender_to(msg: adapters.NormalizedInbound) -> str:
     return msg.sender_id
 
 
-async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str) -> dict:
+async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
+                           buttons: list[dict] | None = None) -> dict:
     """Build the provider request and (when possible) actually send it.
+
+    ``buttons`` (v70) switches the request to the provider's INTERACTIVE
+    shape - WhatsApp reply buttons only; other providers refuse loudly
+    instead of silently degrading to plain text.
 
     Returns a delivery record: {delivery, detail, request} where request
     carries the url + json body (auth headers masked) for traceability.
     """
     config = endpoint.config or {}
-    request = adapters.build_outbound(endpoint.provider, config, to, text)
+    try:
+        if buttons:
+            if endpoint.provider != "meta_cloud_api":
+                raise ChannelEndpointError(
+                    f"provider {endpoint.provider} does not support interactive buttons - "
+                    "only meta_cloud_api (WhatsApp) carries reply buttons")
+            request = adapters.meta_build_interactive(config, to, text, buttons)
+        else:
+            request = adapters.build_outbound(endpoint.provider, config, to, text)
+    except ChannelEndpointError:
+        raise
+    except ValueError as exc:  # Meta's interactive limits refuse loudly -> 400
+        raise ChannelEndpointError(str(exc)) from exc
     masked_request = {"method": request["method"], "url": request["url"],
                       "json": request.get("json")}
     cred_keys = adapters.REQUIRED_CONFIG.get(endpoint.provider, {}).get("credential", [])
@@ -178,6 +205,158 @@ async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
             "handled": handled}
 
 
+# ---------------------------------------------------------------------------
+# v70: the voice receive path (telnyx_call_control)
+# ---------------------------------------------------------------------------
+
+
+async def _find_or_create_voice_session(db: AsyncSession, endpoint: ChannelEndpoint,
+                                        ev: adapters.TelnyxEvent) -> tuple["object", bool]:
+    """The call_control_id IS the identity: find the session or open one.
+
+    Returns (VoiceSession row, created). The session binds the endpoint's
+    handler workflow, so gather-turns answer through the SAME workflow
+    every other channel uses.
+    """
+    from ..models import VoiceSession
+    q = (select(VoiceSession).where(VoiceSession.call_ref == ev.call_control_id)
+         .order_by(VoiceSession.started_at.desc()))
+    row = (await db.execute(q)).scalars().first()
+    if row is not None and (endpoint.owner_id is None or row.owner_id is None
+                            or row.owner_id == endpoint.owner_id):
+        return row, False
+    from .voice import create_session as _voice_create
+    direction = "inbound" if ev.direction != "outgoing" else "outbound"
+    await _voice_create(
+        db, owner_id=endpoint.owner_id, direction=direction, provider="telnyx",
+        call_ref=ev.call_control_id, from_ref=ev.from_ref, to_ref=ev.to_ref,
+        handler_workflow_id=endpoint.handler_workflow_id)
+    await db.flush()
+    row = (await db.execute(q)).scalars().first()
+    return row, True
+
+
+async def _attempt_command(config: dict, request: dict) -> dict:
+    """Build-and-honestly-attempt one call-control command.
+
+    Without an api_key the command is built and reported ``skipped`` -
+    py8n never pretends it answered a call it could not answer.
+    """
+    masked = {"method": request["method"], "url": request["url"],
+              "json": request.get("json")}
+    if not str(config.get("api_key") or "").strip():
+        return {"delivery": "skipped",
+                "detail": "no api_key configured - the command was built but NOT sent",
+                "request": masked}
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            resp = await client.request(request["method"], request["url"],
+                                        headers=request.get("headers", {}),
+                                        json=request.get("json"))
+        ok = 200 <= resp.status_code < 300
+        detail = f"telnyx answered {resp.status_code}"
+        if not ok:
+            try:
+                detail += f": {_json.dumps(resp.json())[:200]}"
+            except Exception:  # noqa: BLE001
+                pass
+        return {"delivery": "delivered" if ok else "failed", "detail": detail,
+                "status_code": resp.status_code, "request": masked}
+    except Exception as exc:  # noqa: BLE001 - the sandbox may have no egress
+        return {"delivery": "failed", "detail": f"command request failed: {exc}",
+                "request": masked}
+
+
+async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
+                                raw_body: bytes, headers: dict,
+                                method: str = "POST", target: str = "") -> dict:
+    """The telnyx receive path: verify -> parse -> sessions -> state machine.
+
+    Each mapped event runs through the SAME v69 voice primitives the HTTP
+    API exposes: ringing/answered/ending events go through apply_event,
+    gather digits become a voice TURN (the handler's reply is spoken back
+    through a speak command), speak.started/ended drive the active-utterance
+    bookkeeping, machine detection lands as voicemail_detected. Commands
+    the agent would execute (answer/speak) are built and honestly
+    attempted - skipped loudly when no api_key is configured.
+    """
+    from ..models import VoiceSession  # noqa: F401  (session table touchpoint)
+    from .voice import VoiceError, _add_event, apply_event, complete_tts, voice_turn
+
+    if not endpoint.enabled:
+        raise ChannelEndpointError("this endpoint is disabled")
+    config = endpoint.config or {}
+    ok, detail = adapters.verify_request(
+        endpoint.provider, config, raw_body=raw_body,
+        headers={k.lower(): v for k, v in headers.items()},
+        method=method, target=target)
+    if not ok:
+        raise ChannelEndpointError(detail or "webhook verification failed")
+    try:
+        payload = _json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except (ValueError, UnicodeDecodeError):
+        payload = {}
+
+    parsed = adapters.telnyx_parse_webhook(payload if isinstance(payload, dict) else {})
+    handled: list[dict] = []
+
+    for ev in parsed.events:
+        session, created = await _find_or_create_voice_session(db, endpoint, ev)
+        actions: list[str] = []
+        delivery: dict | None = None
+        try:
+            if ev.kind == "call.ringing":
+                await apply_event(db, session, "call.ringing",
+                                  {"direction": ev.direction, "call_session_id": ev.call_session_id})
+                cmd = adapters.telnyx_build_command(config, ev.call_control_id, "answer")
+                delivery = await _attempt_command(config, cmd)
+                actions.append("answer_built")
+            elif ev.kind == "call.answered":
+                await apply_event(db, session, "call.answered", {})
+            elif ev.kind == "dtmf":
+                # gather.ended - the caller 'said' digits; run the SAME turn
+                await apply_event(db, session, "dtmf", {"digits": ev.digits})
+                turn = await voice_turn(db, session, transcript=ev.digits, confidence=1.0)
+                actions.append("turn_run")
+                if turn.get("reply"):
+                    cmd = adapters.telnyx_build_command(config, ev.call_control_id, "speak",
+                                                        {"payload": turn["reply"]})
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("speak_built")
+            elif ev.kind == "tts.started":
+                event = await _add_event(db, session, "tts.started",
+                                         {"provider": "telnyx", "source": "speak.started"})
+                ctx = dict(session.context or {})
+                ctx["active_tts"] = event.id
+                session.context = ctx
+                db.add(session)
+            elif ev.kind == "tts.ended":
+                if (session.context or {}).get("active_tts"):
+                    await complete_tts(db, session)
+                    actions.append("utterance_closed")
+            elif ev.kind == "voicemail_detected":
+                await apply_event(db, session, "voicemail_detected", {})
+            elif ev.end_kind:
+                await apply_event(db, session, ev.kind, {"hangup_cause": ev.hangup_cause})
+        except VoiceError as exc:
+            handled.append({"event": ev.out(), "session_id": session.id,
+                            "created": created, "error": str(exc),
+                            "actions": actions, "delivery": delivery})
+            continue
+        handled.append({"event": ev.out(), "session_id": session.id,
+                        "created": created, "state": session.state,
+                        "end_reason": session.end_reason or None,
+                        "actions": actions, "delivery": delivery})
+
+    endpoint.events_received = (endpoint.events_received or 0) + 1
+    endpoint.last_event_at = datetime.now(timezone.utc)
+    db.add(endpoint)
+
+    return {"ok": True, "endpoint": endpoint.id, "provider": endpoint.provider,
+            "received": parsed.count, "skipped": parsed.skipped, "handled": handled}
+
+
 async def list_endpoints(db: AsyncSession, owner_id: str | None) -> list[dict]:
     q = select(ChannelEndpoint).order_by(ChannelEndpoint.created_at.desc())
     rows = (await db.execute(q)).scalars().all()
@@ -252,9 +431,22 @@ async def delete_endpoint(db: AsyncSession, row: ChannelEndpoint) -> dict:
     return payload
 
 
-async def preview_outbound(row: ChannelEndpoint, to: str, text: str) -> dict:
+async def preview_outbound(row: ChannelEndpoint, to: str, text: str,
+                           buttons: list[dict] | None = None) -> dict:
     """Dry-run: the exact request py8n would send, secrets masked."""
-    request = adapters.build_outbound(row.provider, row.config or {}, to, text)
+    try:
+        if buttons:
+            if row.provider != "meta_cloud_api":
+                raise ChannelEndpointError(
+                    f"provider {row.provider} does not support interactive buttons - "
+                    "only meta_cloud_api (WhatsApp) carries reply buttons")
+            request = adapters.meta_build_interactive(row.config or {}, to, text, buttons)
+        else:
+            request = adapters.build_outbound(row.provider, row.config or {}, to, text)
+    except ChannelEndpointError:
+        raise
+    except ValueError as exc:  # Meta's interactive limits refuse loudly -> 400
+        raise ChannelEndpointError(str(exc)) from exc
     headers = dict(request.get("headers") or {})
     for key in list(headers):
         if key.lower() in ("authorization", "x-telegram-bot-api-secret-token"):

@@ -446,7 +446,7 @@ def test_v69_channel_endpoints():
     finally:
         asyncio.run(_drain_background())
         server.shutdown()
-        serving_limits.reset_all()
+        asyncio.run(serving_limits.reset_all())
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +616,7 @@ def test_v69_voice_primitives():
         asyncio.run(_go())
     finally:
         asyncio.run(_drain_background())
-        serving_limits.reset_all()
+        asyncio.run(serving_limits.reset_all())
 
 
 # ---------------------------------------------------------------------------
@@ -724,4 +724,4 @@ def test_v69_serving_limits():
         asyncio.run(_go())
     finally:
         asyncio.run(_drain_background())
-        serving_limits.reset_all()
+        asyncio.run(serving_limits.reset_all())

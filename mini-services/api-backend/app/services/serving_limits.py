@@ -1,40 +1,63 @@
-"""Rate-shaping and quotas on serving tokens (v69).
+"""Rate-shaping and quotas on serving tokens (v69 -> v70: cross-process).
 
-v68 gave deployments credentials (serving tokens); v69 gives those
-tokens TRAFFIC POLICY. A token may carry:
+v68 gave deployments credentials (serving tokens); v69 gave those tokens
+TRAFFIC POLICY: ``rate_per_min`` (sliding 60-second window) and
+``daily_quota`` (UTC calendar day). Enforcement happens right after token
+auth succeeds on the serving webhook and the SSE stream endpoint - a
+shape-limited request gets 429 with ``Retry-After`` and the
+``X-RateLimit-Limit`` / ``X-RateLimit-Remaining`` headers; an exhausted
+quota gets 429 naming the next UTC midnight. A token without a policy
+stays unlimited - shaping is opt-in per token, exactly like auth is
+opt-in per deployment.
 
-* ``rate_per_min`` - a per-minute request cap enforced with a sliding
-  60-second window (admitted requests only); over the cap = 429 with
-  ``Retry-After`` and the ``X-RateLimit-Limit`` / ``X-RateLimit-Remaining``
-  headers, the same grammar clients already know.
-* ``daily_quota`` - a UTC calendar-day cap; exhausted = 429 naming the
-  next UTC midnight as the reset.
+v70 moved the COUNTERS. v69 kept them as in-process deques - correct
+arithmetic inside one worker, but N uvicorn workers (or two boxes behind
+a balancer) meant N independent allowances: a 10/min token under 4
+workers admitted up to 40. The counters now live in
+``deployment_token_hits`` (one row per admitted request, keyed by token
+id) - the SAME database every process already shares, so all workers
+enforce ONE limit. This is the deliberate exception to "derived never
+stored": limits are state about TRAFFIC, not a derivation from the
+estate, and they must survive process boundaries to mean anything.
 
-Enforcement happens right after token auth succeeds on the serving
-webhook and the SSE stream endpoint - one call site, one grammar. The
-policy row is the only stored part; counters are in-process windows,
-the same trade the v23 limiter made (per-process, honest, no hidden
-shared state). A token without a policy stays unlimited - shaping is
-opt-in per token, exactly like auth is opt-in per deployment.
+HOW THE WINDOW STAYS EXACT (the insert-first pattern):
+
+1. INSERT the request's own hit row FIRST - on SQLite this takes the
+   database's single writer lock, so every concurrent admit (in this or
+   any other process) serializes behind it;
+2. COUNT the window inside the same transaction - it sees every hit
+   committed before the write lock was granted plus the row just
+   inserted, which under SQLite's one-writer-at-a-time discipline is the
+   exact, race-free total;
+3. if the policy is exceeded, DELETE the just-inserted row, commit the
+   deletion, and raise ``LimitExceeded`` (the refused request is not
+   traffic - the v69 semantics kept).
+
+On a multi-writer SQL backend the same shape wants
+``SELECT ... FOR UPDATE`` / ``BEGIN IMMEDIATE``; SQLite's writer lock
+provides it for free. Under pathological contention a write can queue
+past the sqlite busy timeout - the honest scaling note is that a token
+hot enough to queue writers has outgrown row-per-hit storage and should
+move to a counter store; the grammar (429 + headers) would not change.
+
+Rows older than two days are pruned opportunistically on every admit, so
+the table stays tiny without a sweeper job. Admitted requests only:
+refused requests are answered 429 but their (rolled back) row never
+commits.
 """
 
 from __future__ import annotations
 
-import time
-from collections import defaultdict, deque
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import DeploymentTokenPolicy
+from ..db import AsyncSessionLocal
+from ..models import DeploymentTokenHit, DeploymentTokenPolicy
 
 _WINDOW_SECONDS = 60.0
-
-# (token_id) -> deque[monotonic timestamps of admitted requests this minute]
-_minute_hits: dict[str, deque] = defaultdict(deque)
-# (token_id, utc_date_iso) -> admitted count today
-_day_counts: dict[tuple[str, str], int] = defaultdict(int)
+_HIT_RETENTION = timedelta(days=2)  # hits older than this are pruned on admit
 
 
 class LimitExceeded(Exception):
@@ -47,8 +70,8 @@ class LimitExceeded(Exception):
         self.headers = {"Retry-After": str(retry_after), **headers}
 
 
-def _day_key() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+def _day_key(at: datetime | None = None) -> str:
+    return (at or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
 
 
 def _next_utc_midnight() -> str:
@@ -57,74 +80,122 @@ def _next_utc_midnight() -> str:
     return tomorrow.isoformat()
 
 
-def _prune_minute(token_id: str, now: float) -> deque:
-    hits = _minute_hits[token_id]
-    while hits and now - hits[0] >= _WINDOW_SECONDS:
-        hits.popleft()
-    return hits
+async def _count_hits(db: AsyncSession, token_id: str, *, since: datetime | None = None,
+                      day: str | None = None) -> int:
+    q = select(func.count()).select_from(DeploymentTokenHit).where(
+        DeploymentTokenHit.token_id == token_id)
+    if since is not None:
+        q = q.where(DeploymentTokenHit.admitted_at >= since)
+    if day is not None:
+        q = q.where(DeploymentTokenHit.quota_day == day)
+    return (await db.execute(q)).scalar_one()
 
 
-def check(token_id: str, policy: DeploymentTokenPolicy | None) -> dict[str, str]:
-    """Admit one request or raise LimitExceeded. Returns advisory headers."""
+async def _prune(db: AsyncSession, now: datetime) -> None:
+    """Opportunistic housekeeping: drop hits older than the retention window."""
+    await db.execute(delete(DeploymentTokenHit)
+                     .where(DeploymentTokenHit.admitted_at < now - _HIT_RETENTION))
+
+
+async def admit(token_id: str, policy: DeploymentTokenPolicy | None) -> dict[str, str]:
+    """Record one admitted request and apply the token's policy.
+
+    Call AFTER auth succeeded (v69 call sites unchanged in shape, now
+    awaited). Opens its own short-lived session - the request session
+    stays read-only (the single-writer SQLite discipline every serving
+    path already follows). Returns advisory headers; raises
+    ``LimitExceeded`` (mapped to 429 by the API layers) when the policy
+    refuses. Every token-authenticated request lands a hit row, policy
+    or not - so applying a policy to an already-busy token shapes the
+    traffic it has ALREADY served this window, exactly like v69.
+    """
     headers: dict[str, str] = {}
-    if policy is None:
-        return headers
-    now = time.monotonic()
-    if policy.rate_per_min is not None and policy.rate_per_min > 0:
-        hits = _prune_minute(token_id, now)
-        headers["X-RateLimit-Limit"] = str(policy.rate_per_min)
-        if len(hits) >= policy.rate_per_min:
-            retry_after = max(1, int(_WINDOW_SECONDS - (now - hits[0])) + 1)
-            raise LimitExceeded(
-                f"rate limit exceeded - this token allows {policy.rate_per_min} "
-                f"requests/minute", retry_after,
-                {**headers, "X-RateLimit-Remaining": "0"})
-        headers["X-RateLimit-Remaining"] = str(policy.rate_per_min - len(hits) - 1)
-    if policy.daily_quota is not None and policy.daily_quota > 0:
-        day = _day_key()
-        used = _day_counts[(token_id, day)]
-        if used >= policy.daily_quota:
-            raise LimitExceeded(
-                f"daily quota exhausted - this token allows {policy.daily_quota} "
-                f"requests per UTC day; the quota resets at {_next_utc_midnight()}",
-                3600, {"X-Quota-Limit": str(policy.daily_quota),
-                       "X-Quota-Used": str(used),
-                       "X-Quota-Reset": _next_utc_midnight()})
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        # 1) the insert-first write: takes SQLite's writer lock, so every
+        #    concurrent admit (any process) serializes behind this row
+        hit = DeploymentTokenHit(token_id=token_id, admitted_at=now,
+                                 quota_day=_day_key(now))
+        db.add(hit)
+        await db.flush()
+
+        rate = policy.rate_per_min if policy else None
+        if rate is not None and rate > 0:
+            # 2) the exact window count: committed rows + this one
+            minute_used = await _count_hits(
+                db, token_id, since=now - timedelta(seconds=_WINDOW_SECONDS))
+            headers["X-RateLimit-Limit"] = str(rate)
+            if minute_used > rate:
+                # 3) this request is the overflow - take it back, then refuse
+                oldest = (await db.execute(
+                    select(DeploymentTokenHit.admitted_at)
+                    .where(DeploymentTokenHit.token_id == token_id,
+                           DeploymentTokenHit.admitted_at >= now - timedelta(seconds=_WINDOW_SECONDS))
+                    .order_by(DeploymentTokenHit.admitted_at)
+                    .limit(1))).scalar()
+                await db.delete(hit)
+                await db.commit()
+                if oldest is not None and oldest.tzinfo is None:
+                    # SQLite reads back what it stored without the offset
+                    oldest = oldest.replace(tzinfo=timezone.utc)
+                retry_after = max(1, int(_WINDOW_SECONDS
+                                         - (now - oldest).total_seconds()) + 1) if oldest else 60
+                raise LimitExceeded(
+                    f"rate limit exceeded - this token allows {rate} "
+                    f"requests/minute", retry_after,
+                    {**headers, "X-RateLimit-Remaining": "0"})
+            headers["X-RateLimit-Remaining"] = str(max(0, rate - minute_used))
+
+        quota = policy.daily_quota if policy else None
+        if quota is not None and quota > 0:
+            day = _day_key(now)
+            day_used = await _count_hits(db, token_id, day=day)
+            if day_used > quota:
+                await db.delete(hit)
+                await db.commit()
+                raise LimitExceeded(
+                    f"daily quota exhausted - this token allows {quota} "
+                    f"requests per UTC day; the quota resets at {_next_utc_midnight()}",
+                    3600, {"X-Quota-Limit": str(quota),
+                           "X-Quota-Used": str(day_used - 1),
+                           "X-Quota-Reset": _next_utc_midnight()})
+
+        await _prune(db, now)
+        await db.commit()
     return headers
 
 
-def admit(token_id: str, policy: DeploymentTokenPolicy | None) -> dict[str, str]:
-    """check() + count the request as admitted (call AFTER auth succeeded)."""
-    headers = check(token_id, policy)
-    _minute_hits[token_id].append(time.monotonic())
-    _day_counts[(token_id, _day_key())] += 1
-    return headers
+async def usage_snapshot(token_id: str, policy: DeploymentTokenPolicy | None) -> dict:
+    """The live counters for the usage endpoint (ops/tests) - from the DB.
 
-
-def usage_snapshot(token_id: str, policy: DeploymentTokenPolicy | None) -> dict:
-    """The live counters for the usage endpoint (tests/debug/ops)."""
-    now = time.monotonic()
-    minute_used = len(_prune_minute(token_id, now))
-    day = _day_key()
-    day_used = _day_counts.get((token_id, day), 0)
+    Reads the same rows every process writes, so the numbers are the
+    platform-wide truth, not one worker's private view.
+    """
+    now = datetime.now(timezone.utc)
+    async with AsyncSessionLocal() as db:
+        minute_used = await _count_hits(
+            db, token_id, since=now - timedelta(seconds=_WINDOW_SECONDS))
+        day = _day_key(now)
+        day_used = await _count_hits(db, token_id, day=day)
+    rate = policy.rate_per_min if policy else None
+    quota = policy.daily_quota if policy else None
     return {
-        "rate_per_min": policy.rate_per_min if policy else None,
+        "rate_per_min": rate,
         "minute_used": minute_used,
-        "minute_remaining": (policy.rate_per_min - minute_used)
-        if policy and policy.rate_per_min else None,
-        "daily_quota": policy.daily_quota if policy else None,
+        "minute_remaining": (rate - minute_used) if rate else None,
+        "daily_quota": quota,
         "day_used": day_used,
-        "day_remaining": (policy.daily_quota - day_used)
-        if policy and policy.daily_quota else None,
+        "day_remaining": (quota - day_used) if quota else None,
         "quota_day": day,
-        "quota_resets_at": _next_utc_midnight() if policy and policy.daily_quota else None,
+        "quota_resets_at": _next_utc_midnight() if quota else None,
     }
 
 
-def reset_all() -> None:
-    """Drop every counter (tests call this between scenarios)."""
-    _minute_hits.clear()
-    _day_counts.clear()
+async def reset_all() -> None:
+    """Drop every hit row (tests call this between scenarios)."""
+    async with AsyncSessionLocal() as db:
+        await db.execute(delete(DeploymentTokenHit))
+        await db.commit()
 
 
 async def policy_for_token(db: AsyncSession, token_id: str) -> DeploymentTokenPolicy | None:

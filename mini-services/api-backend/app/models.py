@@ -1192,18 +1192,22 @@ class VoiceEvent(Base):
 
 
 class DeploymentTokenPolicy(Base):
-    """Rate-shaping/quotas on a serving token (v69).
+    """Rate-shaping/quotas on a serving token (v69, cross-process in v70).
 
-    A token may carry a policy: a per-minute rate cap (sliding window,
-    in-process) and a UTC calendar-day quota. Enforcement happens right
-    after token auth succeeds on the serving webhook / stream endpoints -
-    a shape-limited request gets 429 with Retry-After and X-RateLimit-*
+    A token may carry a policy: a per-minute rate cap (sliding window)
+    and a UTC calendar-day quota. Enforcement happens right after token
+    auth succeeds on the serving webhook / stream endpoints - a
+    shape-limited request gets 429 with Retry-After and X-RateLimit-*
     headers; an exhausted quota gets 429 with the UTC reset time. Zero
     policy (the default) keeps the token unlimited - rate shaping is
     opt-in per token, exactly like auth is opt-in per deployment.
 
-    The policy row is the ONLY stored part; the counters are in-process
-    sliding windows (same trade as the v23 limiter: per-process, honest).
+    The policy row is the only CONFIG stored part; the counters live in
+    ``deployment_token_hits`` (v70): one row per admitted request, in the
+    SAME database every process shares, so two uvicorn workers (or two
+    boxes behind the balancer) enforce ONE limit instead of each seeing
+    its own. v69 counted per-process - correct arithmetic, but N workers
+    meant N silent allowances; v70 makes the database the single truth.
     """
 
     __tablename__ = "deployment_token_policies"
@@ -1214,3 +1218,26 @@ class DeploymentTokenPolicy(Base):
     daily_quota: Mapped[int | None] = mapped_column(Integer, nullable=True)    # requests/UTC day, NULL = unlimited
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class DeploymentTokenHit(Base):
+    """One admitted request on a serving token (v70) - the shared counter.
+
+    This IS the cross-process limit storage: ``admit`` inserts a row and
+    reads the window counts back from the same table every other process
+    writes to. The sliding minute window = rows with ``admitted_at``
+    inside the last 60 seconds; the daily quota = rows with today's
+    ``quota_day``. Rows older than two days are pruned opportunistically
+    on admit, so the table stays tiny without a sweeper. Admitted
+    requests only (the v69 semantics kept); rejects are answered but not
+    counted as traffic.
+    """
+
+    __tablename__ = "deployment_token_hits"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    token_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # window key for the per-minute sliding count (indexed with token_id)
+    admitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    # UTC calendar-day key for the quota count ("2026-09-04")
+    quota_day: Mapped[str] = mapped_column(String(10), nullable=False)

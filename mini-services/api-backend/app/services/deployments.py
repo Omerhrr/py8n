@@ -69,7 +69,7 @@ def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def token_out(row: DeploymentToken, policy: DeploymentTokenPolicy | None = None) -> dict:
+async def token_out(row: DeploymentToken, policy: DeploymentTokenPolicy | None = None) -> dict:
     out = {
         "id": row.id,
         "name": row.name,
@@ -78,10 +78,11 @@ def token_out(row: DeploymentToken, policy: DeploymentTokenPolicy | None = None)
         "last_used_at": row.last_used_at.isoformat() if row.last_used_at else None,
         "revoked": row.revoked_at is not None,
         "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
-        # v69: the token's traffic policy + live usage (None = unlimited)
+        # v69: the token's traffic policy + live usage (None = unlimited);
+        # v70: usage reads the SHARED hit table - every worker's truth
         "limits": {"rate_per_min": policy.rate_per_min if policy else None,
                    "daily_quota": policy.daily_quota if policy else None},
-        "usage": serving_limits.usage_snapshot(row.id, policy),
+        "usage": await serving_limits.usage_snapshot(row.id, policy),
     }
     return out
 
@@ -98,7 +99,7 @@ async def list_tokens(db: AsyncSession, deployment_id: str) -> list[dict]:
                 select(DeploymentTokenPolicy)
                 .where(DeploymentTokenPolicy.token_id.in_(ids)))).scalars().all():
             policies[p.token_id] = p
-    return [token_out(r, policies.get(r.id)) for r in rows]
+    return [await token_out(r, policies.get(r.id)) for r in rows]
 
 
 async def active_token_count(db: AsyncSession, deployment_id: str) -> int:
@@ -138,7 +139,7 @@ async def mint_token(db: AsyncSession, *, owner_id: str | None, deployment_id: s
                                        daily_quota=daily_quota)
         db.add(policy)
         await db.flush()
-    out = token_out(row, policy)
+    out = await token_out(row, policy)
     out["token"] = raw  # shown once
     return out
 
@@ -151,7 +152,7 @@ async def revoke_token(db: AsyncSession, deployment_id: str, token_id: str) -> d
         row.revoked_at = datetime.now(timezone.utc)
         db.add(row)
         await db.flush()
-    return token_out(row)
+    return await token_out(row)
 
 
 async def check_deployment_token(db: AsyncSession, dep: ModelDeployment, request
@@ -243,7 +244,9 @@ async def enforce_serving_limits(token: DeploymentToken | None) -> dict[str, str
     async with AsyncSessionLocal() as session:
         policy = await serving_limits.policy_for_token(session, token.id)
         await session.commit()
-    return serving_limits.admit(token.id, policy)
+    # v70: admit records the hit in the SHARED deployment_token_hits table
+    # (its own short-lived session) - the limit one balancer-wide truth
+    return await serving_limits.admit(token.id, policy)
 
 
 async def set_token_limits(db: AsyncSession, deployment_id: str, token_id: str,
@@ -264,7 +267,7 @@ async def set_token_limits(db: AsyncSession, deployment_id: str, token_id: str,
         policy.daily_quota = daily_quota
     db.add(policy)
     await db.flush()
-    return token_out(tok, policy)
+    return await token_out(tok, policy)
 
 
 async def get_token_usage(db: AsyncSession, deployment_id: str, token_id: str) -> dict | None:
@@ -272,7 +275,8 @@ async def get_token_usage(db: AsyncSession, deployment_id: str, token_id: str) -
     if tok is None or tok.deployment_id != deployment_id:
         return None
     policy = await serving_limits.policy_for_token(db, token_id)
-    return {"token": token_out(tok, policy), "usage": serving_limits.usage_snapshot(token_id, policy)}
+    return {"token": await token_out(tok, policy),
+            "usage": await serving_limits.usage_snapshot(token_id, policy)}
 
 
 def hmac_compare(a: str, b: str) -> bool:

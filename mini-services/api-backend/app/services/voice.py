@@ -57,6 +57,8 @@ EVENT_KINDS = (
     "dtmf", "asr.final", "tts.started", "tts.ended", "barge_in",
     "hold", "unhold", "transfer", "no_answer", "busy",
     "voicemail_detected", "hangup", "failed",
+    # v70: media transport (websocket audio streams) bookkeeping
+    "media.stream_started", "media.stream_stopped",
 )
 
 END_KINDS = {  # event kind -> end_reason recorded on the session
@@ -219,6 +221,9 @@ def session_out(row: VoiceSession, events: list[VoiceEvent] | None = None,
         "barge_in_count": sum(1 for e in evs if e.kind == "barge_in"),
         "turn_count": sum(1 for e in evs if e.kind == "asr.final"),
         "active_tts": bool((row.context or {}).get("active_tts")),
+        # v70: the media transport's honest counters (stream_sid/chunks/
+        # audio_ms/skipped/opened/stopped) as the websocket left them
+        "media": dict((row.context or {}).get("media") or {}) or None,
         "events": [_event_out(e) for e in evs] if events is not None else None,
         "event_count": len(evs),
     }
