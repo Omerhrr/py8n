@@ -103,7 +103,7 @@ def test_v27_definitions():
                 assert t in types, t
             props = {t: set(by[t]["parameters_schema"]["properties"].keys()) for t in by if t.startswith(("dataset", "sql"))}
             assert props["dataset_read"] == {"dataset", "limit"}
-            assert props["dataset_write"] == {"dataset", "mode", "key_columns", "create_if_missing", "watermark_column", "ingestion_key", "lookback"}  # key_columns: v45 upsert; watermark/key: v50 incremental; lookback: v53
+            assert props["dataset_write"] == {"dataset", "mode", "key_columns", "create_if_missing", "watermark_column", "ingestion_key", "lookback", "dead_letter_dataset"}  # key_columns: v45 upsert; watermark/key: v50 incremental; lookback: v53; dead_letter_dataset: v67 quarantine
             assert props["sql_query"] == {"sql"}
             assert by["dataset_read"]["defaults"]["limit"] == 200
             assert by["dataset_write"]["parameters_schema"]["properties"]["mode"].get("options") == ["append", "replace", "upsert", "incremental"]  # upsert: v45, incremental: v50

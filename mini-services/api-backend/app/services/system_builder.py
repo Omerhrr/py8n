@@ -51,6 +51,10 @@ COMPONENT_LIBRARY: list[dict] = [
      "detail": "Interval or cron firing for the pipeline"},
     {"id": "schema_contract", "tier": "recommended", "label": "Schema contract",
      "detail": "Column-level contract enforced at every write (needs fields)"},
+    {"id": "staging_layer", "tier": "recommended", "label": "Staging layer",
+     "detail": "v67: raw source rows land UNMODIFIED in a {name} staging dataset before validation (medallion bronze)"},
+    {"id": "dead_letter_queue", "tier": "optional", "label": "Dead-letter queue",
+     "detail": "v67: contract violations are QUARANTINED into a {name} dead letter dataset (stamped _dl_reasons/_dl_at) instead of stopping the pipeline (needs the schema contract)"},
     {"id": "dedupe", "tier": "recommended", "label": "Deduplication",
      "detail": "remove_duplicates node on the identity column(s)"},
     {"id": "incremental", "tier": "recommended", "label": "Incremental write",
@@ -77,6 +81,8 @@ _KEYWORD_COMPONENTS = [
     (("incremental", "late-arriving", "late arriving", "lookback", "watermark", "cdc", "upsert"), ["incremental"]),
     (("schema", "contract", "validate", "validation"), ["schema_contract"]),
     (("quality", "quality gate", "null check"), ["quality_gate", "schema_contract"]),
+    (("staging", "landing zone", "landing table", "raw zone", "bronze"), ["staging_layer"]),
+    (("dead letter", "dead-letter", "deadletter", "quarantine", "reject lane", "rejected rows"), ["dead_letter_queue", "schema_contract"]),
     (("alert", "notify", "notification", "slack", "webhook"), ["failure_notification"]),
     (("dashboard", "monitor ", "metrics"), ["dashboard"]),
     (("report", "pdf", "excel", "export"), ["scheduled_report"]),
@@ -298,6 +304,8 @@ def toggle_component(spec: dict, component_id: str, selected: bool) -> dict:
         raise ValueError("the target dataset and the pipeline workflow are the system's backbone - they cannot be removed")
     if component_id == "quality_gate" and selected and not comps.get("schema_contract", {}).get("selected"):
         raise ValueError("the quality gate needs the schema contract component selected")
+    if component_id == "dead_letter_queue" and selected and not comps.get("schema_contract", {}).get("selected"):
+        raise ValueError("the dead-letter queue routes contract violations - it needs the schema contract component selected")
     comps[component_id]["selected"] = bool(selected)
     return spec
 
@@ -425,6 +433,8 @@ def _repair_llm_spec(refined: dict, spec: dict) -> dict:
     wanted |= {"target_dataset", "pipeline_workflow"}  # the backbone is not negotiable
     if "quality_gate" in wanted and "schema_contract" not in wanted:
         wanted.discard("quality_gate")  # dependency validated, deterministically
+    if "dead_letter_queue" in wanted and "schema_contract" not in wanted:
+        wanted.discard("dead_letter_queue")  # same rule, enforced before the LLM sees it matter
     for c in spec["components"]:
         c["selected"] = c["id"] in wanted
 
@@ -538,6 +548,31 @@ async def build_system(db, draft) -> dict:
     built["dataset_id"] = ds.id
     built["dataset_name"] = ds.name
 
+    # --- v67 architecture layers: staging (bronze) + dead-letter (reject lane)
+    layers: dict = {"curated": {"dataset_id": ds.id, "name": ds.name}}
+    staging_ds = None
+    if "staging_layer" in selected:
+        staging_ds = await ds_svc.create_from_df(
+            db, await _unique_dataset_name(db, f"{title} staging"), pd.DataFrame(),
+            source="system_builder",
+            description=f"Raw landing zone for the {title} system - rows land unmodified before validation",
+            owner_id=draft.owner_id,
+        )
+        built["staging_dataset_id"] = staging_ds.id
+        built["staging_dataset_name"] = staging_ds.name
+        layers["staging"] = {"dataset_id": staging_ds.id, "name": staging_ds.name}
+    dead_letter_ds = None
+    if "dead_letter_queue" in selected:
+        dead_letter_ds = await ds_svc.create_from_df(
+            db, await _unique_dataset_name(db, f"{title} dead letter"), pd.DataFrame(),
+            source="system_builder",
+            description=f"Quarantine for rows that violate the {title} contract - stamped _dl_reasons/_dl_at",
+            owner_id=draft.owner_id,
+        )
+        built["dead_letter_dataset_id"] = dead_letter_ds.id
+        built["dead_letter_dataset_name"] = dead_letter_ds.name
+        layers["dead_letter"] = {"dataset_id": dead_letter_ds.id, "name": dead_letter_ds.name}
+
     # --- 2) the pipeline workflow -------------------------------------------
     fields = spec.get("fields") or []
     dedupe_keys = spec.get("dedupe_keys") or []
@@ -584,6 +619,14 @@ async def build_system(db, draft) -> dict:
         prev = "source"
     # upload kind: the write node consumes the run payload directly
 
+    # v67 staging layer: raw rows land UNMODIFIED before any shaping - the
+    # bronze copy every downstream layer can be replayed from
+    if staging_ds is not None:
+        nodes.append(_node("staging_write", "dataset_write",
+                           {"dataset": staging_ds.name, "mode": "append"}, "Stage raw rows"))
+        edges.append(_edge("e_staging", prev, "staging_write"))
+        prev = "staging_write"
+
     if "dedupe" in selected:
         nodes.append(_node("dedupe", "remove_duplicates",
                            {"field": (dedupe_keys[0] if dedupe_keys else "")}, "Dedupe"))
@@ -592,6 +635,10 @@ async def build_system(db, draft) -> dict:
 
     incremental = "incremental" in selected
     write_params: dict = {"dataset": ds.name, "mode": "upsert" if incremental else "replace"}
+    if dead_letter_ds is not None:
+        # v67: the curated write quarantines contract violations into the
+        # dead-letter dataset instead of failing the run
+        write_params["dead_letter_dataset"] = dead_letter_ds.name
     if incremental:
         # the cursor: a datetime field if the contract has one, else the first
         # field, else the dataset_write default behaviour on 'updated_at'
@@ -639,7 +686,17 @@ async def build_system(db, draft) -> dict:
     if "schema_contract" in selected:
         if fields:
             cols = [{"name": f["name"], "dtype": f.get("dtype") or "text", "nullable": True} for f in fields]
-            on_violation = "error" if "quality_gate" in selected else "warn"
+            if "dead_letter_queue" in selected:
+                # v67: the reject lane replaces the hard-stop - violations are
+                # quarantine material, not run failures
+                on_violation = "dead_letter"
+                if "quality_gate" in selected:
+                    notes.append("Quality gate expressed as the dead-letter queue: violations are "
+                                 "quarantined into the dead-letter dataset rather than stopping the run.")
+            elif "quality_gate" in selected:
+                on_violation = "error"
+            else:
+                on_violation = "warn"
             contract = await contracts_svc.put_contract(db, ds, cols, on_violation=on_violation)
             built["contract_version"] = contract.version
             built["on_violation"] = on_violation
@@ -694,4 +751,5 @@ async def build_system(db, draft) -> dict:
                          "question or add a rule on the Notifications page.")
 
     built["notes"] = notes
+    built["layers"] = layers
     return built

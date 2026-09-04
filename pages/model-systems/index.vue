@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, BrainCircuit, Plus, CheckCircle2, XCircle, AlertTriangle, X,
   Workflow as WorkflowIcon, Database, Network, FileBarChart, Unlink,
-  Trash2, Layers, Radio, Repeat, Gauge, Sparkles, Languages, Play,
+  Trash2, Layers, Radio, Repeat, Gauge, Sparkles, Languages, Play, Rocket,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -32,6 +32,7 @@ interface Detail extends ModelSystemCard {
   evaluation: { model: string; version: number; family: string; task: string; metrics: Record<string, any> }[]
   registry: { id: string; name: string; version: number; algorithm: string; family: string; active: boolean }[]
   deployment: { id: string; name: string; models_scored: number; active: boolean }[]
+  endpoints: { id: string; name: string; environment: string; enabled: boolean; serving_mode: string; status: string; webhook_path: string | null }[]
   monitoring: { versions: number; with_reference_stats: number; coverage_pct: number; drift_capable: boolean }
   retraining: { id: string; name: string; trainer: string[]; schedule: string; active: boolean }[]
   reports: { id: string; name: string; cron: string; fmt: string; enabled: boolean }[]
@@ -561,6 +562,18 @@ onMounted(async () => {
                 </NuxtLink>
               </div>
               <p v-else class="rounded-xl border border-dashed border-zinc-800 px-3 py-2 text-center text-[10px] text-zinc-600">single-model workflows only</p>
+              <!-- v67: live endpoints (deployments of this system's models) -->
+              <p class="mb-1 mt-3 text-[10px] uppercase tracking-wide text-zinc-600">live endpoints</p>
+              <div v-if="detail.endpoints?.length" class="space-y-1.5">
+                <NuxtLink v-for="e in detail.endpoints" :key="e.id" to="/deployments"
+                          class="flex items-center gap-2 rounded-xl border border-rose-500/25 bg-rose-500/5 px-3 py-2 text-[11px] transition hover:border-rose-500/50">
+                  <Rocket class="h-3 w-3 text-rose-300" />
+                  <span class="min-w-0 flex-1 truncate font-semibold">{{ e.name }}</span>
+                  <span class="text-[10px] text-zinc-500">{{ e.environment }}</span>
+                  <span class="rounded-full px-1.5 py-0.5 text-[9px]" :class="e.status === 'live' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-500'">{{ e.status }}</span>
+                </NuxtLink>
+              </div>
+              <p v-else class="rounded-xl border border-dashed border-zinc-800 px-3 py-2 text-center text-[10px] text-zinc-600">no deployments of these models yet</p>
             </div>
 
             <div class="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">

@@ -4,6 +4,7 @@ import {
   Loader2, Boxes, Plus, CheckCircle2, XCircle, AlertTriangle, X,
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
+  Layers,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -21,6 +22,7 @@ interface SystemCard {
 }
 interface SystemDetail extends SystemCard {
   grouped: Record<string, { component_id: string; kind: string; ref_id: string; name: string; added_at: string | null }[]>
+  architecture: { layers: { layer: string; dataset: string; mode: string; workflow: string }[]; staging: boolean; dead_letter: boolean }
   health: {
     verdict: string
     workflows: { bound: number; runs_7d: number; failures_7d: number; failure_rate_7d: number; failing_workflows: { workflow_id: string; name: string; failures: number; last_error: string | null }[] }
@@ -541,6 +543,32 @@ onMounted(async () => {
               <p class="text-[10px] uppercase tracking-wide text-zinc-500">Report deliveries (7d)</p>
               <p class="mt-1 text-xl font-bold">{{ detail.health.reports.ok_7d }} <span class="text-xs font-normal text-emerald-400">ok</span></p>
               <p class="text-[10px]" :class="detail.health.reports.error_7d ? 'text-rose-300' : 'text-zinc-500'">{{ detail.health.reports.error_7d }} errors</p>
+            </div>
+          </div>
+
+          <!-- v67: derived architecture layers (medallion map) -->
+          <div v-if="detail.architecture?.layers?.length" class="mb-5 rounded-2xl border border-sky-500/25 bg-sky-500/5 p-4">
+            <div class="mb-2 flex items-center gap-2">
+              <Layers class="h-3.5 w-3.5 text-sky-400" />
+              <h3 class="text-xs font-bold text-sky-200">Architecture layers</h3>
+              <span class="text-[10px] text-zinc-500">derived from the bound workflows' write targets</span>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <template v-for="(l, i) in detail.architecture.layers" :key="l.layer + l.dataset">
+                <span v-if="i" class="text-zinc-600">→</span>
+                <span
+                  class="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold"
+                  :class="{
+                    'bg-amber-500/15 text-amber-300': l.layer === 'staging',
+                    'bg-emerald-500/15 text-emerald-300': l.layer === 'curated',
+                    'bg-rose-500/15 text-rose-300': l.layer === 'dead_letter',
+                  }"
+                >
+                  {{ l.layer }}
+                  <span class="font-normal text-zinc-400">{{ l.dataset }}</span>
+                  <span class="text-zinc-600">({{ l.mode }})</span>
+                </span>
+              </template>
             </div>
           </div>
 

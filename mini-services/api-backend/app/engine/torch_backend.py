@@ -438,13 +438,15 @@ class _TorchLM:
     def fit(self, train_windows: list[list[int]], val_windows: list[list[int]], *,
             epochs: int = 20, batch_size: int = 8, lr: float = 0.003,
             patience: int = 0, seed: int = 42,
-            conds_train: list | None = None, conds_val: list | None = None) -> dict:
+            conds_train: list | None = None, conds_val: list | None = None,
+            grad_accum: int = 1) -> dict:
         torch = _torch()
         import numpy as np
 
         if self.W_cond is not None:
             if conds_train is None:
                 raise ValueError("this LM is conditioned - conds_train is required")
+        grad_accum = max(1, int(grad_accum))
         rng = np.random.default_rng(seed)
         opt = torch.optim.Adam(self._params(), lr=lr)
         history: dict = {"train_loss": [], "val_loss": []}
@@ -456,6 +458,8 @@ class _TorchLM:
         for epoch in range(1, epochs + 1):
             order = rng.permutation(n)
             losses = []
+            micro = 0
+            opt.zero_grad()
             for start in range(0, n, batch_size):
                 idx = order[start:start + batch_size]
                 batch = [train_windows[i] for i in idx]
@@ -465,12 +469,17 @@ class _TorchLM:
                 if self.W_cond is not None:
                     cond = torch.tensor([conds_train[i] for i in idx], dtype=torch.float64,
                                         device=self.torch_device)
-                opt.zero_grad()
                 logits = self._forward(x, cond)
-                loss = self._loss(logits, y)
+                # v67 gradient accumulation: scale each micro-batch loss so the
+                # summed gradients average over grad_accum micro-batches, then
+                # step once per accumulation window
+                loss = self._loss(logits, y) / grad_accum
                 loss.backward()
-                opt.step()
-                losses.append(float(loss.detach()))
+                losses.append(float(loss.detach()) * grad_accum)
+                micro += 1
+                if micro % grad_accum == 0 or start + batch_size >= n:
+                    opt.step()
+                    opt.zero_grad()
             history["train_loss"].append(round(sum(losses) / max(len(losses), 1), 6))
             if val_windows:
                 vloss = self.eval_loss(val_windows, conds_val)

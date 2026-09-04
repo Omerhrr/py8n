@@ -962,3 +962,33 @@ class ModelSystemComponent(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     model_system: Mapped[ModelSystem] = relationship(back_populates="components")
+
+
+class ModelDeployment(Base):
+    """A model deployment (v67) - the DEPLOY verb made first-class.
+
+    A deployment turns a registry row into a LIVE serving endpoint: py8n
+    generates the serving workflow (a webhook trigger wired to lm_generate
+    for language models, or split_out -> model_predict for tabular ones),
+    activates it, and the deployment row is the handle you operate - list,
+    inspect, disable, retire. The workflow is a normal py8n object (you can
+    watch its executions, edit the graph, add monitoring downstream); the
+    deployment row just owns the pairing. Serving statistics are DERIVED
+    from the execution log at read time and never stored.
+    """
+
+    __tablename__ = "model_deployments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    # the registry row being served (trained_models.id)
+    model_registry_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    # serving shape: "generate" (lm_generate) | "predict" (model_predict)
+    serving_mode: Mapped[str] = mapped_column(String(20), nullable=False, default="predict")
+    # dev | staging | prod
+    environment: Mapped[str] = mapped_column(String(20), nullable=False, default="dev")
+    workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

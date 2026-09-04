@@ -117,6 +117,10 @@ class DatasetWriteNode(BaseNode):
             le=1.0e12,
             description="Rewind the checkpoint comparison by this many units (numeric cursor) or seconds (ISO cursor) so boundary/late rows are re-admitted; pair with mode=upsert to merge instead of duplicate",
         )
+        dead_letter_dataset: str = Field(
+            default="",
+            description="v67: quarantine dataset for rows that violate a dead_letter-mode contract (required when the target's contract is in dead_letter mode) - failing rows land here stamped with _dl_reasons/_dl_at",
+        )
 
     async def execute(self, context: ExecutionContext) -> NodeResult:
         from ...db import AsyncSessionLocal
@@ -161,6 +165,41 @@ class DatasetWriteNode(BaseNode):
                     contract_report = await contract_svc.enforce_on_rows(session, ds, rows, context="dataset_write node")
                 except contract_svc.ContractViolation as exc:
                     raise NodeExecutionError(str(exc)) from exc
+                # v67 dead-letter routing: a contract in dead_letter mode
+                # QUARANTINES failing rows into a side dataset and writes only
+                # the rows that pass - the pipeline never hard-stops on data
+                # quality, it routes around it (the reject lane is the record).
+                dead_lettered = 0
+                dead_letter_dataset_name = None
+                if rows and contract_report is not None and contract_report.get("on_violation") == "dead_letter":
+                    if not p.dead_letter_dataset.strip():
+                        raise NodeExecutionError(
+                            f"dataset {ds.name!r} has a dead_letter-mode contract - set "
+                            "dead_letter_dataset on this node so violating rows have somewhere to go")
+                    contract_row = await contract_svc.get_contract(session, ds.id)
+                    good, bad = contract_svc.split_rows_dead_letter(rows, contract_row.columns_json or [])
+                    if bad:
+                        dl_name = p.dead_letter_dataset.strip()
+                        dl_ds = await ds_svc.get_dataset(session, dl_name, owner_id=context.owner_id)
+                        if dl_ds is None:
+                            import pandas as pd
+
+                            dl_ds = await ds_svc.create_from_df(session, dl_name, pd.DataFrame(), source="dead_letter")
+                            await session.flush()
+                        for q in bad:
+                            q["_dl_source"] = ds.name
+                            q["_dl_contract_version"] = int(contract_row.version or 1)
+                        await ds_svc.append_rows(session, dl_ds, bad)
+                        dead_lettered = len(bad)
+                        dead_letter_dataset_name = dl_ds.name
+                    rows = good
+                    contract_report = {
+                        **contract_report,
+                        "ok": True,
+                        "dead_lettered": dead_lettered,
+                        "dead_letter_dataset": dead_letter_dataset_name,
+                        "passed": len(good),
+                    }
                 created = ds.row_count == 0 and len(rows) > 0
                 updated = inserted = 0
                 wm = p.watermark_column.strip()
@@ -237,6 +276,9 @@ class DatasetWriteNode(BaseNode):
             payload["checkpoint_after"] = checkpoint_after
             if p.lookback:
                 payload["lookback"] = p.lookback
+        if dead_lettered:
+            payload["dead_lettered"] = dead_lettered
+            payload["dead_letter_dataset"] = dead_letter_dataset_name
         if contract_report is not None:
             payload["contract"] = contract_report
         return self._single(payload)

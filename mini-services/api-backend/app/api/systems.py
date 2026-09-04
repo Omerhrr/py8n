@@ -34,10 +34,11 @@ from sqlalchemy.orm import selectinload
 from ..api.packs import PackDocument, _import_pack_doc
 from ..auth import get_optional_user
 from ..db import get_db
-from ..models import Py8nSystem, SystemComponent
+from ..models import Py8nSystem, SystemComponent, Workflow
 from ..services.py8n_systems import (
     COMPONENT_KINDS,
     KIND_TABLES,
+    architecture_layers,
     resolve_component,
     system_health,
     system_summary,
@@ -219,10 +220,19 @@ async def system_detail(system_id: str, user=Depends(get_optional_user), db: Asy
             "name": name or c.ref_id[:8],
             "added_at": c.added_at.isoformat() if c.added_at else None,
         })
+    # v67: derived medallion layers over the bound workflows (staging /
+    # curated / dead_letter, classified from dataset_write node targets)
+    wf_rows: dict[str, Workflow] = {}
+    for c in s.components or []:
+        if c.kind == "workflow" and c.ref_id not in wf_rows:
+            wf = await db.get(Workflow, c.ref_id)
+            if wf is not None:
+                wf_rows[c.ref_id] = wf
     return {
         **system_summary(s),
         "my_role": my_role,
         "grouped": grouped,
+        "architecture": architecture_layers(s, wf_rows),
         "health": await system_health(db, s),
     }
 

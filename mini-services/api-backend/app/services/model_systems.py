@@ -308,6 +308,29 @@ async def model_system_detail(db: AsyncSession, ms: ModelSystem) -> dict:
         for m in model_rows if m.active
     ]
 
+    # ---- v67: LIVE ENDPOINTS - deployments serving this system's models ---
+    model_ids = {m.id for m in model_rows}
+    endpoints: list[dict] = []
+    if model_ids:
+        from ..models import ModelDeployment
+
+        dep_rows = (await db.execute(
+            select(ModelDeployment).where(ModelDeployment.model_registry_id.in_(model_ids))  # type: ignore[attr-defined]
+        )).scalars().all()
+        wf_cache: dict[str, Workflow | None] = {}
+        for d in dep_rows:
+            if d.workflow_id not in wf_cache:
+                wf_cache[d.workflow_id] = await db.get(Workflow, d.workflow_id) if d.workflow_id else None
+            wf = wf_cache[d.workflow_id]
+            endpoints.append({
+                "id": d.id, "name": d.name, "environment": d.environment,
+                "enabled": bool(d.enabled), "serving_mode": d.serving_mode,
+                "model_id": d.model_registry_id,
+                "status": "live" if (d.enabled and wf is not None and wf.is_active) else
+                          ("disabled" if not d.enabled else "inactive"),
+                "webhook_path": f"/api/v1/webhooks/{d.workflow_id}" if d.workflow_id else None,
+            })
+
     # ---- monitoring: drift capability coverage --------------------------
     monitored = [m for m in model_rows if m.reference_stats]
     monitoring = {
@@ -332,6 +355,7 @@ async def model_system_detail(db: AsyncSession, ms: ModelSystem) -> dict:
                       "family": _family(m.algorithm), "active": m.active,
                       "component_id": comp_ids.get(("model", m.id))} for m in model_rows],
         "deployment": deployment,
+        "endpoints": endpoints,
         "monitoring": monitoring,
         "retraining": retraining,
         "reports": reports_out,

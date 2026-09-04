@@ -38,6 +38,9 @@ from .datascience import _save_artifact_row
 
 _UNK, _BOS = "<unk>", "<bos>"
 _TOKEN_RE = re.compile(r"[a-z0-9']+")
+# v67: the numpy CPU core refuses TRAINING contexts beyond this (inline speed
+# honesty); the torch backend accepts n_ctx up to 512. Serving is never capped.
+_NUMPY_MAX_CTX = 64
 
 
 def _tokenize(text: str) -> list[str]:
@@ -709,8 +712,9 @@ class LMTrainNode(BaseNode):
         vocab_size: int = Field(default=600, ge=50, le=8000, description="Vocabulary cap (BPE counts the 256 byte tokens + 2 specials)")
         d_model: int = Field(default=32, ge=8, le=256)
         n_heads: int = Field(default=2, ge=1, le=8)
-        n_ctx: int = Field(default=16, ge=4, le=64, description="Context window in tokens")
+        n_ctx: int = Field(default=16, ge=4, le=512, description="Context window in tokens (>64 requires the torch backend)")
         n_blocks: int = Field(default=1, ge=1, le=3)
+        grad_accum: int = Field(default=1, ge=1, le=16, description="Gradient accumulation micro-batches (torch backend only) - effective batch = batch_size * grad_accum")
         epochs: int = Field(default=20, ge=1, le=300)
         batch_size: int = Field(default=8, ge=1, le=128)
         learning_rate: float = Field(default=0.003, gt=0, le=0.1)
@@ -823,6 +827,16 @@ class LMTrainNode(BaseNode):
             else:
                 net = _TinyLM(seed=p.seed, **cfg)
 
+        # v67 larger-context honesty: training beyond a 64-token context is a
+        # torch-backend privilege (the numpy core stays trainable at inline
+        # speed); SERVING a large-context model from numpy is still fine -
+        # lm_generate slides the window and only ever runs forward passes.
+        if dev["backend"] != "torch" and int(cfg["n_ctx"]) > _NUMPY_MAX_CTX:
+            raise NodeExecutionError(
+                f"training with n_ctx={cfg['n_ctx']} needs the torch backend - the numpy CPU core "
+                f"caps training contexts at {_NUMPY_MAX_CTX} tokens to stay honest about inline "
+                "speed (set device=torch/auto/gpu for larger contexts, or lower n_ctx)")
+
         doc_ids = [_encode_with(t, vocab, tokenizer_state) for t in texts]
         total_tokens = sum(len(d) for d in doc_ids)
         if total_tokens < 40:
@@ -852,7 +866,8 @@ class LMTrainNode(BaseNode):
 
         history = net.fit(train_windows, val_windows, epochs=p.epochs, batch_size=p.batch_size,
                           lr=p.learning_rate, patience=p.patience, seed=p.seed,
-                          conds_train=train_conds, conds_val=val_conds)
+                          conds_train=train_conds, conds_val=val_conds,
+                          **({} if p.grad_accum <= 1 else {"grad_accum": p.grad_accum}))
         val_loss = net.eval_loss(val_windows, val_conds) if val_windows else history["train_loss"][-1]
         perplexity = round(float(min(np.exp(min(val_loss, 20.0)), 5e8)), 2)
 
@@ -877,7 +892,10 @@ class LMTrainNode(BaseNode):
             "chars_per_token": round(sum(len(t) for t in texts) / max(total_tokens, 1), 3),
             "multimodal": bool(conds is not None),
             "condition_dim": len(cond_cols) if conds is not None else 0,
+            "context_length": int(cfg["n_ctx"]),
         }
+        if p.grad_accum > 1:
+            metrics["grad_accum"] = p.grad_accum
         if conds is not None:
             metrics["condition_columns"] = cond_cols[:8]
         continued_from = None
@@ -1016,7 +1034,7 @@ class LMGenerateNode(BaseNode):
         prompt: str = Field(default="", description="Prompt text - supports {{ expressions }}",
                             json_schema_extra={"widget": "textarea", "rows": 3})
         condition: str = Field(default="", description="Condition vector for multimodal LMs: JSON array or comma/space-separated numbers - supports {{ expressions }}")
-        max_tokens: int = Field(default=16, ge=1, le=64, description="Tokens to sample (clipped to the model's context window)")
+        max_tokens: int = Field(default=16, ge=1, le=512, description="Tokens to sample (beyond the model's context window the context SLIDES - v67)")
         temperature: float = Field(default=0.8, gt=0, le=2)
         top_k: int = Field(default=40, ge=0, description="Keep only the k most likely tokens (0 = off)")
         seed: int = Field(default=42)
@@ -1082,14 +1100,19 @@ class LMGenerateNode(BaseNode):
 
         prompt = str(p.prompt or "").strip()
         ids = _encode_with(prompt, vocab, tokenizer_state) if prompt else []
-        max_new = min(p.max_tokens, int(cfg["n_ctx"]))
-        gen_ids = net.generate(ids, max_new, temperature=p.temperature,
+        # v67: generation is no longer clipped to the model's context - both
+        # cores slide the window (ids[-n_ctx:]) every step, so long generations
+        # just lose sight of the oldest tokens. Honest metadata records it.
+        model_ctx = int(cfg["n_ctx"])
+        gen_ids = net.generate(ids, p.max_tokens, temperature=p.temperature,
                                top_k=p.top_k, seed=p.seed, cond=cond)
         text = _decode_with(gen_ids, vocab, tokenizer_state)
         out = {
             "items": [{"prompt": prompt, "generated": text}],
             "text": text,
             "tokens_generated": len(gen_ids),
+            "context_window": model_ctx,
+            "window_slid": (len(ids) + len(gen_ids)) > model_ctx,
             "tokenizer": tokenizer_state.get("type") or "word",
             "conditioned": cond_dim > 0,
             "device": dev["resolved"],

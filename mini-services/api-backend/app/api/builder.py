@@ -122,6 +122,8 @@ def _built_summary(built: dict | None) -> dict:
     return {
         "workflow_id": built.get("workflow_id"),
         "dataset_id": built.get("dataset_id"),
+        "staging_dataset_id": built.get("staging_dataset_id"),
+        "dead_letter_dataset_id": built.get("dead_letter_dataset_id"),
         "dashboard_id": built.get("dashboard_id"),
         "report_id": built.get("report_id"),
     }
@@ -212,6 +214,8 @@ async def build_system_draft(draft_id: str, body: BuildRequest | None = None, us
         for kind, ref in (
             ("workflow", built.get("workflow_id")),
             ("dataset", built.get("dataset_id")),
+            ("dataset", built.get("staging_dataset_id")),  # v67 architecture layers
+            ("dataset", built.get("dead_letter_dataset_id")),
             ("dashboard", built.get("dashboard_id")),
             ("report", built.get("report_id")),
         ):

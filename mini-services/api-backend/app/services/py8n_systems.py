@@ -74,6 +74,71 @@ def _slug_counts(components: list[SystemComponent]) -> dict:
     return counts
 
 
+_DL_NAME_RE = ("dead letter", "dead_letter", "dead-letter", "deadletter")
+
+
+def architecture_layers(system: Py8nSystem, workflows: dict[str, Workflow]) -> dict:
+    """v67: the system's data architecture DERIVED from bound graphs.
+
+    Every bound workflow's dataset_write nodes classify into medallion
+    layers by target name: 'staging' -> staging (bronze), 'dead letter' ->
+    dead_letter (reject lane), everything else -> curated. Nothing is
+    stored; a system with no writes simply has no layers.
+
+    ``workflows`` maps workflow_id -> the loaded Workflow row (the caller
+    resolves them for the detail payload anyway).
+    """
+    layers: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for c in system.components or []:
+        if c.kind != "workflow":
+            continue
+        wf = workflows.get(c.ref_id)
+        graph = (wf.graph if wf is not None else None) or {}
+        for node in graph.get("nodes", []):
+            if node.get("type") != "dataset_write":
+                continue
+            target = str((node.get("parameters") or {}).get("dataset") or "")
+            if not target:
+                continue
+            low = target.lower()
+            if any(marker in low for marker in _DL_NAME_RE):
+                layer = "dead_letter"
+            elif "staging" in low:
+                layer = "staging"
+            else:
+                layer = "curated"
+            key = (layer, target)
+            if key not in seen:
+                seen.add(key)
+                layers.append({
+                    "layer": layer,
+                    "dataset": target,
+                    "mode": (node.get("parameters") or {}).get("mode") or "append",
+                    "workflow_id": c.ref_id,
+                    "workflow": (wf.name if wf is not None else None) or c.ref_id[:8],
+                })
+            # v67: a write node carrying a dead_letter_dataset param routes its
+            # rejects into a quarantine dataset - that param IS the reject lane
+            dl_target = str((node.get("parameters") or {}).get("dead_letter_dataset") or "")
+            if dl_target and (layer, dl_target) not in seen:
+                seen.add((layer, dl_target))
+                layers.append({
+                    "layer": "dead_letter",
+                    "dataset": dl_target,
+                    "mode": "quarantine",
+                    "workflow_id": c.ref_id,
+                    "workflow": (wf.name if wf is not None else None) or c.ref_id[:8],
+                })
+    order = {"staging": 0, "curated": 1, "dead_letter": 2}
+    layers.sort(key=lambda l: (order.get(l["layer"], 3), l["dataset"]))
+    return {
+        "layers": layers,
+        "staging": any(l["layer"] == "staging" for l in layers),
+        "dead_letter": any(l["layer"] == "dead_letter" for l in layers),
+    }
+
+
 async def system_health(db: AsyncSession, system: Py8nSystem) -> dict:
     """Derived health for one system - nothing stored.
 

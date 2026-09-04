@@ -4,8 +4,11 @@ A contract is the schema a dataset PROMISES: per column, a dtype, a
 nullability flag and an optional allowed-value domain. Contracts are
 checked at WRITE time (dataset_write node, rows API) BEFORE rows land:
 
-* ``on_violation="error"`` -> the write raises (pipeline hard-stop);
-* ``on_violation="warn"``  -> the write proceeds with a violations report.
+* ``on_violation="error"``       -> the write raises (pipeline hard-stop);
+* ``on_violation="warn"``        -> the write proceeds with a violations report;
+* ``on_violation="dead_letter"`` -> (v67) failing rows are QUARANTINED into a
+  dead-letter dataset (stamped ``_dl_reasons`` / ``_dl_at``) and only passing
+  rows land - the medallion architecture's reject lane.
 
 Checking is CASTABILITY-based: ``"12"`` satisfies an integer column and
 ``"true"`` satisfies a boolean column, because stringly-typed payloads
@@ -20,7 +23,7 @@ the FastAPI layer and the node layer can call it without ceremony.
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -44,8 +47,8 @@ def validate_contract_def(columns: list, on_violation: str = "warn") -> list[dic
     Raises ContractError (-> API 400) when the definition is malformed:
     unknown dtype, empty/duplicate names, non-list allowed values.
     """
-    if on_violation not in ("warn", "error"):
-        raise ContractError("on_violation must be 'warn' or 'error'")
+    if on_violation not in ("warn", "error", "dead_letter"):
+        raise ContractError("on_violation must be 'warn', 'error' or 'dead_letter'")
     if not isinstance(columns, list) or not columns:
         raise ContractError("a contract needs at least one column definition")
     out: list[dict] = []
@@ -175,6 +178,51 @@ def check_rows(rows: list[dict], columns: list[dict], max_samples: int = 5) -> d
         "checked_columns": len(columns),
         "violations": violations,
     }
+
+
+def split_rows_dead_letter(rows: list[dict], columns: list[dict]) -> tuple[list[dict], list[dict]]:
+    """v67 dead-letter routing: evaluate EVERY row against the contract
+    individually and split the batch into passing and failing rows.
+
+    Per-row rules mirror ``check_rows`` (not_null incl. absent keys, dtype
+    castability, allowed domain); a column absent from the WHOLE payload
+    (``missing_column``) marks every row bad - the shape itself is broken.
+    Failing rows come back as copies stamped with ``_dl_reasons`` (the
+    ``column:rule`` list) and ``_dl_at`` (ISO timestamp) so the quarantine
+    dataset is self-describing. Pure function - the caller owns the writes.
+    """
+    good: list[dict] = []
+    bad: list[dict] = []
+    stamped_at = datetime.now(timezone.utc).isoformat()
+    for row in rows:
+        if not isinstance(row, dict):  # defensive: callers pre-filter non-dicts
+            bad.append({"_dl_reasons": ["row:not_an_object"], "_dl_at": stamped_at, "row": row})
+            continue
+        reasons: list[str] = []
+        for col in columns:
+            name = col["name"]
+            if name not in row:
+                if not col.get("nullable", True):
+                    reasons.append(f"{name}:not_null")
+                continue  # absent key on a nullable column is fine
+            val = row.get(name)
+            if col.get("allowed"):
+                norm = {str(v) for v in col["allowed"]}
+                if val is not None and str(val).strip() != "" and str(val) not in norm:
+                    reasons.append(f"{name}:allowed")
+            if not col.get("nullable", True) and (val is None or str(val or "").strip() == ""):
+                reasons.append(f"{name}:not_null")
+                continue
+            if not _castable(val, col["dtype"]):
+                reasons.append(f"{name}:dtype")
+        if reasons:
+            quarantined = dict(row)
+            quarantined["_dl_reasons"] = reasons
+            quarantined["_dl_at"] = stamped_at
+            bad.append(quarantined)
+        else:
+            good.append(row)
+    return good, bad
 
 
 async def get_contract(db: AsyncSession, dataset_id: str) -> DatasetContract | None:
