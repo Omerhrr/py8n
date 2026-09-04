@@ -711,7 +711,7 @@ class ModelPredictNode(BaseNode):
             raise NodeExecutionError(f"Model artifact is corrupted: {exc}") from exc
 
         # legacy v28 pickles are bare estimators - normalize to the v46 payload
-        if not isinstance(payload, dict) or "pipeline" not in payload:
+        if not isinstance(payload, dict) or ("pipeline" not in payload and "kind" not in payload):
             payload = {
                 "pipeline": payload, "labeler": None, "task": info.get("task") or "regression",
                 "algorithm": info.get("algorithm") or "unknown", "target": info.get("target") or "",
@@ -732,6 +732,52 @@ class ModelPredictNode(BaseNode):
                 f"Model {info['name']} v{info['version']} needs feature column(s) {missing} - available: {[str(c) for c in df.columns]}"
             )
         X = df[feats] if feats else df
+
+        # v63: neural artifacts score through their numpy MLP (prep + net)
+        if payload.get("kind") == "neural":
+            from .modal import _MLP
+
+            prep = payload["prep"]
+            net = _MLP.from_state(payload["mlp"])
+            labeler = payload.get("labeler")
+            Xn = X.apply(pd.to_numeric, errors="coerce")
+            try:
+                Xv = prep.transform(Xn)
+                raw_pred = net.predict(Xv)
+            except Exception as exc:  # noqa: BLE001
+                raise NodeExecutionError(f"Scoring failed: {type(exc).__name__}: {exc}") from exc
+
+            if raw_pred.ndim == 2:  # one-hot style head -> argmax class index
+                pred = raw_pred.argmax(axis=1)
+                probas = net.predict_proba(Xv) if p.probability_column else None
+                best = probas.max(axis=1) if probas is not None else None
+            else:  # regression / binary scalar head
+                pred = raw_pred
+                probas = None
+                best = None
+
+            def _label(value: Any) -> Any:
+                if labeler is not None:
+                    return str(labeler.inverse_transform([int(round(float(value)))])[0])
+                num = float(value)
+                return int(num) if num.is_integer() else round(num, 6)
+
+            out_items: list[dict] = []
+            for i, item in enumerate(rows):
+                rec = dict(item)
+                rec["prediction"] = _label(pred[i])
+                if best is not None:
+                    rec[p.probability_column or "prediction_proba"] = round(float(best[i]), 4)
+                out_items.append(rec)
+            return self._single({
+                "items": out_items,
+                "predicted": len(out_items),
+                "rows_in": len(rows),
+                "model": {
+                    "id": info["id"], "name": info["name"], "version": info["version"],
+                    "algorithm": info["algorithm"], "task": info["task"],
+                },
+            })
 
         pipeline = payload["pipeline"]
         labeler = payload.get("labeler")

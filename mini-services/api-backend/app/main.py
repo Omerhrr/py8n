@@ -86,6 +86,7 @@ from .api.observability import router as observability_router  # noqa: E402 (v53
 from .api.builder import router as builder_router  # noqa: E402 (v59)
 from .api.solutions import router as solutions_router  # noqa: E402 (v60)
 from .api.systems import router as systems_router  # noqa: E402 (v61)
+from .api.model_systems import router as model_systems_router  # noqa: E402 (v63)
 from .api.ops import router as ops_router  # noqa: E402 (v57)
 from .api.packs import router as packs_router  # noqa: E402 (v39)
 from .api.registries import router as registries_router  # noqa: E402 (v43)
@@ -143,6 +144,7 @@ app.include_router(observability_router, prefix=API, dependencies=ENFORCED)  # v
 app.include_router(builder_router, prefix=API, dependencies=ENFORCED)  # v59
 app.include_router(solutions_router, prefix=API, dependencies=ENFORCED)  # v60
 app.include_router(systems_router, prefix=API, dependencies=ENFORCED)  # v61
+app.include_router(model_systems_router, prefix=API, dependencies=ENFORCED)  # v63
 app.include_router(ops_router, prefix=API, dependencies=ENFORCED)  # v57
 app.include_router(ws_router)  # /ws/...
 

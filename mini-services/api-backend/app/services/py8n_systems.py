@@ -27,6 +27,7 @@ from ..models import (
     Dashboard,
     Dataset,
     ExecutionLog,
+    ModelSystem,
     Py8nSystem,
     ReportDeliveryEvent,
     ScheduledReport,
@@ -36,7 +37,7 @@ from ..models import (
 )
 from .health import compute_health
 
-COMPONENT_KINDS = ("workflow", "dataset", "app", "dashboard", "model", "report")
+COMPONENT_KINDS = ("workflow", "dataset", "app", "dashboard", "model", "report", "model_system")
 KIND_TABLES = {
     "workflow": Workflow,
     "dataset": Dataset,
@@ -44,6 +45,7 @@ KIND_TABLES = {
     "dashboard": Dashboard,
     "model": TrainedModel,
     "report": ScheduledReport,
+    "model_system": ModelSystem,  # v63: the model-building operating unit
 }
 HEALTH_BUDGET = 10  # datasets fully health-scored per system-health call
 
@@ -89,6 +91,7 @@ async def system_health(db: AsyncSession, system: Py8nSystem) -> dict:
     wf_ids = [c.ref_id for c in comps if c.kind == "workflow"]
     ds_ids = [c.ref_id for c in comps if c.kind == "dataset"]
     report_ids = [c.ref_id for c in comps if c.kind == "report"]
+    model_system_ids = [c.ref_id for c in comps if c.kind == "model_system"]  # v63
 
     runs_7d = failures_7d = 0
     last_error = None
@@ -168,6 +171,7 @@ async def system_health(db: AsyncSession, system: Py8nSystem) -> dict:
                       "failure_rate_7d": failure_rate, "failing_workflows": failing_workflows[:5]},
         "datasets": datasets,
         "reports": {"bound": len(report_ids), **deliveries},
+        "model_systems": {"bound": len(model_system_ids)},
         "generated_at": now.isoformat(),
     }
 
