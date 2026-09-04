@@ -8,6 +8,8 @@
 * ``POST   /model-systems/{id}/components``     - bind dataset|model|workflow|report
 * ``DELETE /model-systems/{id}/components/{cid}`` - unbind
 * ``DELETE /model-systems/{id}``                - dissolve (members untouched)
+* ``GET    /model-systems/{id}/lifecycle``      - derived LM stage plan (v65)
+* ``POST   /model-systems/{id}/run-lifecycle``  - run pretrain->continue->generate in sequence (v65)
 
 Training happens in WORKFLOWS (model_train / neural_train nodes); the
 model system is the derived cockpit over what those runs produce.
@@ -28,10 +30,12 @@ from ..services.model_systems import (
     COMPONENT_KINDS,
     KIND_TABLES,
     CAPABILITIES,
+    derive_lifecycle,
     model_system_detail,
     model_system_health,
     model_system_summary,
     resolve_component,
+    run_lifecycle,
 )
 
 router = APIRouter(prefix="/model-systems", tags=["model-systems"])
@@ -58,6 +62,11 @@ class ModelSystemUpdate(BaseModel):
 class ComponentAttach(BaseModel):
     kind: str = Field(..., description=f"one of: {', '.join(COMPONENT_KINDS)}")
     ref_id: str = Field(..., min_length=1, max_length=36)
+
+
+class LifecycleRunRequest(BaseModel):
+    timeout_s: int | None = Field(default=None, ge=10, le=900,
+                                  description="Per-stage wait budget (default 240s, clamped 10-900)")
 
 
 async def _get_ms(db: AsyncSession, ms_id: str, user) -> ModelSystem:
@@ -117,7 +126,27 @@ async def list_model_systems(user=Depends(get_optional_user), db: AsyncSession =
 async def capabilities():
     """The honest modality matrix - what this build can extract today."""
     return {"capabilities": CAPABILITIES,
-            "note": "availability reflects inline-mode extraction; video frames should be sampled externally and ingested as images"}
+            "note": "availability reflects inline-mode extraction (v65: video frame sampling via OpenCV is available)"}
+
+
+@router.get("/{ms_id}/lifecycle")
+async def lifecycle(ms_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v65: the derived LM lifecycle plan (pretrain -> continue -> generate)
+    read off the bound workflows' graphs - nothing stored, nothing run."""
+    ms = await _get_ms(db, ms_id, user)
+    return await derive_lifecycle(db, ms)
+
+
+@router.post("/{ms_id}/run-lifecycle")
+async def run_lifecycle_endpoint(ms_id: str, body: LifecycleRunRequest | None = None,
+                                 user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v65: run the full LM lifecycle IN SEQUENCE through the real engine.
+
+    Each bound LM workflow (pretrain, then continue stages, then generate)
+    is dispatched and awaited; the sequence stops at the first failure.
+    """
+    ms = await _get_ms(db, ms_id, user)
+    return await run_lifecycle(db, ms, (body or LifecycleRunRequest()).timeout_s)
 
 
 @router.get("/{ms_id}")

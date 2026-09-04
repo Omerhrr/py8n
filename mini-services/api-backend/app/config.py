@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.64.0"
+    version: str = "1.65.0"
     # v54: public base URL for report drilldown links (PNG captions + json refs).
     # Empty = relative-only links (/d/{slug}?c={id}).
     public_url: str = ""
@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     # "celery" (distributed workers backed by Redis in production).
     # ------------------------------------------------------------------
     execution_mode: str = "inline"
+
+    # v65 device policy (GPU execution mode): the platform default for
+    # training-node device placement. Nodes may override per node with
+    # device=cpu|auto|gpu. py8n never fakes GPU compute: "gpu" fails loud
+    # with remediation when no usable accelerator + numeric bridge exists.
+    device_mode: str = "cpu"  # cpu | auto | gpu
 
     # Celery / Redis broker. Only used when execution_mode == "celery".
     redis_url: str = "redis://127.0.0.1:6379/0"

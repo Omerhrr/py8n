@@ -317,12 +317,12 @@ def test_v63_multimodal_feature_nodes():
             assert run4["status"] == "error"
             assert "WAV" in (run4.get("error") or "")
 
-            # the honest capability matrix
+            # the honest capability matrix (v65: video frame sampling is real)
             res = await client.get("/model-systems/capabilities", headers=h)
             caps = {c["modality"]: c for c in res.json()["capabilities"]}
             assert caps["text"]["available"] and caps["image"]["available"]
             assert caps["audio"]["available"] and caps["document"]["available"]
-            assert caps["video"]["available"] is False and "images" in caps["video"]["note"]
+            assert caps["video"]["available"] is True and "video_features" in caps["video"]["extractor"]
 
     asyncio.run(_go())
     try:

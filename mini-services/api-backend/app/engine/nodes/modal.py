@@ -14,6 +14,9 @@ from-scratch half of the ML story:
   same image always produces the same vector.
 * ``audio_features`` - stateless WAV features per row (duration, RMS,
   zero-crossing rate, FFT band energies, spectral centroid).
+* ``video_features`` - stateless OpenCV frame sampling per row (v65):
+  uniform frame selection, per-frame brightness/contrast/edge density,
+  clip-level duration + motion; the video gap in the capability matrix.
 * ``neural_train`` - a multilayer perceptron implemented in raw numpy
   (He init, ReLU/tanh, softmax cross-entropy or MSE, minibatch SGD with
   momentum or Adam, early stopping) - no sklearn estimator involved.
@@ -30,7 +33,9 @@ import base64
 import binascii
 import io
 import json
+import os
 import pickle
+import tempfile
 import time
 from typing import Any
 
@@ -529,6 +534,171 @@ class AudioFeaturesNode(BaseNode):
         })
 
 
+class VideoFeaturesNode(BaseNode):
+    """v65: stateless video frame sampling + clip features via OpenCV.
+
+    The roadmap's video-modality gap: each row's video (base64/data URL in
+    the chosen column) is decoded with cv2, MAX_FRAMES frames are sampled
+    UNIFORMLY across the clip, and every sampled frame yields brightness,
+    contrast and edge density.  Clip-level features (duration, frame count,
+    motion = mean absolute difference of consecutive sampled frames) are
+    merged back onto the row so the output feeds tabular trainers.
+    Stateless - the same clip always yields the same vector.
+    """
+
+    type = "video_features"
+    name = "Video Features"
+    description = (
+        "Samples frames uniformly from every row's video (base64/data URL "
+        "in the chosen column) via OpenCV: per-frame brightness, contrast "
+        "and edge density, plus clip-level duration, frame count and motion. "
+        "Stateless - the same clip always yields the same features."
+    )
+    category = "ai"
+    icon = "film"
+    color = "#fb7185"
+
+    class ParamsModel(BaseModel):
+        video_field: str = Field(default="video_b64", description="Column with base64/data-URL video bytes")
+        max_frames: int = Field(default=16, ge=1, le=256, description="Frames sampled uniformly across the clip")
+        frame_size: int = Field(default=64, ge=16, le=256, description="Frames are downscaled to this side for the stats")
+        prefix: str = Field(default="vid", description="Output column prefix")
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        try:
+            import cv2
+        except ImportError as exc:  # pragma: no cover - cv2 ships in requirements
+            raise NodeExecutionError(
+                "Video Features needs OpenCV (pip install opencv-python-headless) - "
+                f"import failed: {exc}") from exc
+
+        p = self.params  # type: VideoFeaturesNode.ParamsModel
+        items = _items(_working_data(context.current_input))
+        rows = [r for r in items if isinstance(r, dict)]
+        if not rows:
+            raise NodeExecutionError("Video Features needs object items")
+        prefix = p.prefix or "vid"
+        out_rows: list[dict] = []
+        all_frames: list[dict] = []
+
+        def _open_video(raw: bytes, row_i: int) -> tuple[Any, str]:
+            """cv2 decodes from a file path - probe the common containers
+            (OpenCV mostly sniffs content, some backends trust the suffix)
+            and fail loud with guidance when nothing opens."""
+            made: list[str] = []
+            for suffix in (".mp4", ".avi", ".mov", ".webm", ".mkv"):
+                fd, path = tempfile.mkstemp(suffix=suffix)
+                made.append(path)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(raw)
+                cap = cv2.VideoCapture(path)
+                if cap.isOpened():
+                    for stale in made[:-1]:
+                        if os.path.exists(stale):
+                            os.unlink(stale)
+                    return cap, path
+                cap.release()
+            for path in made:
+                if os.path.exists(path):
+                    os.unlink(path)
+            raise NodeExecutionError(
+                f"row {row_i}: cannot decode video ({len(raw)} bytes) - OpenCV opened none of "
+                "mp4/avi/mov/webm/mkv; re-encode to H.264 mp4 first")
+
+        def _count_frames(cap: Any) -> int:
+            n = 0
+            while True:
+                ok, _f = cap.read()
+                if not ok:
+                    return n
+                n += 1
+
+        for i, r in enumerate(rows):
+            raw = _decode_b64(r.get(p.video_field))
+            if not raw:
+                raise NodeExecutionError(f"row {i}: no video bytes in column {p.video_field!r}")
+
+            cap, path1 = _open_video(raw, i)
+            try:
+                reported = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                decoded = _count_frames(cap)
+            finally:
+                cap.release()
+                if os.path.exists(path1):
+                    os.unlink(path1)
+            total = decoded if reported <= 0 else min(reported, decoded)
+            if total < 1:
+                raise NodeExecutionError(f"row {i}: video contains no decodable frames")
+
+            # uniform sampling indices across the clip (deterministic)
+            k = min(p.max_frames, total)
+            sample_idx = sorted({round(j * (total - 1) / max(k - 1, 1)) for j in range(k)})
+
+            cap, path2 = _open_video(raw, i)
+            try:
+                per_frame: list[dict] = []
+                prev_small: np.ndarray | None = None
+                pos = 0
+                idx = 0
+                while pos < len(sample_idx):
+                    ok, frame = cap.read()
+                    if not ok:
+                        break
+                    if idx == sample_idx[pos]:
+                        small = cv2.resize(frame, (p.frame_size, p.frame_size))
+                        gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float64) / 255.0
+                        gx = np.abs(np.diff(gray, axis=1)).mean()
+                        gy = np.abs(np.diff(gray, axis=0)).mean()
+                        motion = float(np.abs(gray - prev_small).mean()) if prev_small is not None else 0.0
+                        per_frame.append({
+                            "row": i, "frame_index": idx,
+                            "timestamp_s": round(idx / fps, 4) if fps > 0 else None,
+                            "brightness": round(float(gray.mean()), 6),
+                            "contrast": round(float(gray.std()), 6),
+                            "edge_density": round(float((gx + gy) / 2), 6),
+                            "motion_vs_prev": round(motion, 6),
+                        })
+                        prev_small = gray
+                        pos += 1
+                    idx += 1
+            finally:
+                cap.release()
+                if os.path.exists(path2):
+                    os.unlink(path2)
+
+            if not per_frame:
+                raise NodeExecutionError(f"row {i}: no frames sampled - the video stream ended early")
+            bright = [f["brightness"] for f in per_frame]
+            edges = [f["edge_density"] for f in per_frame]
+            motions = [f["motion_vs_prev"] for f in per_frame[1:]]
+            rec = dict(r)
+            # do NOT echo megabytes of base64 back into the output - the
+            # emitted row carries a size marker instead (keeps the item
+            # model dataset-friendly and the logs under the capture cap)
+            if p.video_field in rec:
+                rec[p.video_field] = f"<video {len(raw)} bytes>"
+            rec[f"{prefix}_frames"] = total
+            rec[f"{prefix}_sampled"] = len(per_frame)
+            rec[f"{prefix}_duration_s"] = round(total / fps, 4) if fps > 0 else None
+            rec[f"{prefix}_fps"] = round(fps, 4) if fps > 0 else None
+            rec[f"{prefix}_brightness"] = round(float(np.mean(bright)), 6)
+            rec[f"{prefix}_brightness_std"] = round(float(np.std(bright)), 6)
+            rec[f"{prefix}_edge_density"] = round(float(np.mean(edges)), 6)
+            rec[f"{prefix}_motion"] = round(float(np.mean(motions)) if motions else 0.0, 6)
+            out_rows.append(rec)
+            all_frames.extend(per_frame)
+
+        return self._single({
+            "items": out_rows,
+            "rows_in": len(rows),
+            "frames": all_frames,
+            "dims": 8,
+            "note": (f"stateless cv2 frame sampling over {len(rows)} clip(s): "
+                     f"{len(all_frames)} frame(s), max {p.max_frames}/clip"),
+        })
+
+
 # ----------------------------------------------------------------- node: neural
 NEURAL_HYPERPARAMS = {"hidden_layers", "epochs", "batch_size", "learning_rate",
                       "optimizer", "weight_decay", "patience"}
@@ -565,6 +735,9 @@ class NeuralTrainNode(BaseNode):
         weight_decay: float = Field(default=0.0, ge=0.0, le=1.0)
         patience: int = Field(default=0, ge=0, le=100, description="Early stopping patience on val loss (0 = off)")
         seed: int = Field(default=42)
+        device: str = Field(default="cpu", json_schema_extra={
+            "widget": "select", "options": ["cpu", "auto", "gpu"]},
+            description="Device policy - py8n refuses to fake GPU compute (v65)")
         base_model: str = Field(default="", description="Registry name/id to fine-tune from (empty = from scratch)")
         model_name: str = Field(default="", description="Registry name (empty = 'neural_net')")
         register: bool = Field(default=True)
@@ -589,6 +762,12 @@ class NeuralTrainNode(BaseNode):
             raise NodeExecutionError(f"Neural training needs at least 10 rows (got {len(df)})")
         if p.target not in df.columns:
             raise NodeExecutionError(f"Target column {p.target!r} not found - available: {[str(c) for c in df.columns]}")
+        from ...services.devices import resolve_device
+
+        try:
+            dev = resolve_device(p.device)
+        except ValueError as exc:
+            raise NodeExecutionError(str(exc)) from exc
 
         # ---- fine-tune base? ----
         base_payload = None
@@ -701,6 +880,10 @@ class NeuralTrainNode(BaseNode):
         metrics["params_count"] = int(sum(W.size for W in net.weights) + sum(b.size for b in net.biases))
         metrics["architecture"] = "->".join(str(s) for s in net.layer_sizes)
         metrics["optimizer"] = p.optimizer
+        metrics["device"] = dev["resolved"]
+        metrics["device_backend"] = dev["backend"]
+        if dev.get("note"):
+            metrics["device_note"] = dev["note"]
         metrics["learning_rate"] = p.learning_rate
 
         fine_tuned_from = None

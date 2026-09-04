@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, BrainCircuit, Plus, CheckCircle2, XCircle, AlertTriangle, X,
   Workflow as WorkflowIcon, Database, Network, FileBarChart, Unlink,
-  Trash2, Layers, Radio, Repeat, Gauge, Sparkles,
+  Trash2, Layers, Radio, Repeat, Gauge, Sparkles, Languages, Play,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -35,6 +35,12 @@ interface Detail extends ModelSystemCard {
   monitoring: { versions: number; with_reference_stats: number; coverage_pct: number; drift_capable: boolean }
   retraining: { id: string; name: string; trainer: string[]; schedule: string; active: boolean }[]
   reports: { id: string; name: string; cron: string; fmt: string; enabled: boolean }[]
+  lifecycle: {
+    stages: { position: number; stage: string; workflow_id: string; workflow_name: string; active: boolean }[]
+    skipped: { workflow_id: string; workflow_name: string; reason: string }[]
+    lm_workflows: number
+    sequence: string
+  }
   health: {
     verdict: string
     workflows: { bound: number; runs_7d: number; failures_7d: number; failure_rate_7d: number }
@@ -60,6 +66,17 @@ const showAttach = ref(false)
 const attachKind = ref('dataset')
 const attachCandidates = ref<any[]>([])
 const attaching = ref(false)
+
+// v65: the LM lifecycle runner - one click runs pretrain -> continue ->
+// generate IN SEQUENCE through the real engine and reports what the model
+// produced at every stage.
+const lcRunning = ref(false)
+const lcResult = ref<any>(null)
+const stageChip: Record<string, string> = {
+  pretrain: 'bg-violet-500/20 text-violet-300',
+  continue: 'bg-purple-500/20 text-purple-300',
+  generate: 'bg-fuchsia-500/20 text-fuchsia-300',
+}
 
 const MODALITY_OPTIONS = ['tabular', 'text', 'image', 'audio', 'document', 'video', 'multimodal']
 const KIND_META: Record<string, { label: string; icon: any; color: string; endpoint: string }> = {
@@ -97,9 +114,30 @@ async function load() {
 async function openDetail(id: string) {
   try {
     detail.value = await api.get<Detail>(`/model-systems/${id}`)
+    lcResult.value = null
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load the model system'
   }
+}
+
+async function runLifecycle() {
+  if (!detail.value || lcRunning.value) return
+  lcRunning.value = true
+  lcResult.value = null
+  try {
+    lcResult.value = await api.post<any>(`/model-systems/${detail.value.id}/run-lifecycle`, {})
+    await openDetailKeepResult(detail.value.id)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'Lifecycle run failed'
+  } finally {
+    lcRunning.value = false
+  }
+}
+
+async function openDetailKeepResult(id: string) {
+  try {
+    detail.value = await api.get<Detail>(`/model-systems/${id}`)
+  } catch { /* keep the previous detail on refresh failure */ }
 }
 
 function toggleModality(m: string) {
@@ -365,6 +403,76 @@ onMounted(async () => {
                 <span class="truncate text-zinc-500" :title="c.extractor || c.note">{{ c.extractor || c.note }}</span>
               </div>
             </div>
+          </div>
+
+          <!-- v65: language-model lifecycle -->
+          <div v-if="detail.lifecycle?.stages?.length" class="mb-5 rounded-2xl border border-fuchsia-500/25 bg-fuchsia-500/5 p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <Languages class="h-3.5 w-3.5 text-fuchsia-300" />
+              <h3 class="text-xs font-bold text-fuchsia-200">Language model lifecycle</h3>
+              <span class="text-[10px] text-zinc-500">derived from the bound graphs - runs in this order</span>
+              <button
+                class="ml-auto flex items-center gap-1.5 rounded-xl bg-fuchsia-500 px-3.5 py-2 text-xs font-bold text-white transition hover:bg-fuchsia-400 disabled:opacity-50"
+                :disabled="lcRunning"
+                @click="runLifecycle"
+              >
+                <Loader2 v-if="lcRunning" class="h-3.5 w-3.5 animate-spin" />
+                <Play v-else class="h-3.5 w-3.5" />
+                {{ lcRunning ? 'Running the lifecycle...' : 'Run lifecycle' }}
+              </button>
+            </div>
+            <div class="mt-2 flex flex-wrap items-center gap-1.5">
+              <template v-for="(s, i) in detail.lifecycle.stages" :key="s.workflow_id">
+                <NuxtLink :to="`/workflows/${s.workflow_id}`"
+                          class="flex items-center gap-1.5 rounded-xl border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5 text-[11px] transition hover:border-fuchsia-500/40">
+                  <span class="grid h-4 w-4 place-items-center rounded-full bg-fuchsia-500/25 text-[9px] font-bold text-fuchsia-200">{{ s.position }}</span>
+                  <span class="rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase" :class="stageChip[s.stage] || 'bg-zinc-800 text-zinc-300'">{{ s.stage }}</span>
+                  <span class="font-semibold">{{ s.workflow_name }}</span>
+                </NuxtLink>
+                <span v-if="i < detail.lifecycle.stages.length - 1" class="text-zinc-600">→</span>
+              </template>
+            </div>
+            <p v-if="detail.lifecycle.skipped?.length" class="mt-2 text-[10px] text-zinc-600">
+              not part of the LM lifecycle: {{ detail.lifecycle.skipped.map(s => s.workflow_name).join(', ') }}
+            </p>
+
+            <!-- lifecycle run results -->
+            <div v-if="lcResult" class="mt-3 space-y-2">
+              <div class="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/70 px-3 py-2 text-[11px]">
+                <CheckCircle2 v-if="lcResult.summary?.stages_succeeded === lcResult.summary?.stages_total" class="h-3.5 w-3.5 text-emerald-400" />
+                <AlertTriangle v-else class="h-3.5 w-3.5 text-amber-400" />
+                <span class="font-bold">{{ lcResult.summary?.stages_succeeded }}/{{ lcResult.summary?.stages_total }} stages succeeded</span>
+                <template v-if="lcResult.summary?.perplexity_chain?.length">
+                  <span class="text-zinc-500">perplexity:</span>
+                  <span v-for="(p, i) in lcResult.summary.perplexity_chain" :key="i" class="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-fuchsia-200">ppl {{ p }}</span>
+                </template>
+                <span v-if="lcResult.summary?.total_seconds != null" class="ml-auto text-zinc-500">{{ lcResult.summary.total_seconds }}s</span>
+              </div>
+              <div v-for="s in lcResult.stages" :key="s.execution_id || s.position"
+                   class="rounded-xl border px-3 py-2 text-[11px]"
+                   :class="s.status === 'success' ? 'border-zinc-800 bg-zinc-950/60' : s.status === 'not_run' ? 'border-dashed border-zinc-800 text-zinc-500' : 'border-rose-500/40 bg-rose-500/5'">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="grid h-4 w-4 place-items-center rounded-full bg-fuchsia-500/25 text-[9px] font-bold text-fuchsia-200">{{ s.position }}</span>
+                  <span class="rounded-full px-1.5 py-0.5 text-[9px] font-bold uppercase" :class="stageChip[s.stage] || 'bg-zinc-800 text-zinc-300'">{{ s.stage }}</span>
+                  <span class="font-semibold">{{ s.workflow_name }}</span>
+                  <CheckCircle2 v-if="s.status === 'success'" class="h-3 w-3 text-emerald-400" />
+                  <XCircle v-else class="h-3 w-3 text-rose-400" />
+                  <span v-if="s.duration_ms != null" class="ml-auto text-[10px] text-zinc-500">{{ (s.duration_ms / 1000).toFixed(1) }}s</span>
+                </div>
+                <div v-if="s.status === 'success'" class="mt-1 flex flex-wrap gap-2 text-[10px] text-zinc-500">
+                  <span v-if="s.mode">{{ s.mode }}</span>
+                  <span v-if="s.perplexity != null">perplexity: <span class="text-zinc-300">{{ s.perplexity }}</span></span>
+                  <span v-if="s.vocabulary != null">vocab: <span class="text-zinc-300">{{ s.vocabulary }}</span></span>
+                  <span v-if="s.tokenizer">tokenizer: <span class="text-zinc-300">{{ s.tokenizer }}</span></span>
+                  <span v-if="s.continued_from" class="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-sky-300">continued from {{ s.continued_from }}</span>
+                  <span v-if="s.tokens_generated != null">tokens: <span class="text-zinc-300">{{ s.tokens_generated }}</span></span>
+                </div>
+                <p v-if="s.generated_text" class="mt-1 rounded-lg bg-zinc-900/80 px-2 py-1 font-mono text-[10px] text-fuchsia-200">"{{ s.generated_text }}"</p>
+                <p v-if="s.error" class="mt-1 text-[10px] text-rose-300">{{ s.error }}</p>
+              </div>
+              <p v-if="lcResult.note" class="text-[10px] text-zinc-500">{{ lcResult.note }}</p>
+            </div>
+            <p v-else-if="!lcRunning" class="mt-2 text-[10px] text-zinc-600">one click runs every stage through the real engine: pretrain → continued pretraining → sample text from the registered model</p>
           </div>
 
           <div class="grid gap-5 lg:grid-cols-2">

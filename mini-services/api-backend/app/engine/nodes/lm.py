@@ -440,6 +440,123 @@ def _decode(ids: list[int], id2tok: dict[int, str]) -> str:
     return " ".join(id2tok.get(i, _UNK) for i in ids if i != 1)
 
 
+# ------------------------------------------------------- byte-level BPE (v65)
+# A self-contained byte-level Byte-Pair-Encoding tokenizer (GPT-style, minus
+# the regex pre-tokenizer): every one of the 256 bytes starts as its own
+# token and the trainer repeatedly merges the most frequent adjacent pair
+# until the vocabulary cap is reached.  Because the base alphabet covers all
+# bytes, encoding is LOSSLESS - decode(encode(text)) == text for ANY input,
+# including characters never seen during training (they fall back to raw
+# bytes instead of an <unk> hole).
+_BPE_MIN_VOCAB = 258  # 1 <unk> + 1 <bos> + 256 byte tokens
+
+
+class _BPE:
+    """Trained byte-level BPE: vocab maps token string -> id; merges is the
+    ordered list of (left, right) pairs.  Token strings are single characters
+    for the 256 base bytes (chr(byte)) and concatenated characters for
+    merges, so id -> string -> bytes roundtrips exactly."""
+
+    def __init__(self, vocab: dict[str, int], merges: list[tuple[str, str]]):
+        self.vocab = vocab
+        self.merges = merges
+        self._ranks: dict[tuple[str, str], int] = {pair: i for i, pair in enumerate(merges)}
+        self._cache: dict[str, list[int]] = {}
+
+    @classmethod
+    def train(cls, texts: list[str], vocab_size: int) -> "_BPE":
+        vocab_size = max(int(vocab_size), _BPE_MIN_VOCAB)
+        vocab: dict[str, int] = {_UNK: 0, _BOS: 1}
+        for b in range(256):
+            vocab[chr(b)] = 2 + b
+        seqs = [[chr(b) for b in (text or "").encode("utf-8")] for text in texts]
+        seqs = [s for s in seqs if s]
+        merges: list[tuple[str, str]] = []
+        while len(vocab) < vocab_size:
+            counts: Counter = Counter()
+            for s in seqs:
+                for a, c in zip(s, s[1:]):
+                    counts[(a, c)] += 1
+            if not counts:
+                break
+            # most frequent pair (ties break lexicographically for determinism)
+            # whose concatenation is not already a token - two different pairs
+            # can concatenate to the same string ("a"+"bc" vs "ab"+"c"); the
+            # duplicate is skipped and training continues with the next pair.
+            ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            best = next((p for p, c in ranked if c >= 2 and p[0] + p[1] not in vocab), None)
+            if best is None:
+                break
+            new_tok = best[0] + best[1]
+            vocab[new_tok] = len(vocab)
+            merges.append(best)
+            seqs = [_merge_seq(s, best, new_tok) for s in seqs]
+        return cls(vocab, merges)
+
+    def encode(self, text: str) -> list[int]:
+        cached = self._cache.get(text)
+        if cached is not None:
+            return list(cached)
+        symbols = [chr(b) for b in (text or "").encode("utf-8")]
+        for a, b in self.merges:
+            symbols = _merge_seq(symbols, (a, b), a + b)
+        ids = [self.vocab[s] for s in symbols]
+        self._cache[text] = list(ids)
+        return ids
+
+    def decode(self, ids: list[int]) -> str:
+        id2tok = {i: t for t, i in self.vocab.items()}
+        raw = "".join(id2tok.get(int(i), "") for i in ids if int(i) != _BOS_ID)
+        return raw.encode("latin-1").decode("utf-8", errors="replace")
+
+    def state(self) -> dict:
+        return {"type": "bpe", "vocab": dict(self.vocab), "merges": [list(p) for p in self.merges]}
+
+    @classmethod
+    def from_state(cls, st: dict) -> "_BPE":
+        return cls(dict(st["vocab"]), [(a, b) for a, b in st["merges"]])
+
+
+_BOS_ID = 1
+
+
+def _merge_seq(symbols: list[str], pair: tuple[str, str], new_tok: str) -> list[str]:
+    """Replace every non-overlapping occurrence of ``pair`` inside ``symbols``."""
+    out: list[str] = []
+    i = 0
+    n = len(symbols)
+    a, b = pair
+    while i < n:
+        if i < n - 1 and symbols[i] == a and symbols[i + 1] == b:
+            out.append(new_tok)
+            i += 2
+        else:
+            out.append(symbols[i])
+            i += 1
+    return out
+
+
+def _fit_tokenizer(texts: list[str], kind: str, vocab_size: int) -> tuple[dict[str, int], dict]:
+    """Returns (vocab, tokenizer_state) for the requested tokenizer kind."""
+    if kind == "bpe":
+        tok = _BPE.train(texts, vocab_size)
+        return dict(tok.vocab), tok.state()
+    return _fit_vocab(texts, vocab_size), {"type": "word"}
+
+
+def _encode_with(text: str, vocab: dict[str, int], tokenizer: dict) -> list[int]:
+    if (tokenizer or {}).get("type") == "bpe":
+        return _BPE.from_state(tokenizer).encode(text)
+    return _encode(text, vocab)
+
+
+def _decode_with(ids: list[int], vocab: dict[str, int], tokenizer: dict) -> str:
+    if (tokenizer or {}).get("type") == "bpe":
+        return _BPE.from_state(tokenizer).decode(ids)
+    id2tok = {i: t for t, i in vocab.items()}
+    return _decode(ids, id2tok)
+
+
 def _windows(doc_ids: list[int], n_ctx: int) -> list[list[int]]:
     """Slide a (n_ctx + 1)-token window over one document; short documents
     are left-padded with <bos> so every position keeps a real target."""
@@ -499,7 +616,10 @@ class LMTrainNode(BaseNode):
     class ParamsModel(BaseModel):
         text_column: str = Field(default="", description="Column holding the raw text")
         base_model: str = Field(default="", description="Registry name/id of an lm_train model to continue pretraining from (empty = from scratch)")
-        vocab_size: int = Field(default=600, ge=50, le=8000, description="Word vocabulary cap (from-scratch only)")
+        tokenizer: str = Field(default="word", json_schema_extra={
+            "widget": "select", "options": ["word", "bpe"]},
+            description="word = regex word vocabulary; bpe = byte-level Byte Pair Encoding (v65, lossless roundtrip)")
+        vocab_size: int = Field(default=600, ge=50, le=8000, description="Vocabulary cap (BPE counts the 256 byte tokens + 2 specials)")
         d_model: int = Field(default=32, ge=8, le=256)
         n_heads: int = Field(default=2, ge=1, le=8)
         n_ctx: int = Field(default=16, ge=4, le=64, description="Context window in tokens")
@@ -509,6 +629,9 @@ class LMTrainNode(BaseNode):
         learning_rate: float = Field(default=0.003, gt=0, le=0.1)
         patience: int = Field(default=0, ge=0, le=50, description="Early stopping patience on val loss (0 = off)")
         seed: int = Field(default=42)
+        device: str = Field(default="cpu", json_schema_extra={
+            "widget": "select", "options": ["cpu", "auto", "gpu"]},
+            description="Device policy - py8n refuses to fake GPU compute (v65)")
         model_name: str = Field(default="", description="Registry name (empty = 'lm_base')")
         register: bool = Field(default=True)
 
@@ -524,6 +647,19 @@ class LMTrainNode(BaseNode):
             raise NodeExecutionError(
                 f"Language-model training needs at least 8 non-empty text rows (got {len(texts)})")
 
+        if p.tokenizer not in ("word", "bpe"):
+            raise NodeExecutionError(f"unknown tokenizer {p.tokenizer!r} (allowed: word, bpe)")
+        if p.tokenizer == "bpe" and not p.base_model.strip() and p.vocab_size < _BPE_MIN_VOCAB:
+            raise NodeExecutionError(
+                f"the BPE tokenizer always carries all 256 byte tokens + 2 specials, "
+                f"so vocab_size must be >= {_BPE_MIN_VOCAB} (got {p.vocab_size})")
+        from ...services.devices import resolve_device
+
+        try:
+            dev = resolve_device(p.device)
+        except ValueError as exc:
+            raise NodeExecutionError(str(exc)) from exc
+
         # ---- continue pretraining from the registry? ----
         base_payload = None
         if p.base_model.strip():
@@ -536,17 +672,18 @@ class LMTrainNode(BaseNode):
                     "is not a language model; pretrain one first with lm_train")
             net = _TinyLM.from_state(base_payload["net"])
             vocab = dict(base_payload["vocab"])
+            tokenizer_state = dict(base_payload.get("tokenizer") or {"type": "word"})
             cfg = dict(base_payload["config"])
 
         if base_payload is None:
             if p.d_model % p.n_heads != 0:
                 raise NodeExecutionError(f"d_model {p.d_model} is not divisible by n_heads {p.n_heads}")
-            vocab = _fit_vocab(texts, p.vocab_size)
+            vocab, tokenizer_state = _fit_tokenizer(texts, p.tokenizer, p.vocab_size)
             cfg = {"vocab_size": len(vocab), "d_model": p.d_model, "n_heads": p.n_heads,
                    "n_ctx": p.n_ctx, "n_blocks": p.n_blocks}
             net = _TinyLM(seed=p.seed, **cfg)
 
-        doc_ids = [_encode(t, vocab) for t in texts]
+        doc_ids = [_encode_with(t, vocab, tokenizer_state) for t in texts]
         total_tokens = sum(len(d) for d in doc_ids)
         if total_tokens < 40:
             raise NodeExecutionError(
@@ -578,17 +715,26 @@ class LMTrainNode(BaseNode):
             "train_seconds": history["train_seconds"],
             "optimizer": "adam",
             "learning_rate": p.learning_rate,
+            "device": dev["resolved"],
+            "device_backend": dev["backend"],
+            "tokenizer": (tokenizer_state.get("type") or "word") + (
+                f" ({len(tokenizer_state.get('merges') or [])} merges)"
+                if tokenizer_state.get("type") == "bpe" else ""),
+            "chars_per_token": round(sum(len(t) for t in texts) / max(total_tokens, 1), 3),
         }
         continued_from = None
         if base_payload is not None:
             continued_from = {"registry_id": base_info["id"], "name": base_info["name"],
                               "version": base_info["version"]}
             metrics["continued_pretrained_from"] = f"{base_info['name']} v{base_info['version']}"
+        if dev.get("note"):
+            metrics["device_note"] = dev["note"]
 
         payload = {
             "kind": "lm",
             "net": net.state(),
             "vocab": vocab,
+            "tokenizer": tokenizer_state,
             "config": cfg,
             "task": "language_modeling",
             "algorithm": "lm_transformer",
@@ -631,13 +777,12 @@ class LMTrainNode(BaseNode):
                 await session.commit()
                 registry_row = model_svc.model_out(row)
 
-        id2tok = {i: t for t, i in vocab.items()}
         sample_items = []
         for doc in val_docs[:10]:
             wins = _windows(doc, int(cfg["n_ctx"]))
             dl = net.eval_loss(wins) if wins else None
             sample_items.append({
-                "text": _decode(doc, id2tok)[:160],
+                "text": _decode_with(doc, vocab, tokenizer_state)[:160],
                 "tokens": len(doc),
                 "ce_loss": round(float(dl), 4) if dl is not None and dl == dl else None,
             })
@@ -695,18 +840,19 @@ class LMGenerateNode(BaseNode):
                 "is not a language model; train one with lm_train first")
         net = _TinyLM.from_state(payload["net"])
         vocab = payload["vocab"]
+        tokenizer_state = dict(payload.get("tokenizer") or {"type": "word"})
         cfg = payload["config"]
         prompt = str(p.prompt or "").strip()
-        ids = _encode(prompt, vocab) if prompt else []
+        ids = _encode_with(prompt, vocab, tokenizer_state) if prompt else []
         max_new = min(p.max_tokens, int(cfg["n_ctx"]))
         gen_ids = net.generate(ids, max_new, temperature=p.temperature,
                                top_k=p.top_k, seed=p.seed)
-        id2tok = {i: t for t, i in vocab.items()}
-        text = _decode(gen_ids, id2tok)
+        text = _decode_with(gen_ids, vocab, tokenizer_state)
         return self._single({
             "items": [{"prompt": prompt, "generated": text}],
             "text": text,
             "tokens_generated": len(gen_ids),
+            "tokenizer": tokenizer_state.get("type") or "word",
             "model": {"id": info["id"], "name": info["name"], "version": info["version"],
                       "algorithm": info["algorithm"]},
         })

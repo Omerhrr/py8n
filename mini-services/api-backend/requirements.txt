@@ -23,6 +23,7 @@ duckdb>=1.0            # dataset parquet storage + run_sql analytics
 scikit-learn>=1.4      # train/predict nodes
 matplotlib>=3.8        # chart artifacts (Agg backend)
 anyio>=4               # direct dep: user-code sandbox bounded thread pool
+opencv-python-headless>=4.9  # v65: video_features frame sampling (headless containers)
 
 # Document extraction (v32 documents node)
 pdfplumber>=0.11       # pdf text/tables

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { Play, Webhook, Clock, Globe, GitBranch, Braces, Terminal, Hourglass, Brain, BrainCircuit, Languages, Sparkles, Box, Search, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, CirclePause } from 'lucide-vue-next'
+import { Play, Webhook, Clock, Globe, GitBranch, Braces, Terminal, Hourglass, Brain, BrainCircuit, Languages, Sparkles, Film, Box, Search, Filter, Split, GitMerge, Ungroup, Sigma, Workflow, Repeat, Mail, Slack, CirclePause } from 'lucide-vue-next'
 import type { NodeDefinition } from '~/types/node'
 
 const props = defineProps<{ definitions: NodeDefinition[] }>()
@@ -14,6 +14,7 @@ const iconFor = (name: string) => {
     'git-branch': GitBranch, braces: Braces, terminal: Terminal,
     hourglass: Hourglass, brain: Brain,
     'brain-circuit': BrainCircuit, languages: Languages, sparkles: Sparkles,
+    film: Film,  // v65: video_features
     filter: Filter, split: Split, 'git-merge': GitMerge,
     ungroup: Ungroup, sigma: Sigma, workflow: Workflow,
     repeat: Repeat, mail: Mail, slack: Slack,

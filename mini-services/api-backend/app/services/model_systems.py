@@ -21,6 +21,8 @@ kind - the Company AI System pattern from the roadmap.
 
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -49,22 +51,23 @@ LANGUAGE_PREFIX = "lm_"
 HEALTH_BUDGET = 10
 
 # the honest modality capability matrix - what this inline-mode build can
-# actually extract today (video needs frame sampling; fail loud with guidance)
+# actually extract today (v65: cv2 frame sampling closes the video gap)
 CAPABILITIES = [
     {"modality": "text", "available": True,
      "extractor": "text_features (TF-IDF+SVD, fit/transform) · lm_train (from-scratch transformer LM, continued pretraining) · lm_generate"},
     {"modality": "image", "available": True, "extractor": "image_features (PIL: channel stats, histogram, edges)"},
     {"modality": "audio", "available": True, "extractor": "audio_features (WAV: RMS, ZCR, FFT bands)"},
+    {"modality": "video", "available": True,
+     "extractor": "video_features (v65, OpenCV: uniform frame sampling, per-frame brightness/contrast/edges, clip motion)"},
     {"modality": "document", "available": True, "extractor": "document_extract (PDF/DOCX/XLSX/CSV/JSON -> text) + text_features"},
     {"modality": "tabular", "available": True, "extractor": "model_train (9 sklearn algorithms) + neural_train (from-scratch MLP)"},
-    {"modality": "video", "available": False,
-     "note": "not ingestable in inline mode - sample frames externally and ingest them as images"},
 ]
 
 MODALITY_NODE_TYPES = {
     "text_features": "text",
     "image_features": "image",
     "audio_features": "audio",
+    "video_features": "video",   # v65: cv2 frame sampling is real video evidence
     "document_extract": "document",
     "lm_train": "text",      # v64: language-model training is text evidence
     "lm_generate": "text",   # v64: LM serving is text evidence
@@ -331,5 +334,189 @@ async def model_system_detail(db: AsyncSession, ms: ModelSystem) -> dict:
         "monitoring": monitoring,
         "retraining": retraining,
         "reports": reports_out,
+        "lifecycle": await derive_lifecycle(db, ms),
         "health": await model_system_health(db, ms),
     }
+
+
+# ------------------------------------------------------------------ lifecycle
+# v65: the full LM lifecycle as ONE derived plan + ONE sequenced run.  The
+# stages are read off the bound workflows' graphs (never stored): an lm_train
+# node WITHOUT base_model is a PRETRAIN stage, WITH base_model a CONTINUE
+# stage, an lm_generate node a GENERATE stage.  Running the plan dispatches
+# each stage's workflow through the REAL engine, waits for it, and reports
+# what the LM nodes produced (perplexity chain + generated text).
+
+_LM_TRAIN_TYPE = "lm_train"
+_LM_GENERATE_TYPE = "lm_generate"
+_LIFECYCLE_STAGE_ORDER = ("pretrain", "continue", "generate")
+_LIFECYCLE_DEFAULT_TIMEOUT_S = 240
+_LIFECYCLE_MAX_TIMEOUT_S = 900
+
+
+def _workflow_lm_stage(wf: Workflow) -> str | None:
+    """Classify a bound workflow's LM role from its graph, derived only."""
+    nodes = (wf.graph or {}).get("nodes", [])
+    types = [n.get("type") or "" for n in nodes]
+    if _LM_GENERATE_TYPE in types:
+        return "generate"
+    lm_trains = [n for n in nodes if n.get("type") == _LM_TRAIN_TYPE]
+    if any((n.get("parameters") or {}).get("base_model") for n in lm_trains):
+        return "continue"
+    if lm_trains:
+        return "pretrain"
+    return None
+
+
+async def _bound_workflows(db: AsyncSession, ms: ModelSystem) -> list[Workflow]:
+    wf_ids = [c.ref_id for c in ms.components if c.kind == "workflow"]
+    if not wf_ids:
+        return []
+    return list(
+        (await db.execute(select(Workflow).where(Workflow.id.in_(wf_ids)))).scalars().all()
+    )
+
+
+async def derive_lifecycle(db: AsyncSession, ms: ModelSystem) -> dict:
+    """The derived LM lifecycle plan: ordered stages over bound workflows.
+
+    Everything is read from the graphs at call time - installing a solution
+    or binding new workflows changes the plan without any stored state.
+    """
+    stages: list[dict] = []
+    skipped: list[dict] = []
+    wfs = await _bound_workflows(db, ms)
+    for wf in sorted(wfs, key=lambda w: w.name or ""):
+        stage = _workflow_lm_stage(wf)
+        if stage is None:
+            skipped.append({"workflow_id": wf.id, "workflow_name": wf.name,
+                            "reason": "no lm_train / lm_generate node in the graph"})
+            continue
+        stages.append({"stage": stage, "workflow_id": wf.id, "workflow_name": wf.name,
+                       "active": bool(wf.is_active)})
+    stages.sort(key=lambda s: (_LIFECYCLE_STAGE_ORDER.index(s["stage"]), s["workflow_name"]))
+    for pos, s in enumerate(stages, 1):
+        s["position"] = pos
+    return {
+        "stages": stages,
+        "skipped": skipped,
+        "lm_workflows": len(stages),
+        "sequence": " -> ".join(f"{s['stage']}:{s['workflow_name']}" for s in stages),
+    }
+
+
+async def _wait_execution(execution_id: str, timeout_s: float) -> ExecutionLog:
+    """Poll the execution log until a terminal state (inline dispatch runs
+    on the same loop as a background task, so polling converges)."""
+    from ..db import AsyncSessionLocal
+
+    deadline = time.monotonic() + timeout_s
+    while True:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(ExecutionLog, execution_id)
+            if row is not None and row.status not in ("running", "queued"):
+                return row
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"execution {execution_id} did not finish within {int(timeout_s)}s")
+        await asyncio.sleep(0.15)
+
+
+def _stage_result(pos: int, stage: str, wf: Workflow, log: ExecutionLog) -> dict:
+    """Compress one finished execution into a lifecycle stage report."""
+    out: dict = {
+        "position": pos, "stage": stage,
+        "workflow_id": wf.id, "workflow_name": wf.name,
+        "execution_id": log.id, "status": log.status,
+        "duration_ms": log.duration_ms,
+    }
+    if log.status != "success":
+        out["error"] = (log.error or "execution failed")[:400]
+        return out
+    lm_run = None
+    for run in log.node_runs or []:
+        if run.get("node_type") in (_LM_TRAIN_TYPE, _LM_GENERATE_TYPE):
+            lm_run = run
+            break
+    if lm_run is None:
+        out["error"] = "the workflow succeeded but no lm_train/lm_generate node ran"
+        return out
+    payload = lm_run.get("output") or {}
+    if lm_run.get("node_type") == _LM_TRAIN_TYPE:
+        metrics = payload.get("metrics") or {}
+        out["perplexity"] = payload.get("perplexity") or metrics.get("perplexity")
+        out["mode"] = payload.get("mode")
+        out["vocabulary"] = payload.get("vocabulary")
+        out["tokenizer"] = metrics.get("tokenizer")
+        out["continued_from"] = metrics.get("continued_pretrained_from")
+        registry = payload.get("registry") or {}
+        out["registry_name"] = registry.get("name")
+        out["registry_version"] = registry.get("version")
+    else:
+        out["generated_text"] = payload.get("text")
+        out["tokens_generated"] = payload.get("tokens_generated")
+        out["tokenizer"] = payload.get("tokenizer")
+    return out
+
+
+async def run_lifecycle(db: AsyncSession, ms: ModelSystem, timeout_s: int | None = None) -> dict:
+    """Run the derived LM lifecycle IN SEQUENCE through the real engine.
+
+    Each stage's workflow is dispatched (manual trigger) and awaited; the
+    sequence STOPS at the first failure - later stages depend on earlier
+    model versions, so continuing would only produce dishonest noise.
+    """
+    from ..services.dispatcher import dispatch_execution
+
+    plan = await derive_lifecycle(db, ms)
+    stages = plan["stages"]
+    if not stages:
+        return {"ran": False,
+                "note": "no LM lifecycle stages found - bind workflows with lm_train / lm_generate nodes",
+                "skipped": plan["skipped"], "stages": []}
+
+    timeout = min(max(int(timeout_s or _LIFECYCLE_DEFAULT_TIMEOUT_S), 10), _LIFECYCLE_MAX_TIMEOUT_S)
+    results: list[dict] = []
+    stopped_early = False
+    started = time.monotonic()
+    for s in stages:
+        wf = await db.get(Workflow, s["workflow_id"])
+        if wf is None:
+            results.append({"position": s["position"], "stage": s["stage"],
+                            "workflow_id": s["workflow_id"], "workflow_name": s["workflow_name"],
+                            "status": "error", "error": "workflow no longer exists"})
+            stopped_early = True
+            break
+        try:
+            execution_id = await dispatch_execution(wf.id, trigger_type="manual",
+                                                    trigger_payload={"payload": {}})
+            log = await _wait_execution(execution_id, timeout)
+            res = _stage_result(s["position"], s["stage"], wf, log)
+        except TimeoutError as exc:
+            res = {"position": s["position"], "stage": s["stage"], "workflow_id": wf.id,
+                   "workflow_name": wf.name, "status": "error", "error": str(exc)}
+        except ValueError as exc:
+            res = {"position": s["position"], "stage": s["stage"], "workflow_id": wf.id,
+                   "workflow_name": wf.name, "status": "error", "error": str(exc)}
+        results.append(res)
+        if res["status"] != "success":
+            stopped_early = True
+            break
+
+    if stopped_early:
+        for s in stages[len(results):]:
+            results.append({"position": s["position"], "stage": s["stage"],
+                            "workflow_id": s["workflow_id"], "workflow_name": s["workflow_name"],
+                            "status": "not_run", "error": "an earlier stage failed"})
+
+    ok = [r for r in results if r["status"] == "success"]
+    train_ppl = [r["perplexity"] for r in ok if r.get("perplexity") is not None]
+    summary = {
+        "stages_total": len(stages),
+        "stages_succeeded": len(ok),
+        "perplexity_chain": train_ppl,
+        "generated_text": next((r.get("generated_text") for r in ok if r.get("generated_text")), None),
+        "tokenizer": next((r.get("tokenizer") for r in ok if r.get("tokenizer")), None),
+        "total_seconds": round(time.monotonic() - started, 2),
+        "stopped_early": stopped_early,
+    }
+    return {"ran": True, "summary": summary, "stages": results, "skipped": plan["skipped"]}

@@ -17,6 +17,7 @@ from ..db import get_db
 from ..models import Workflow
 from ..schemas import validate_execution_policy
 from ..services.aiops import investigate
+from ..services.devices import device_mode_report
 from ..services.ops import incident_chain, ops_overview
 from ..services.scheduler import resync_workflow_jobs
 from ..services.versions import snapshot_workflow_version
@@ -32,6 +33,17 @@ class InvestigateRequest(BaseModel):
 class ApplyProposalRequest(BaseModel):
     workflow_id: str = Field(..., min_length=1, max_length=36)
     patch: dict = Field(..., description="Execution-policy patch (retries/backoff/timeout keys only)")
+
+
+@router.get("/devices")
+async def devices():
+    """v65 device inventory - the honest GPU-execution-mode report.
+
+    What accelerators this environment actually has, what the platform
+    default device mode is, and how training nodes resolve device intent.
+    py8n never claims GPU compute it does not perform.
+    """
+    return device_mode_report()
 
 
 @router.get("/overview")

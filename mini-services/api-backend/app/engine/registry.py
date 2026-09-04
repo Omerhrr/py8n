@@ -33,7 +33,13 @@ from .nodes.connectors import (  # v50 + v52
 from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
 from .nodes.datascience import ChartNode, DriftCheckNode, ModelPredictNode, ModelTrainNode, PythonTransformNode  # v28 + v46 predict + v47 drift
 from .nodes.documents import DocumentExtractNode  # v32
-from .nodes.modal import AudioFeaturesNode, ImageFeaturesNode, NeuralTrainNode, TextFeaturesNode  # v63: multimodal + from-scratch neural
+from .nodes.modal import (
+    AudioFeaturesNode,
+    ImageFeaturesNode,
+    NeuralTrainNode,
+    TextFeaturesNode,
+    VideoFeaturesNode,  # v65: cv2 frame sampling + clip features
+)  # v63: multimodal + from-scratch neural
 from .nodes.lm import LMGenerateNode, LMTrainNode  # v64: from-scratch transformer LM + continued pretraining
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
@@ -98,6 +104,7 @@ for _cls in (
     TextFeaturesNode,     # v63: text -> numeric features (TF-IDF+SVD, fit/transform)
     ImageFeaturesNode,    # v63: stateless PIL image features per row
     AudioFeaturesNode,    # v63: stateless WAV features per row
+    VideoFeaturesNode,    # v65: stateless cv2 frame sampling + clip features per row
     NeuralTrainNode,      # v63: from-scratch numpy MLP + fine-tuning from the registry
     LMTrainNode,          # v64: from-scratch transformer LM + continued pretraining
     LMGenerateNode,       # v64: autoregressive sampling from a registered LM
