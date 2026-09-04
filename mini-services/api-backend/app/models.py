@@ -882,3 +882,83 @@ class SystemComponent(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     system: Mapped[Py8nSystem] = relationship(back_populates="components")
+
+
+class SystemMember(Base):
+    """System-level membership (v62) - who can touch a system, at what role.
+
+    The CREATOR is not stored here: ``py8n_systems.owner_id`` remains the
+    single source of truth for ownership (pre-v62 systems keep working with
+    zero migration). This table holds the INVITED members:
+
+    * ``viewer`` - can read the system (detail, health, dependency views)
+    * ``editor`` - can also bind/unbind components and edit metadata
+    * ownership is never shared - the creator anchor cannot be demoted or
+      removed, and invites are editor/viewer only.
+
+    Membership is a permission grant, so it IS stored; everything the
+    system reports stays derived.
+    """
+
+    __tablename__ = "system_members"
+    __table_args__ = (UniqueConstraint("system_id", "user_id", name="uq_system_member"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    system_id: Mapped[str] = mapped_column(ForeignKey("py8n_systems.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(10), nullable=False, default="viewer")  # editor|viewer
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ModelSystem(Base):
+    """A Model System (v63) - the AI model-building operating unit.
+
+    Where a Py8n System runs a part of the BUSINESS, a Model System BUILDS
+    AND OPERATES A MODEL: it binds the datasets, trained models, training /
+    retraining / deployment workflows and reports that one model's life
+    belongs to. Membership is curated (stored); every section the model
+    system REPORTS (training summary, evaluation, composition, monitoring
+    coverage, retraining schedules) is derived from the member objects at
+    read time and can never drift. A model system is itself bindable into
+    a Py8n System as the ``model_system`` component kind - the Company AI
+    System pattern: data systems + model systems + agent workflows in one
+    health-scored unit.
+    """
+
+    __tablename__ = "model_systems"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    icon: Mapped[str] = mapped_column(String(60), default="brain-circuit")
+    color: Mapped[str] = mapped_column(String(20), default="#818cf8")
+    # declared modality focus: text|image|audio|document|tabular|multimodal
+    modalities: Mapped[list] = mapped_column(JSONVariant, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    components: Mapped[list["ModelSystemComponent"]] = relationship(
+        back_populates="model_system",
+        cascade="all, delete-orphan",
+        order_by="ModelSystemComponent.added_at",
+    )
+
+
+class ModelSystemComponent(Base):
+    """One object bound to a model system (v63).
+
+    ``kind`` is one of dataset | model | workflow | report - resolved and
+    validated against the live table on attach with owner scoping.
+    """
+
+    __tablename__ = "model_system_components"
+    __table_args__ = (UniqueConstraint("model_system_id", "kind", "ref_id", name="uq_model_system_component"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    model_system_id: Mapped[str] = mapped_column(ForeignKey("model_systems.id", ondelete="CASCADE"), index=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    ref_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    model_system: Mapped[ModelSystem] = relationship(back_populates="components")
