@@ -242,6 +242,9 @@ class _MLP:
             "biases": [b.tolist() for b in self.biases],
         }
 
+    def params_count(self) -> int:
+        return int(sum(W.size for W in self.weights) + sum(b.size for b in self.biases))
+
     @classmethod
     def from_state(cls, state: dict) -> "_MLP":
         net = cls.__new__(cls)
@@ -736,8 +739,8 @@ class NeuralTrainNode(BaseNode):
         patience: int = Field(default=0, ge=0, le=100, description="Early stopping patience on val loss (0 = off)")
         seed: int = Field(default=42)
         device: str = Field(default="cpu", json_schema_extra={
-            "widget": "select", "options": ["cpu", "auto", "gpu"]},
-            description="Device policy - py8n refuses to fake GPU compute (v65)")
+            "widget": "select", "options": ["cpu", "auto", "gpu", "torch"]},
+            description="cpu = numpy core; auto/gpu route to CUDA/MPS via torch when present; torch = torch backend (v66)")
         base_model: str = Field(default="", description="Registry name/id to fine-tune from (empty = from scratch)")
         model_name: str = Field(default="", description="Registry name (empty = 'neural_net')")
         register: bool = Field(default=True)
@@ -845,12 +848,22 @@ class NeuralTrainNode(BaseNode):
 
         # ---- the network ----
         if base_payload is not None:
-            net = _MLP.from_state(base_payload["mlp"])
+            if dev["backend"] == "torch":
+                from ..torch_backend import _TorchMLP
+
+                net = _TorchMLP.from_state(base_payload["mlp"], device=dev["resolved"])
+            else:
+                net = _MLP.from_state(base_payload["mlp"])
         else:
             hidden = [int(h) for h in p.hidden_layers.split(",") if h.strip()]
             out_dim = 1 if task == "regression" else int(y.nunique())
             layer_sizes = [X.shape[1], *hidden, out_dim]
-            net = _MLP(layer_sizes, activation="relu", seed=p.seed)
+            if dev["backend"] == "torch":
+                from ..torch_backend import _TorchMLP
+
+                net = _TorchMLP(layer_sizes, activation="relu", seed=p.seed, device=dev["resolved"])
+            else:
+                net = _MLP(layer_sizes, activation="relu", seed=p.seed)
 
         y_tr_np = y_tr.to_numpy(dtype=np.float64)
         y_te_np = y_te.to_numpy(dtype=np.float64)
@@ -877,7 +890,7 @@ class NeuralTrainNode(BaseNode):
         metrics["final_train_loss"] = history["train_loss"][-1] if history["train_loss"] else None
         metrics["final_val_loss"] = history["val_loss"][-1] if history["val_loss"] else None
         metrics["train_seconds"] = history["train_seconds"]
-        metrics["params_count"] = int(sum(W.size for W in net.weights) + sum(b.size for b in net.biases))
+        metrics["params_count"] = net.params_count()
         metrics["architecture"] = "->".join(str(s) for s in net.layer_sizes)
         metrics["optimizer"] = p.optimizer
         metrics["device"] = dev["resolved"]

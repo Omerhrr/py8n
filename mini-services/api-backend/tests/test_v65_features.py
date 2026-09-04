@@ -287,19 +287,28 @@ def test_v65_lm_lifecycle_run_in_sequence():
 
 def test_v65_device_mode():
     # --- unit level: the resolution matrix is honest -----------------------
+    import importlib.util
+
+    torch_here = importlib.util.find_spec("torch") is not None
     from app.services.devices import resolve_device
 
     ok = resolve_device("cpu")
     assert ok == {"requested": "cpu", "resolved": "cpu", "backend": "numpy",
                   "usable": True, "note": ""}
     auto = resolve_device("auto")
-    assert auto["resolved"] == "cpu" and auto["usable"] is True and auto["note"]
+    # v66: auto routes to torch+CUDA/MPS when present; in this sandbox it
+    # falls back to the numpy CPU core with an honest note either way
+    if auto["resolved"] == "cpu" and not auto["backend"] == "torch":
+        assert auto["usable"] is True and auto["note"]
     try:
         resolve_device("gpu")
-        raise AssertionError("gpu must be refused in this torch-less environment")
+        raise AssertionError("gpu must be refused in this accelerator-less environment")
     except ValueError as exc:
         assert "device=gpu refused" in str(exc)
-        assert "torch is not installed" in str(exc)
+        if torch_here:
+            assert "no CUDA/MPS accelerator is visible" in str(exc)
+        else:
+            assert "torch is not installed" in str(exc)
     try:
         resolve_device("tpu")
         raise AssertionError("unknown device must be refused")
@@ -318,11 +327,12 @@ def test_v65_device_mode():
             assert res.status_code == 200, res.text
             inv = res.json()
             assert inv["device_mode"] == "cpu"
-            assert inv["torch_installed"] is False
+            assert inv["torch_installed"] == torch_here  # honest, matches reality
             assert inv["accelerator_present"] is False
             assert inv["cpu"]["cores"] >= 1
-            assert inv["compute_backend"] == "numpy (cpu)"
-            assert any("torch is not installed" in n for n in inv["notes"])
+            assert "numpy" in inv["compute_backend"]
+            if not torch_here:
+                assert any("torch is not installed" in n for n in inv["notes"])
 
             # --- engine E2E: default device lands in the metrics --------------
             res = await client.post("/datasets", headers=h,
@@ -354,7 +364,10 @@ def test_v65_device_mode():
             run2 = await _run_and_wait(client, res.json()["id"], h)
             assert run2["status"] == "error"
             assert "device=gpu refused" in (run2.get("error") or "")
-            assert "torch is not installed" in (run2.get("error") or "")
+            if torch_here:
+                assert "no CUDA/MPS accelerator is visible" in (run2.get("error") or "")
+            else:
+                assert "torch is not installed" in (run2.get("error") or "")
 
     asyncio.run(_go())
     try:

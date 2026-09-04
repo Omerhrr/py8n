@@ -845,12 +845,79 @@ class DriftCheckNode(BaseNode):
 
     class ParamsModel(BaseModel):
         model: str = Field(default="", description="Registry name (uses the ACTIVE version) or a registry row id")
+        text_column: str = Field(default="", description="LM models: the raw-text column to drift-check (tabular models ignore this)")
         threshold: float = Field(default=0.25, ge=0.01, le=10.0, description="PSI above this counts as drift (0.25 = significant)")
         on_drift: str = Field(
             default="warn",
             description="warn = annotate the report and continue; error = fail the run",
             json_schema_extra={"widget": "select", "options": ["warn", "error"]},
         )
+
+    async def _lm_drift_report(self, context, info: dict, reference: dict, rows: list[dict],
+                               p: "DriftCheckNode.ParamsModel") -> dict:
+        """v66: PSI over the per-window CE-loss distribution - the language
+        model's drift signal (how much harder the model finds the new text
+        than the corpus it was trained on)."""
+        import math
+
+        from .lm import _TinyLM, _encode_with, _resolve_registry_artifact, _windows
+
+        if not p.text_column:
+            raise NodeExecutionError(
+                "this model is a LANGUAGE MODEL - its reference stats are a loss "
+                "distribution, so set text_column to the raw-text column to drift-check")
+        if int(reference.get("cond_dim") or 0) > 0:
+            raise NodeExecutionError(
+                "drift checks for CONDITIONED (multimodal) LMs need per-row condition "
+                "vectors - not supported yet; use a text-only LM for drift gating")
+        _, payload = await _resolve_registry_artifact(
+            p.model, getattr(context, "owner_id", None))
+        if payload.get("kind") != "lm":
+            raise NodeExecutionError("the referenced model's artifact is not a language model")
+        net = _TinyLM.from_state(payload["net"])
+        vocab = payload["vocab"]
+        tokenizer_state = payload.get("tokenizer") or {"type": "word"}
+        n_ctx = int(reference.get("n_ctx") or (payload.get("config") or {}).get("n_ctx") or 16)
+
+        texts = [str(r.get(p.text_column) or "").strip() for r in rows]
+        texts = [t for t in texts if t]
+        if len(texts) < 8:
+            raise NodeExecutionError(
+                f"LM drift check needs at least 8 non-empty text rows (got {len(texts)})")
+        doc_ids = [_encode_with(t, vocab, tokenizer_state) for t in texts]
+        windows = [w for d in doc_ids for w in _windows(d, n_ctx)]
+        if not windows:
+            raise NodeExecutionError(
+                "no comparable windows - the text rows are too short after tokenization")
+        losses = net.eval_window_losses(windows)
+
+        k = int(reference.get("buckets") or 10)
+        lo, hi = reference.get("range") or [0.0, 8.0]
+        cur = [0.0] * k
+        for loss_v in losses:
+            b = int(min(max((loss_v - lo) / (hi - lo), 0.0), 0.999999) * k)
+            cur[b] += 1.0
+        tot = sum(cur) or 1.0
+        cur = [c / tot for c in cur]
+        ref = reference.get("histogram") or []
+        eps = 1e-6
+        psi = 0.0
+        for i in range(k):
+            c = max(cur[i], eps)
+            r = max(ref[i] if i < len(ref) else 0.0, eps)
+            psi += (c - r) * math.log(c / r)
+        psi = round(float(psi), 4)
+        drifted = psi > p.threshold
+        return {
+            "drift_detected": drifted,
+            "overall_psi": psi,
+            "features": [{"feature": "ce_loss_distribution", "psi": psi,
+                          "status": "drifted" if drifted else "stable"}],
+            "mean_ce": round(sum(losses) / len(losses), 4),
+            "reference_mean_ce": reference.get("mean_ce"),
+            "window_count": len(windows),
+            "signal": "lm_loss_psi",
+        }
 
     async def execute(self, context: ExecutionContext) -> NodeResult:
         from ...db import AsyncSessionLocal
@@ -875,15 +942,20 @@ class DriftCheckNode(BaseNode):
         rows = [r for r in items if isinstance(r, dict)]
         if not rows:
             raise NodeExecutionError("Drift Check needs object items to score")
-        import pandas as pd
 
-        df = pd.DataFrame(rows)
-        report = model_svc.score_drift(
-            reference,
-            df,
-            info.get("features") or [],
-            threshold=p.threshold,
-        )
+        if (reference or {}).get("kind") == "lm_loss":
+            # v66: language models drift-check over their loss distribution
+            report = await self._lm_drift_report(context, info, reference, rows, p)
+        else:
+            import pandas as pd
+
+            df = pd.DataFrame(rows)
+            report = model_svc.score_drift(
+                reference,
+                df,
+                info.get("features") or [],
+                threshold=p.threshold,
+            )
         report["model"] = {"id": info["id"], "name": info["name"], "version": info["version"]}
         report["mode"] = p.on_drift
 

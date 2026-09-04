@@ -116,7 +116,8 @@ def _family(algorithm: str) -> str:
 
 def _metrics_top(metrics: dict) -> dict:
     keep = ("accuracy", "f1_weighted", "roc_auc", "r2", "mae", "rmse",
-            "perplexity", "architecture", "params_count", "epochs_run")
+            "perplexity", "architecture", "params_count", "epochs_run",
+            "condition_dim", "multimodal", "continued_pretrained_from")
     return {k: metrics[k] for k in keep if k in (metrics or {})}
 
 

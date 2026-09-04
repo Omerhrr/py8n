@@ -59,7 +59,7 @@ class _TinyLM:
     """
 
     def __init__(self, vocab_size: int, d_model: int = 32, n_heads: int = 2,
-                 n_ctx: int = 16, n_blocks: int = 1, seed: int = 42):
+                 n_ctx: int = 16, n_blocks: int = 1, seed: int = 42, cond_dim: int = 0):
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads")
         rng = np.random.default_rng(seed)
@@ -68,6 +68,7 @@ class _TinyLM:
         self.n_heads = int(n_heads)
         self.n_ctx = int(n_ctx)
         self.n_blocks = int(n_blocks)
+        self.cond_dim = int(cond_dim)
 
         def _w(*shape: int) -> np.ndarray:
             return rng.normal(0.0, 0.02, size=shape)
@@ -88,12 +89,16 @@ class _TinyLM:
         self.lnf_b = np.zeros(d_model)
         self.Wh = _w(d_model, vocab_size)
         self.bh = np.zeros(vocab_size)
+        self.W_cond = _w(cond_dim, d_model) if cond_dim > 0 else None
 
     # ---- bookkeeping ----
     def _params_tree(self) -> dict:
-        return {"tok_emb": self.tok_emb, "pos_emb": self.pos_emb,
+        tree = {"tok_emb": self.tok_emb, "pos_emb": self.pos_emb,
                 "blocks": self.blocks, "lnf_g": self.lnf_g, "lnf_b": self.lnf_b,
                 "Wh": self.Wh, "bh": self.bh}
+        if self.W_cond is not None:
+            tree["W_cond"] = self.W_cond
+        return tree
 
     def params_count(self) -> int:
         total = 0
@@ -102,22 +107,28 @@ class _TinyLM:
         for blk in self.blocks:
             for v in blk.values():
                 total += int(v.size)
+        if self.W_cond is not None:
+            total += int(self.W_cond.size)
         return total
 
     def architecture(self) -> str:
-        return (f"lm d{self.d_model} h{self.n_heads} b{self.n_blocks} "
+        base = (f"lm d{self.d_model} h{self.n_heads} b{self.n_blocks} "
                 f"ctx{self.n_ctx} V{self.vocab_size}")
+        return base + f" cond{self.cond_dim}" if self.cond_dim > 0 else base
 
     def state(self) -> dict:
-        return {
+        st = {
             "config": {"vocab_size": self.vocab_size, "d_model": self.d_model,
                        "n_heads": self.n_heads, "n_ctx": self.n_ctx,
-                       "n_blocks": self.n_blocks},
+                       "n_blocks": self.n_blocks, "cond_dim": self.cond_dim},
             "tok_emb": self.tok_emb.tolist(), "pos_emb": self.pos_emb.tolist(),
             "blocks": [{k: v.tolist() for k, v in blk.items()} for blk in self.blocks],
             "lnf_g": self.lnf_g.tolist(), "lnf_b": self.lnf_b.tolist(),
             "Wh": self.Wh.tolist(), "bh": self.bh.tolist(),
         }
+        if self.W_cond is not None:
+            st["W_cond"] = self.W_cond.tolist()
+        return st
 
     @classmethod
     def from_state(cls, st: dict) -> "_TinyLM":
@@ -128,6 +139,7 @@ class _TinyLM:
         net.n_heads = int(cfg["n_heads"])
         net.n_ctx = int(cfg["n_ctx"])
         net.n_blocks = int(cfg["n_blocks"])
+        net.cond_dim = int(cfg.get("cond_dim") or 0)
 
         def arr(x: list) -> np.ndarray:
             return np.asarray(x, dtype=np.float64)
@@ -139,7 +151,18 @@ class _TinyLM:
         net.lnf_b = arr(st["lnf_b"])
         net.Wh = arr(st["Wh"])
         net.bh = arr(st["bh"])
+        net.W_cond = arr(st["W_cond"]) if net.cond_dim > 0 else None
         return net
+
+    def add_condition_adapter(self, cond_dim: int, seed: int = 42) -> None:
+        """v66 multimodal fine-tuning: give a text-only LM a condition adapter.
+        The backbone (embeddings, blocks, head) carries over UNCHANGED - only
+        the fresh projection starts random and trains with the rest."""
+        if self.cond_dim > 0:
+            raise ValueError("this LM already has a condition adapter")
+        rng = np.random.default_rng(seed)
+        self.W_cond = rng.normal(0.0, 0.02, size=(int(cond_dim), self.d_model))
+        self.cond_dim = int(cond_dim)
 
     # ---- forward ----
     @staticmethod
@@ -149,25 +172,35 @@ class _TinyLM:
         x_hat = (x - mu) / sigma
         return g * x_hat + b, x_hat, 1.0 / sigma
 
-    def _forward(self, tok: np.ndarray, cache: dict | None = None) -> np.ndarray:
+    def _forward(self, tok: np.ndarray, cache: dict | None = None,
+                 cond: np.ndarray | None = None) -> np.ndarray:
         B, T = tok.shape
         Dh = self.d_model // self.n_heads
         E = self.tok_emb[tok] + self.pos_emb[:T][None, :, :]
+        if self.W_cond is not None and cond is not None:
+            # v66: the projected condition vector is a POSITIONLESS prefix
+            # token - text token w_i sits at sequence position i+1 and every
+            # text position attends to the prefix (causal mask keeps it so).
+            cond_tok = (np.asarray(cond, dtype=np.float64) @ self.W_cond)[:, None, :]
+            E = np.concatenate([cond_tok, E], axis=1)
+            if cache is not None:
+                cache["cond"] = np.asarray(cond, dtype=np.float64)
         if cache is not None:
             cache["tok"] = tok
+        T_full = E.shape[1]
         for blk in self.blocks:
             H, x_hat1, inv1 = self._ln(E, blk["ln1_g"], blk["ln1_b"])
-            Q = (H @ blk["Wq"]).reshape(B, T, self.n_heads, Dh).transpose(0, 2, 1, 3)
-            K = (H @ blk["Wk"]).reshape(B, T, self.n_heads, Dh).transpose(0, 2, 1, 3)
-            V = (H @ blk["Wv"]).reshape(B, T, self.n_heads, Dh).transpose(0, 2, 1, 3)
+            Q = (H @ blk["Wq"]).reshape(B, T_full, self.n_heads, Dh).transpose(0, 2, 1, 3)
+            K = (H @ blk["Wk"]).reshape(B, T_full, self.n_heads, Dh).transpose(0, 2, 1, 3)
+            V = (H @ blk["Wv"]).reshape(B, T_full, self.n_heads, Dh).transpose(0, 2, 1, 3)
             scores = Q @ K.transpose(0, 1, 3, 2) / np.sqrt(Dh)
-            mask = np.triu(np.ones((T, T), dtype=bool), k=1)
+            mask = np.triu(np.ones((T_full, T_full), dtype=bool), k=1)
             scores = np.where(mask[None, None], -1e9, scores)
             scores -= scores.max(axis=-1, keepdims=True)
             e = np.exp(scores)
             A = e / e.sum(axis=-1, keepdims=True)
             ctx = A @ V
-            ctx2d = ctx.transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
+            ctx2d = ctx.transpose(0, 2, 1, 3).reshape(B, T_full, self.d_model)
             attn_out = ctx2d @ blk["Wo"]
             E2 = E + attn_out
             H2, x_hat2, inv2 = self._ln(E2, blk["ln2_g"], blk["ln2_b"])
@@ -204,16 +237,29 @@ class _TinyLM:
 
     def _backward(self, y: np.ndarray, cache: dict) -> tuple[float, dict]:
         tok = cache["tok"]
+        cond = cache.get("cond")
         B, T = tok.shape
         logits = cache["logits"]
+        T_full = logits.shape[1]
+        cond_on = self.W_cond is not None and cond is not None
         shifted = logits - logits.max(axis=-1, keepdims=True)
         p = np.exp(shifted)
         p /= p.sum(axis=-1, keepdims=True)
         rows = np.arange(B)[:, None]
-        cols = np.arange(T)[None, :]
-        loss = float(-np.mean(np.log(p[rows, cols, y] + 1e-12)))
-        dlogits = p.copy()
-        dlogits[rows, cols, y] -= 1.0
+        if cond_on:
+            # predictions come from positions 1..T (text tokens); the cond
+            # token itself earns no direct logit loss - its gradient flows
+            # through attention into W_cond
+            pos = np.arange(1, T_full)[None, :]
+            loss = float(-np.mean(np.log(p[rows, pos, y] + 1e-12)))
+            dlogits = p.copy()
+            dlogits[:, 0, :] = 0.0
+            dlogits[rows, pos, y] -= 1.0
+        else:
+            cols = np.arange(T)[None, :]
+            loss = float(-np.mean(np.log(p[rows, cols, y] + 1e-12)))
+            dlogits = p.copy()
+            dlogits[rows, cols, y] -= 1.0
         dlogits /= (B * T)
 
         def _zero_like(v: np.ndarray) -> np.ndarray:
@@ -223,6 +269,8 @@ class _TinyLM:
                    "blocks": [{k: _zero_like(v) for k, v in blk.items()} for blk in self.blocks],
                    "lnf_g": _zero_like(self.lnf_g), "lnf_b": _zero_like(self.lnf_b),
                    "Wh": _zero_like(self.Wh), "bh": _zero_like(self.bh)}
+        if self.W_cond is not None:
+            g["W_cond"] = _zero_like(self.W_cond)
 
         dE = dlogits @ self.Wh.T
         g["Wh"] += cache["Ef"].reshape(-1, self.d_model).T @ dlogits.reshape(-1, self.vocab_size)
@@ -251,15 +299,15 @@ class _TinyLM:
             dE2 = dE2 + dE2_ln
 
             gb["Wo"] += c["ctx2d"].reshape(-1, self.d_model).T @ dE2.reshape(-1, self.d_model)
-            dctx = (dE2 @ blk["Wo"].T).reshape(B, T, self.n_heads, Dh).transpose(0, 2, 1, 3)
+            dctx = (dE2 @ blk["Wo"].T).reshape(B, T_full, self.n_heads, Dh).transpose(0, 2, 1, 3)
             dV = c["A"].transpose(0, 1, 3, 2) @ dctx
             dA = dctx @ c["V"].transpose(0, 1, 3, 2)
             dZ = c["A"] * (dA - (dA * c["A"]).sum(axis=-1, keepdims=True))
             dQ = dZ @ c["K"] / np.sqrt(Dh)
             dK = dZ.transpose(0, 1, 3, 2) @ c["Q"] / np.sqrt(Dh)
-            dQ2d = dQ.transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
-            dK2d = dK.transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
-            dV2d = dV.transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
+            dQ2d = dQ.transpose(0, 2, 1, 3).reshape(B, T_full, self.d_model)
+            dK2d = dK.transpose(0, 2, 1, 3).reshape(B, T_full, self.d_model)
+            dV2d = dV.transpose(0, 2, 1, 3).reshape(B, T_full, self.d_model)
             Hf = c["H"].reshape(-1, self.d_model)
             gb["Wq"] += Hf.T @ dQ2d.reshape(-1, self.d_model)
             gb["Wk"] += Hf.T @ dK2d.reshape(-1, self.d_model)
@@ -270,31 +318,57 @@ class _TinyLM:
             gb["ln1_b"] += db1
             dE = dE2 + dE_in
 
-        np.add.at(g["tok_emb"], tok, dE)
-        g["pos_emb"][:T] += dE.sum(axis=0)
+        if cond_on:
+            # split the prefix gradient (W_cond) from the text gradient
+            g["W_cond"] += cache["cond"].T @ dE[:, 0, :]
+            dE_text = dE[:, 1:, :]
+        else:
+            dE_text = dE
+        np.add.at(g["tok_emb"], tok, dE_text)
+        g["pos_emb"][:T] += dE_text.sum(axis=0)
         return loss, g
 
     # ---- training ----
-    def eval_loss(self, windows: list[list[int]], batch_size: int = 32) -> float:
+    def eval_window_losses(self, windows: list[list[int]], conds: list | None = None,
+                           batch_size: int = 64) -> list[float]:
+        """Per-window mean cross-entropy (nats) - the LM drift signal (v66)."""
         if not windows:
-            return float("nan")
-        total, count = 0.0, 0
+            return []
+        cond_on = self.W_cond is not None
+        if cond_on and conds is None:
+            raise ValueError("this LM is conditioned - conds are required")
+        out: list[float] = []
         for start in range(0, len(windows), batch_size):
             chunk = windows[start:start + batch_size]
             x = np.array([w[:-1] for w in chunk])
             y = np.array([w[1:] for w in chunk])
-            logits = self._forward(x)
+            cond = np.array(conds[start:start + batch_size], dtype=np.float64) if cond_on else None
+            logits = self._forward(x, cond=cond)
             shifted = logits - logits.max(axis=-1, keepdims=True)
             e = np.exp(shifted)
             p = e / e.sum(axis=-1, keepdims=True)
-            ce = -np.log(p[np.arange(len(chunk))[:, None], np.arange(x.shape[1]), y] + 1e-12)
-            total += float(ce.sum())
-            count += ce.size
-        return total / max(count, 1)
+            B = len(chunk)
+            if cond_on:
+                pos = np.arange(1, logits.shape[1])[None, :]
+                ce = -np.log(p[np.arange(B)[:, None], pos, y] + 1e-12)
+            else:
+                ce = -np.log(p[np.arange(B)[:, None], np.arange(x.shape[1])[None, :], y] + 1e-12)
+            out.extend(ce.mean(axis=1).tolist())
+        return [float(v) for v in out]
+
+    def eval_loss(self, windows: list[list[int]], conds: list | None = None,
+                  batch_size: int = 32) -> float:
+        losses = self.eval_window_losses(windows, conds, max(batch_size, 1))
+        if not losses:
+            return float("nan")
+        return sum(losses) / len(losses)
 
     def fit(self, train_windows: list[list[int]], val_windows: list[list[int]], *,
             epochs: int = 20, batch_size: int = 8, lr: float = 0.003,
-            patience: int = 0, seed: int = 42) -> dict:
+            patience: int = 0, seed: int = 42,
+            conds_train: list | None = None, conds_val: list | None = None) -> dict:
+        if self.W_cond is not None and conds_train is None:
+            raise ValueError("this LM is conditioned - conds_train is required")
         rng = np.random.default_rng(seed)
         opt = _Adam(self._params_tree(), lr)
         history: dict = {"train_loss": [], "val_loss": []}
@@ -307,17 +381,21 @@ class _TinyLM:
             order = rng.permutation(n)
             losses = []
             for start in range(0, n, batch_size):
-                batch = [train_windows[i] for i in order[start:start + batch_size]]
+                idx = order[start:start + batch_size]
+                batch = [train_windows[i] for i in idx]
                 x = np.array([w[:-1] for w in batch])
                 y = np.array([w[1:] for w in batch])
+                cond = None
+                if self.W_cond is not None:
+                    cond = np.array([conds_train[i] for i in idx], dtype=np.float64)
                 cache: dict = {}
-                self._forward(x, cache)
+                self._forward(x, cache, cond=cond)
                 loss, grads = self._backward(y, cache)
                 opt.step(self._params_tree(), grads)
                 losses.append(loss)
             history["train_loss"].append(round(sum(losses) / max(len(losses), 1), 6))
             if val_windows:
-                vloss = self.eval_loss(val_windows)
+                vloss = self.eval_loss(val_windows, conds_val)
                 history["val_loss"].append(round(vloss, 6))
                 if vloss < best_val:
                     best_val = vloss
@@ -336,13 +414,16 @@ class _TinyLM:
 
     # ---- sampling ----
     def generate(self, prompt_ids: list[int], max_new: int, temperature: float = 0.8,
-                 top_k: int = 0, seed: int = 42) -> list[int]:
+                 top_k: int = 0, seed: int = 42, cond: list | None = None) -> list[int]:
+        if self.W_cond is not None and cond is None:
+            raise ValueError("this LM is conditioned - a condition vector is required")
         rng = np.random.default_rng(seed)
+        ct = np.array([cond], dtype=np.float64) if (self.W_cond is not None and cond is not None) else None
         ids = [1] + list(prompt_ids)  # <bos> prefix keeps empty prompts well-defined
         out: list[int] = []
         for _ in range(max_new):
             x = np.array([ids[-self.n_ctx:]])
-            logits = self._forward(x)[0, -1].copy()
+            logits = self._forward(x, cond=ct)[0, -1].copy()
             logits /= max(float(temperature), 1e-3)
             if top_k and 0 < top_k < self.vocab_size:
                 kth = np.sort(logits)[-top_k]
@@ -599,15 +680,20 @@ async def _resolve_registry_artifact(model_ref: str, owner_id: str | None) -> tu
 
 # ----------------------------------------------------------------- node: train
 class LMTrainNode(BaseNode):
-    """v64: from-scratch transformer language-model training + continued pretraining."""
+    """v64 from-scratch LM training + continued pretraining; v66 adds the
+    torch backend and MULTIMODAL FINE-TUNING (condition-prefix adapters)."""
 
     type = "lm_train"
     name = "Language Model Train"
     description = (
-        "Trains a causal transformer language model FROM SCRATCH in raw numpy "
-        "on a text corpus (next-token prediction; held-out perplexity). Point "
-        "base_model at a registered lm_train model to CONTINUE PRETRAINING it "
-        "on a new corpus - weights AND tokenizer carry over, lineage recorded."
+        "Trains a causal transformer language model from scratch (raw numpy "
+        "core or the torch backend) on a text corpus (next-token prediction; "
+        "held-out perplexity). Point base_model at a registered lm_train model "
+        "to CONTINUE PRETRAINING it - weights AND tokenizer carry over, lineage "
+        "recorded. Add condition_columns (numeric features from any modality "
+        "extractor) to attach a condition-prefix adapter: a text-only base LM "
+        "gains the fresh adapter (multimodal fine-tuning, backbone carries "
+        "over) and generation becomes conditioned on that vector."
     )
     category = "ai"
     icon = "languages"
@@ -616,6 +702,7 @@ class LMTrainNode(BaseNode):
     class ParamsModel(BaseModel):
         text_column: str = Field(default="", description="Column holding the raw text")
         base_model: str = Field(default="", description="Registry name/id of an lm_train model to continue pretraining from (empty = from scratch)")
+        condition_columns: str = Field(default="", description="Comma-separated NUMERIC columns conditioning the LM (multimodal adapter, v66) - e.g. features from image_features/audio_features/video_features")
         tokenizer: str = Field(default="word", json_schema_extra={
             "widget": "select", "options": ["word", "bpe"]},
             description="word = regex word vocabulary; bpe = byte-level Byte Pair Encoding (v65, lossless roundtrip)")
@@ -630,8 +717,8 @@ class LMTrainNode(BaseNode):
         patience: int = Field(default=0, ge=0, le=50, description="Early stopping patience on val loss (0 = off)")
         seed: int = Field(default=42)
         device: str = Field(default="cpu", json_schema_extra={
-            "widget": "select", "options": ["cpu", "auto", "gpu"]},
-            description="Device policy - py8n refuses to fake GPU compute (v65)")
+            "widget": "select", "options": ["cpu", "auto", "gpu", "torch"]},
+            description="cpu = numpy core; auto/gpu route to CUDA/MPS via torch when present; torch = torch backend (v66)")
         model_name: str = Field(default="", description="Registry name (empty = 'lm_base')")
         register: bool = Field(default=True)
 
@@ -641,8 +728,33 @@ class LMTrainNode(BaseNode):
             raise NodeExecutionError("A text column is required")
         items = _items(_working_data(context.current_input))
         rows = [r for r in items if isinstance(r, dict)]
-        texts = [str(r.get(p.text_column) or "").strip() for r in rows]
-        texts = [t for t in texts if t]
+
+        cond_cols = [c.strip() for c in (p.condition_columns or "").split(",") if c.strip()]
+        texts: list[str] = []
+        conds: list | None = None
+        if cond_cols:
+            conds = []
+            for i, r in enumerate(rows):
+                t = str(r.get(p.text_column) or "").strip()
+                if not t:
+                    continue
+                vec = []
+                for c in cond_cols:
+                    if r.get(c) is None:
+                        raise NodeExecutionError(
+                            f"row {i}: condition column {c!r} is missing - every text row "
+                            "needs a numeric condition vector")
+                    try:
+                        vec.append(float(r[c]))
+                    except (TypeError, ValueError):
+                        raise NodeExecutionError(
+                            f"row {i}: condition column {c!r} is not numeric (got {r[c]!r}) - "
+                            "run image_features / audio_features / video_features first") from None
+                texts.append(t)
+                conds.append(vec)
+        else:
+            texts = [str(r.get(p.text_column) or "").strip() for r in rows]
+            texts = [t for t in texts if t]
         if len(texts) < 8:
             raise NodeExecutionError(
                 f"Language-model training needs at least 8 non-empty text rows (got {len(texts)})")
@@ -662,6 +774,7 @@ class LMTrainNode(BaseNode):
 
         # ---- continue pretraining from the registry? ----
         base_payload = None
+        adapter_added = False
         if p.base_model.strip():
             base_info, base_payload = await _resolve_registry_artifact(
                 p.base_model, getattr(context, "owner_id", None))
@@ -670,18 +783,45 @@ class LMTrainNode(BaseNode):
                     f"continued pretraining needs an lm_train model - "
                     f"{(base_payload.get('algorithm') if isinstance(base_payload, dict) else None) or base_info['algorithm']!r} "
                     "is not a language model; pretrain one first with lm_train")
-            net = _TinyLM.from_state(base_payload["net"])
             vocab = dict(base_payload["vocab"])
             tokenizer_state = dict(base_payload.get("tokenizer") or {"type": "word"})
             cfg = dict(base_payload["config"])
+            base_cond = int(cfg.get("cond_dim") or 0)
+            if conds is None and base_cond > 0:
+                raise NodeExecutionError(
+                    f"the base model is a CONDITIONED (multimodal) LM - it expects {base_cond} "
+                    "condition feature(s) per row; provide condition_columns to continue training it")
+            if conds is not None and base_cond > 0 and len(cond_cols) != base_cond:
+                raise NodeExecutionError(
+                    f"condition dimension mismatch: the base model expects {base_cond} condition "
+                    f"column(s), this run provides {len(cond_cols)}")
+            if dev["backend"] == "torch":
+                from ..torch_backend import _TorchLM
+
+                net = _TorchLM.from_state(base_payload["net"], device=dev["resolved"])
+            else:
+                net = _TinyLM.from_state(base_payload["net"])
+            if conds is not None and base_cond == 0:
+                # v66 MULTIMODAL FINE-TUNING: attach a fresh condition adapter
+                # to a pretrained text-only LM - backbone carries over, only
+                # the projection starts random
+                net.add_condition_adapter(len(cond_cols), seed=p.seed)
+                cfg["cond_dim"] = len(cond_cols)
+                adapter_added = True
 
         if base_payload is None:
             if p.d_model % p.n_heads != 0:
                 raise NodeExecutionError(f"d_model {p.d_model} is not divisible by n_heads {p.n_heads}")
             vocab, tokenizer_state = _fit_tokenizer(texts, p.tokenizer, p.vocab_size)
             cfg = {"vocab_size": len(vocab), "d_model": p.d_model, "n_heads": p.n_heads,
-                   "n_ctx": p.n_ctx, "n_blocks": p.n_blocks}
-            net = _TinyLM(seed=p.seed, **cfg)
+                   "n_ctx": p.n_ctx, "n_blocks": p.n_blocks,
+                   "cond_dim": len(cond_cols) if conds is not None else 0}
+            if dev["backend"] == "torch":
+                from ..torch_backend import _TorchLM
+
+                net = _TorchLM(seed=p.seed, **cfg)
+            else:
+                net = _TinyLM(seed=p.seed, **cfg)
 
         doc_ids = [_encode_with(t, vocab, tokenizer_state) for t in texts]
         total_tokens = sum(len(d) for d in doc_ids)
@@ -692,14 +832,28 @@ class LMTrainNode(BaseNode):
         val_n = max(1, int(len(doc_ids) * 0.2))
         train_docs = doc_ids[:-val_n] or doc_ids[:1]
         val_docs = doc_ids[-val_n:]
-        train_windows = [w for d in train_docs for w in _windows(d, int(cfg["n_ctx"]))]
-        val_windows = [w for d in val_docs for w in _windows(d, int(cfg["n_ctx"]))]
+        val_offset = len(train_docs)
+        train_windows: list = []
+        val_windows: list = []
+        train_conds: list | None = [] if conds is not None else None
+        val_conds: list | None = [] if conds is not None else None
+        for di, d in enumerate(train_docs):
+            ws = _windows(d, int(cfg["n_ctx"]))
+            train_windows.extend(ws)
+            if train_conds is not None:
+                train_conds.extend([conds[di]] * len(ws))
+        for vi, d in enumerate(val_docs):
+            ws = _windows(d, int(cfg["n_ctx"]))
+            val_windows.extend(ws)
+            if val_conds is not None:
+                val_conds.extend([conds[val_offset + vi]] * len(ws))
         if not train_windows:
             raise NodeExecutionError("No trainable windows - the corpus rows are too short after tokenization")
 
         history = net.fit(train_windows, val_windows, epochs=p.epochs, batch_size=p.batch_size,
-                          lr=p.learning_rate, patience=p.patience, seed=p.seed)
-        val_loss = net.eval_loss(val_windows) if val_windows else history["train_loss"][-1]
+                          lr=p.learning_rate, patience=p.patience, seed=p.seed,
+                          conds_train=train_conds, conds_val=val_conds)
+        val_loss = net.eval_loss(val_windows, val_conds) if val_windows else history["train_loss"][-1]
         perplexity = round(float(min(np.exp(min(val_loss, 20.0)), 5e8)), 2)
 
         metrics: dict[str, Any] = {
@@ -721,12 +875,18 @@ class LMTrainNode(BaseNode):
                 f" ({len(tokenizer_state.get('merges') or [])} merges)"
                 if tokenizer_state.get("type") == "bpe" else ""),
             "chars_per_token": round(sum(len(t) for t in texts) / max(total_tokens, 1), 3),
+            "multimodal": bool(conds is not None),
+            "condition_dim": len(cond_cols) if conds is not None else 0,
         }
+        if conds is not None:
+            metrics["condition_columns"] = cond_cols[:8]
         continued_from = None
         if base_payload is not None:
             continued_from = {"registry_id": base_info["id"], "name": base_info["name"],
                               "version": base_info["version"]}
             metrics["continued_pretrained_from"] = f"{base_info['name']} v{base_info['version']}"
+            if adapter_added:
+                metrics["multimodal_adapter_added"] = True
         if dev.get("note"):
             metrics["device_note"] = dev["note"]
 
@@ -752,6 +912,33 @@ class LMTrainNode(BaseNode):
             filename="model.pkl",
         )
 
+        # ---- v66: LM drift reference stats - the held-out per-window loss
+        # distribution. drift_check PSI-scores future corpora against it.
+        reference_stats = None
+        if val_windows:
+            try:
+                losses = net.eval_window_losses(val_windows, val_conds)
+            except Exception:  # noqa: BLE001 - a stats failure must not fail training
+                losses = None
+            if losses:
+                k, lo, hi = 10, 0.0, 8.0
+                hist = [0.0] * k
+                for loss_v in losses:
+                    b = int(min(max((loss_v - lo) / (hi - lo), 0.0), 0.999999) * k)
+                    hist[b] += 1.0
+                tot = float(sum(hist)) or 1.0
+                reference_stats = {
+                    "kind": "lm_loss",
+                    "buckets": k,
+                    "range": [lo, hi],
+                    "histogram": [round(h / tot, 6) for h in hist],
+                    "mean_ce": round(sum(losses) / len(losses), 4),
+                    "ppl": perplexity,
+                    "window_count": len(losses),
+                    "n_ctx": int(cfg["n_ctx"]),
+                    "cond_dim": int(cfg.get("cond_dim") or 0),
+                }
+
         registry_row = None
         if p.register:
             from ...db import AsyncSessionLocal
@@ -772,15 +959,18 @@ class LMTrainNode(BaseNode):
                     dataset_name=None,
                     row_count=int(len(texts)),
                     activate=True,
-                    reference_stats=None,  # honest: PSI drift does not apply to an LM
+                    reference_stats=reference_stats,  # v66: loss-distribution drift stats
                 )
                 await session.commit()
                 registry_row = model_svc.model_out(row)
 
         sample_items = []
-        for doc in val_docs[:10]:
+        for di, doc in enumerate(val_docs[:10]):
             wins = _windows(doc, int(cfg["n_ctx"]))
-            dl = net.eval_loss(wins) if wins else None
+            doc_conds = None
+            if conds is not None and wins:
+                doc_conds = [conds[val_offset + di]] * len(wins)
+            dl = net.eval_loss(wins, doc_conds) if wins else None
             sample_items.append({
                 "text": _decode_with(doc, vocab, tokenizer_state)[:160],
                 "tokens": len(doc),
@@ -805,14 +995,17 @@ class LMTrainNode(BaseNode):
 
 # ----------------------------------------------------------------- node: generate
 class LMGenerateNode(BaseNode):
-    """v64: autoregressive sampling from a registered language model."""
+    """v64 autoregressive sampling; v66 adds the torch backend and
+    condition vectors for multimodal (adapter-equipped) LMs."""
 
     type = "lm_generate"
     name = "Language Model Generate"
     description = (
         "Loads a registered lm_train model (by name -> ACTIVE version, or id), "
         "tokenizes the prompt with ITS fitted vocabulary and continues it "
-        "autoregressively with temperature / top-k sampling."
+        "autoregressively with temperature / top-k sampling. Conditioned "
+        "(multimodal) LMs require a 'condition' vector - the same kind of "
+        "numeric features they were fine-tuned on."
     )
     category = "ai"
     icon = "sparkles"
@@ -822,10 +1015,14 @@ class LMGenerateNode(BaseNode):
         model: str = Field(default="", description="Registry name (ACTIVE version) or registry row id")
         prompt: str = Field(default="", description="Prompt text - supports {{ expressions }}",
                             json_schema_extra={"widget": "textarea", "rows": 3})
+        condition: str = Field(default="", description="Condition vector for multimodal LMs: JSON array or comma/space-separated numbers - supports {{ expressions }}")
         max_tokens: int = Field(default=16, ge=1, le=64, description="Tokens to sample (clipped to the model's context window)")
         temperature: float = Field(default=0.8, gt=0, le=2)
         top_k: int = Field(default=40, ge=0, description="Keep only the k most likely tokens (0 = off)")
         seed: int = Field(default=42)
+        device: str = Field(default="cpu", json_schema_extra={
+            "widget": "select", "options": ["cpu", "auto", "gpu", "torch"]},
+            description="cpu = numpy core; auto/gpu route to CUDA/MPS via torch when present; torch = torch backend (v66)")
 
     async def execute(self, context: ExecutionContext) -> NodeResult:
         p = self.params  # type: LMGenerateNode.ParamsModel
@@ -838,21 +1035,68 @@ class LMGenerateNode(BaseNode):
                 f"lm_generate needs an lm_train model - "
                 f"{payload.get('algorithm') or info['algorithm']!r} "
                 "is not a language model; train one with lm_train first")
-        net = _TinyLM.from_state(payload["net"])
+        from ...services.devices import resolve_device
+
+        try:
+            dev = resolve_device(p.device)
+        except ValueError as exc:
+            raise NodeExecutionError(str(exc)) from exc
+        if dev["backend"] == "torch":
+            from ..torch_backend import _TorchLM
+
+            net = _TorchLM.from_state(payload["net"], device=dev["resolved"])
+        else:
+            net = _TinyLM.from_state(payload["net"])
         vocab = payload["vocab"]
         tokenizer_state = dict(payload.get("tokenizer") or {"type": "word"})
         cfg = payload["config"]
+        cond_dim = int(cfg.get("cond_dim") or 0)
+
+        cond = None
+        raw_cond = str(p.condition or "").strip()
+        if raw_cond:
+            if cond_dim == 0:
+                raise NodeExecutionError(
+                    "this model is a text-only LM - it has no condition adapter, "
+                    "so 'condition' must be empty")
+            import json as _json
+
+            try:
+                parsed = _json.loads(raw_cond)
+            except (ValueError, TypeError):
+                parsed = None
+            vals = parsed if isinstance(parsed, list) else raw_cond.replace(",", " ").split()
+            try:
+                cond = [float(v) for v in vals]
+            except (TypeError, ValueError):
+                raise NodeExecutionError(
+                    "'condition' must be a JSON array or comma/space-separated numbers") from None
+            if len(cond) != cond_dim:
+                raise NodeExecutionError(
+                    f"condition dimension mismatch: this LM expects {cond_dim} value(s), got {len(cond)}")
+        elif cond_dim > 0:
+            raise NodeExecutionError(
+                f"this LM is CONDITIONED (multimodal) - it expects {cond_dim} condition "
+                "value(s) per generation; pass 'condition' (e.g. feature values from "
+                "image_features / audio_features / video_features)")
+
         prompt = str(p.prompt or "").strip()
         ids = _encode_with(prompt, vocab, tokenizer_state) if prompt else []
         max_new = min(p.max_tokens, int(cfg["n_ctx"]))
         gen_ids = net.generate(ids, max_new, temperature=p.temperature,
-                               top_k=p.top_k, seed=p.seed)
+                               top_k=p.top_k, seed=p.seed, cond=cond)
         text = _decode_with(gen_ids, vocab, tokenizer_state)
-        return self._single({
+        out = {
             "items": [{"prompt": prompt, "generated": text}],
             "text": text,
             "tokens_generated": len(gen_ids),
             "tokenizer": tokenizer_state.get("type") or "word",
+            "conditioned": cond_dim > 0,
+            "device": dev["resolved"],
+            "device_backend": dev["backend"],
             "model": {"id": info["id"], "name": info["name"], "version": info["version"],
                       "algorithm": info["algorithm"]},
-        })
+        }
+        if cond is not None:
+            out["condition"] = cond
+        return self._single(out)

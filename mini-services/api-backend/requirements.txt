@@ -24,6 +24,11 @@ scikit-learn>=1.4      # train/predict nodes
 matplotlib>=3.8        # chart artifacts (Agg backend)
 anyio>=4               # direct dep: user-code sandbox bounded thread pool
 opencv-python-headless>=4.9  # v65: video_features frame sampling (headless containers)
+# v66 OPTIONAL torch training backend (device=torch / CUDA / MPS on lm_train,
+# neural_train, lm_generate). Not pinned here on purpose: CPU wheels come from
+# https://download.pytorch.org/whl/cpu, CUDA wheels from the default index and
+# are ~2GB. Install manually:  uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+# The platform runs the numpy core when torch is absent; the v66 torch tests skip.
 
 # Document extraction (v32 documents node)
 pdfplumber>=0.11       # pdf text/tables

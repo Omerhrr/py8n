@@ -1,29 +1,30 @@
-"""Device policy (v65) - honest GPU execution mode for training nodes.
+"""Device policy (v65 policy + v66 compute bridge) - GPU execution mode.
 
-py8n's training cores (model_train / neural_train / lm_train) compute in
-numpy/sklearn on the CPU.  "GPU execution mode" therefore is NOT a silent
-re-route: it is a DEVICE POLICY that
+py8n trains from scratch on two backends: the raw-numpy core (CPU) and,
+since v66, a torch mirror of the same architectures that runs wherever
+torch runs - CUDA, Apple MPS, or torch-CPU.  "GPU execution mode" is
+therefore a DEVICE POLICY plus a REAL compute bridge:
 
 * detects what accelerators this environment actually has (torch CUDA /
   Apple MPS) and reports the inventory honestly,
 * lets every training node declare a device intent (``cpu`` | ``auto`` |
-  ``gpu``), resolved against the environment and the platform mode,
+  ``gpu`` | ``torch``), resolved against the environment,
+* routes the numeric core: numpy on ``cpu``, the torch mirror whenever
+  the resolved device is torch-backed (cuda / mps / explicit torch-cpu),
 * FAILS LOUD when a requested accelerator cannot actually be honored -
-  py8n never pretends a model trained on the numpy CPU core "ran on GPU".
+  py8n never pretends a model trained on CPU "ran on GPU".
 
 Resolution matrix (node intent wins over the platform default):
 
 =========== ============== ===========================================
-intent      env            result
-=========== ============== ===========================================
-cpu         any            cpu (numpy core) - the safe default
-auto        -              best USABLE device for this build = cpu, with
-                           a note when accelerators exist but no numeric
-                           bridge is wired in
-gpu         accelerator+   REFUSED with honest guidance (either no
-                           accelerator -> install torch with CUDA, or an
-                           accelerator exists but this build's training
-                           core has no GPU numeric path -> do not fake it)
+intent      result
+cpu         numpy core on CPU - the safe default, no torch needed
+auto        torch+cuda if available, else torch+mps, else numpy CPU
+            (with a note) - the best device this environment offers
+gpu         torch+cuda or torch+mps REQUIRED - refused with exact
+            remediation when torch is missing or no accelerator shows
+torch       the torch backend on its best device (cuda > mps > cpu) -
+            an explicit opt-in that also covers torch-CPU
 =========== ============== ===========================================
 """
 
@@ -35,7 +36,7 @@ import platform
 
 from ..config import settings
 
-DEVICE_CHOICES = ("cpu", "auto", "gpu")
+DEVICE_CHOICES = ("cpu", "auto", "gpu", "torch")
 
 
 def detect_devices() -> dict:
@@ -66,6 +67,10 @@ def detect_devices() -> dict:
 def _inventory(*, torch_installed: bool, torch_version: str | None, cuda: dict, mps: dict,
                notes: list[str]) -> dict:
     accel = cuda["available"] or mps["available"]
+    if torch_installed:
+        backend = "numpy (cpu) + torch (cuda/mps/cpu)" if accel else "numpy (cpu) + torch (cpu)"
+    else:
+        backend = "numpy (cpu)"
     inv = {
         "cpu": {"cores": os.cpu_count() or 1, "arch": platform.machine(),
                 "proc": platform.processor() or platform.machine()},
@@ -74,23 +79,29 @@ def _inventory(*, torch_installed: bool, torch_version: str | None, cuda: dict, 
         "cuda": cuda,
         "mps": mps,
         "accelerator_present": accel,
-        "compute_backend": "numpy (cpu)",
+        "compute_backend": backend,
         "notes": notes,
     }
     if not torch_installed and not notes:
         inv["notes"].append(
-            "torch is not installed - the numpy CPU core is the only training backend in this build")
+            "torch is not installed - the numpy CPU core is the only training backend in this build "
+            "(install torch to unlock the gpu/torch device options)")
+    elif torch_installed and not accel and not notes:
+        inv["notes"].append(
+            "torch is installed (no CUDA/MPS accelerator visible) - device=torch trains on the "
+            "torch CPU backend; a CUDA/MPS torch build unlocks real GPU compute")
     elif accel and not notes:
         inv["notes"].append(
-            "an accelerator is present, but this build's training cores compute in numpy on CPU - "
-            "GPU execution requires a torch-backend training build")
+            "accelerator available - device=auto/gpu route training through the torch backend")
     return inv
 
 
 def resolve_device(requested: str | None) -> dict:
     """Resolve a node's device intent into an honest placement verdict.
 
-    Returns ``{"requested", "resolved", "backend", "usable", "note"}``.
+    Returns ``{"requested", "resolved", "backend", "usable", "note"}``
+    where ``backend`` is ``numpy`` or ``torch`` (the node picks the matching
+    numeric core) and ``resolved`` is ``cpu`` / ``cuda`` / ``mps``.
     Raises ``ValueError`` when the intent cannot be honored (fail loud,
     with the exact remediation in the message).
     """
@@ -106,16 +117,34 @@ def resolve_device(requested: str | None) -> dict:
     inv = detect_devices()
 
     if intent == "auto":
-        # auto = best USABLE device for THIS build.  The numeric training
-        # core is numpy, so the only usable device is the CPU - even when
-        # an accelerator is physically present (no GPU numeric bridge).
-        if inv["accelerator_present"]:
-            name = (inv["cuda"]["names"] or ["Apple MPS"])[0] if inv["cuda"]["available"] else "Apple MPS"
-            return {"requested": intent, "resolved": "cpu", "backend": "numpy",
-                    "usable": True,
-                    "note": f"auto: {name} detected but unusable by this build's numpy training core - running on CPU"}
+        # auto = the best device this environment actually offers
+        if inv["cuda"]["available"]:
+            name = inv["cuda"]["names"][0]
+            return {"requested": intent, "resolved": "cuda", "backend": "torch",
+                    "usable": True, "note": f"auto: training on {name} via the torch backend"}
+        if inv["mps"]["available"]:
+            return {"requested": intent, "resolved": "mps", "backend": "torch",
+                    "usable": True, "note": "auto: training on Apple MPS via the torch backend"}
+        note = "auto: no accelerator detected - running on CPU"
+        if inv["torch_installed"]:
+            note += " (numpy core; device=torch would use the torch CPU backend)"
         return {"requested": intent, "resolved": "cpu", "backend": "numpy",
-                "usable": True, "note": "auto: no accelerator detected - running on CPU"}
+                "usable": True, "note": note}
+
+    if intent == "torch":
+        if not inv["torch_installed"]:
+            raise ValueError(
+                "device=torch refused: torch is not installed in this environment. "
+                "Install torch (the CPU wheel is enough for torch-cpu; use a CUDA build "
+                "for GPU compute) - or set device=cpu for the numpy core.")
+        if inv["cuda"]["available"]:
+            return {"requested": intent, "resolved": "cuda", "backend": "torch",
+                    "usable": True, "note": f"torch backend on {inv['cuda']['names'][0]}"}
+        if inv["mps"]["available"]:
+            return {"requested": intent, "resolved": "mps", "backend": "torch",
+                    "usable": True, "note": "torch backend on Apple MPS"}
+        return {"requested": intent, "resolved": "cpu", "backend": "torch",
+                "usable": True, "note": "torch CPU backend (no accelerator visible)"}
 
     # intent == "gpu" - an explicit claim py8n will not fake.
     if not inv["torch_installed"]:
@@ -126,11 +155,12 @@ def resolve_device(requested: str | None) -> dict:
     if not inv["accelerator_present"]:
         raise ValueError(
             "device=gpu refused: torch is installed but no CUDA/MPS accelerator is visible. "
-            "Check the driver / nvidia-smi, or set device=cpu / device=auto.")
-    raise ValueError(
-        "device=gpu refused: an accelerator IS present, but this build's training cores "
-        "compute in numpy on the CPU - silently faking GPU placement is worse than refusing. "
-        "Deploy a torch-backend training build for real GPU compute, or set device=cpu.")
+            "Check the driver / nvidia-smi, or set device=cpu / device=auto / device=torch.")
+    if inv["cuda"]["available"]:
+        return {"requested": intent, "resolved": "cuda", "backend": "torch",
+                "usable": True, "note": f"GPU training on {inv['cuda']['names'][0]} via the torch backend"}
+    return {"requested": intent, "resolved": "mps", "backend": "torch",
+            "usable": True, "note": "GPU training on Apple MPS via the torch backend"}
 
 
 def device_mode_report() -> dict:
@@ -138,7 +168,7 @@ def device_mode_report() -> dict:
     return {
         "device_mode": settings.device_mode,
         "allowed_modes": DEVICE_CHOICES,
-        "usage": "lm_train / neural_train nodes accept device=cpu|auto|gpu; "
-                 "PY8N_DEVICE_MODE sets the platform default (cpu|auto|gpu)",
+        "usage": "lm_train / neural_train / lm_generate nodes accept "
+                 "device=cpu|auto|gpu|torch; PY8N_DEVICE_MODE sets the platform default",
         **detect_devices(),
     }

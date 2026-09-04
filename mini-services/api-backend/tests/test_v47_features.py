@@ -141,7 +141,8 @@ def test_v47_definitions():
             by = {d["type"]: d for d in defs}
             assert "drift_check" in types
             props = set(by["drift_check"]["parameters_schema"]["properties"].keys())
-            assert props == {"model", "threshold", "on_drift"}
+            # v66 added text_column (LM loss-distribution drift checks)
+            assert props == {"model", "text_column", "threshold", "on_drift"}
 
             # templates: the two v47 production templates ship and validate
             res = await client.get("/templates")
