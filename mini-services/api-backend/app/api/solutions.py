@@ -25,7 +25,14 @@ from ..auth import get_optional_user, own_or_404
 from ..db import get_db
 from ..models import Dataset, Solution, Workflow
 from ..api.packs import PackDocument, _import_pack_doc
-from ..services.solutions import ensure_seeded, finalize_pack_dataset_names, pack_summary, solution_summary
+from ..services.solutions import (
+    MODEL_SYSTEM_MODALITIES,
+    ensure_seeded,
+    finalize_pack_dataset_names,
+    finalize_pack_model_names,
+    pack_summary,
+    solution_summary,
+)
 
 router = APIRouter(prefix="/solutions", tags=["solutions"])
 
@@ -35,6 +42,7 @@ SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,120}$")
 class SolutionInstallRequest(BaseModel):
     note: str = Field(default="", max_length=300, description="Optional install note for the response")
     as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything this install created")
+    as_model_system: bool = Field(default=False, description="v64: also create a Model System (datasets + training/serving workflows as one operating unit)")
 
 
 class SolutionAuthorRequest(BaseModel):
@@ -95,9 +103,10 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
     await ensure_seeded(db)
     await db.commit()
     s = await _get_solution(db, slug)
-    pack_dict = await finalize_pack_dataset_names(db, s.pack_json or {})
-    pack = PackDocument.model_validate(pack_dict)
     owner = user.id if user else None
+    pack_dict = await finalize_pack_dataset_names(db, s.pack_json or {})
+    pack_dict = await finalize_pack_model_names(db, pack_dict, owner)
+    pack = PackDocument.model_validate(pack_dict)
     result = await _import_pack_doc(pack, owner, db)
     s.installs = int(s.installs or 0) + 1
 
@@ -120,6 +129,40 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         await db.flush()
         system_ref = {"id": sys_row.id, "name": sys_row.name}
 
+    model_system_ref = None
+    if body and body.as_model_system:
+        from ..models import ModelSystem, ModelSystemComponent
+        from ..services.model_systems import MODALITY_NODE_TYPES
+
+        # declared modalities for curated model solutions, otherwise derived
+        # from the pack's own node-type evidence (fail-honest fallback: text
+        # is NOT assumed - a pack with no modality nodes declares none)
+        declared = list(MODEL_SYSTEM_MODALITIES.get(s.slug, []))
+        if not declared:
+            evidence: set[str] = set()
+            for w in (s.pack_json or {}).get("workflows", []):
+                for n in (w.get("graph") or {}).get("nodes", []):
+                    mod = MODALITY_NODE_TYPES.get(n.get("type") or "")
+                    if mod:
+                        evidence.add(mod)
+            declared = sorted(evidence)
+        ms_row = ModelSystem(
+            name=f"{s.name} model system",
+            description=f"Installed from the '{s.name}' solution - " + (body.note or s.tagline or "")[:400],
+            icon=s.icon if s.icon != "package" else "brain-circuit",
+            color=s.color,
+            modalities=declared,
+        )
+        ms_row.owner_id = owner
+        db.add(ms_row)
+        await db.flush()
+        for wf in result.get("workflows", []):
+            db.add(ModelSystemComponent(model_system_id=ms_row.id, kind="workflow", ref_id=wf["id"]))
+        for ds in result.get("datasets", []):
+            db.add(ModelSystemComponent(model_system_id=ms_row.id, kind="dataset", ref_id=ds["id"]))
+        await db.flush()
+        model_system_ref = {"id": ms_row.id, "name": ms_row.name, "modalities": declared}
+
     await db.commit()
     return {
         "slug": s.slug,
@@ -131,6 +174,7 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         "skipped": result.get("skipped", []),
         "warnings": result.get("warnings", []),
         "system": system_ref,
+        "model_system": model_system_ref,
     }
 
 

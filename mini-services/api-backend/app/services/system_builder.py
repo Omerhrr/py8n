@@ -303,8 +303,39 @@ def toggle_component(spec: dict, component_id: str, selected: bool) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Optional LLM enhancement (fail-soft)
+# Optional LLM involvement (fail-soft): "enhance" (v59) and "llm_first" (v64)
 # ---------------------------------------------------------------------------
+
+async def _bridge_json(system: str, user: str) -> tuple[dict | None, str]:
+    """One sandbox-bridge call that must return a JSON object.
+
+    Returns ``(parsed_dict, "")`` on success or ``(None, reason)`` on ANY
+    failure - callers phrase their own honest notes and fall back.
+    """
+    url = f"{settings.llm_bridge_url.rstrip('/')}/v1/chat/completions"
+    try:
+        async with httpx.AsyncClient(timeout=NARRATE_TIMEOUT) as client:
+            resp = await client.post(url, json={
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "temperature": 0.1, "max_tokens": 700,
+            })
+    except Exception as exc:
+        return None, f"bridge unreachable ({type(exc).__name__})"
+    if resp.status_code >= 400:
+        return None, f"bridge returned HTTP {resp.status_code}"
+    try:
+        data = resp.json()
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    except Exception:
+        return None, "bridge reply was not OpenAI-shaped JSON"
+    match = re.search(r"\{.*\}", content, re.DOTALL)
+    if not match:
+        return None, "reply was not JSON"
+    try:
+        return json.loads(match.group(0)), ""
+    except ValueError:
+        return None, "reply was not parseable JSON"
+
 
 def _llm_available_payload(spec: dict, description: str) -> tuple[str, str]:
     lib = "\n".join(f"- {c['id']}: {c['label']} ({c['tier']})" for c in COMPONENT_LIBRARY)
@@ -322,31 +353,9 @@ async def enhance_spec_with_llm(spec: dict, description: str) -> dict:
     """One sandbox-bridge call to refine the deterministic spec. Fail-soft:
     any bridge/parse problem keeps the deterministic spec and adds a note."""
     system, user = _llm_available_payload(spec, description)
-    url = f"{settings.llm_bridge_url.rstrip('/')}/v1/chat/completions"
-    try:
-        async with httpx.AsyncClient(timeout=NARRATE_TIMEOUT) as client:
-            resp = await client.post(url, json={
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-                "temperature": 0.1, "max_tokens": 700,
-            })
-        if resp.status_code >= 400:
-            spec["notes"].append(f"LLM enhancement skipped: bridge returned HTTP {resp.status_code}")
-            return spec
-        data = resp.json()
-        content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
-    except Exception as exc:
-        spec["notes"].append(f"LLM enhancement skipped: bridge unreachable ({type(exc).__name__})")
-        return spec
-
-    # extract the first JSON object from the reply
-    match = re.search(r"\{.*\}", content, re.DOTALL)
-    if not match:
-        spec["notes"].append("LLM enhancement skipped: reply was not JSON")
-        return spec
-    try:
-        refined = json.loads(match.group(0))
-    except ValueError:
-        spec["notes"].append("LLM enhancement skipped: reply was not parseable JSON")
+    refined, reason = await _bridge_json(system, user)
+    if refined is None:
+        spec["notes"].append(f"LLM enhancement skipped: {reason}")
         return spec
 
     known = {c["id"] for c in COMPONENT_LIBRARY}
@@ -371,6 +380,91 @@ async def enhance_spec_with_llm(spec: dict, description: str) -> dict:
     for note in refined.get("notes", []) if isinstance(refined.get("notes"), list) else []:
         if isinstance(note, str) and note.strip():
             spec["notes"].append(f"AI: {note.strip()[:200]}")
+    return spec
+
+
+# ---------------------------------------------------------------------------
+# v64: LLM-FIRST mode - the model proposes the design, py8n validates it.
+# ---------------------------------------------------------------------------
+
+_LLM_FIRST_SYSTEM = (
+    "You are py8n's system architect in LLM-FIRST mode: the user's plain-language "
+    "request is ALL you get - propose the design yourself. Return STRICT JSON only: "
+    "{\"title\": str, \"persona\": \"business\"|\"data_engineer\", \"selected\": [component ids], "
+    "\"questions\": [str], \"notes\": [str]}. \"selected\" must list the component ids from the "
+    "library that this system needs (always include target_dataset and pipeline_workflow; "
+    "pick recommended/optional pieces ONLY when the request calls for them). Max 4 questions "
+    "for whatever is genuinely unknown. No prose outside the JSON."
+)
+
+
+def _llm_first_payload(description: str) -> str:
+    lib = "\n".join(f"- {c['id']}: {c['label']} - {c['detail']} ({c['tier']})"
+                    for c in COMPONENT_LIBRARY)
+    return (f"Request: {description}\n\nComponent library (the ONLY components you may select):\n{lib}")
+
+
+def _repair_llm_spec(refined: dict, spec: dict) -> dict:
+    """Fold an LLM-proposed design into a VALID py8n spec.
+
+    The LLM proposes; py8n disposes: unknown component ids are dropped (it
+    can never propose a component py8n cannot build), the backbone
+    (target_dataset + pipeline_workflow) is forced back on, the quality
+    gate is dropped when its schema-contract dependency is missing, and
+    questions are capped. Anything the LLM did not answer (source,
+    schedule, fields) stays at the deterministic baseline parsed from the
+    description.
+    """
+    known = {c["id"]: c for c in COMPONENT_LIBRARY}
+    if isinstance(refined.get("title"), str) and refined["title"].strip():
+        spec["title"] = refined["title"].strip()[:80]
+    if refined.get("persona") in ("business", "data_engineer"):
+        spec["persona"] = refined["persona"]
+
+    wanted = {p for p in (refined.get("selected") or []) if isinstance(p, str) and p in known}
+    wanted |= {"target_dataset", "pipeline_workflow"}  # the backbone is not negotiable
+    if "quality_gate" in wanted and "schema_contract" not in wanted:
+        wanted.discard("quality_gate")  # dependency validated, deterministically
+    for c in spec["components"]:
+        c["selected"] = c["id"] in wanted
+
+    # deterministic keyed questions for the (possibly new) spec state, then
+    # the LLM's own free-form questions, capped at 4
+    spec["questions"] = _questions_for(spec)
+    existing_q = {q["question"] for q in spec["questions"]}
+    if isinstance(refined.get("questions"), list):
+        for i, q in enumerate(refined["questions"][:4]):
+            if isinstance(q, str) and q.strip() and q.strip() not in existing_q:
+                spec["questions"].append({
+                    "id": f"q_llm{i}", "question": q.strip()[:300],
+                    "key": f"llm_{i}", "answered": False, "llm": True,
+                })
+    for note in refined.get("notes", []) if isinstance(refined.get("notes"), list) else []:
+        if isinstance(note, str) and note.strip():
+            spec["notes"].append(f"AI: {note.strip()[:200]}")
+    return spec
+
+
+async def synthesize_spec_llm_first(description: str) -> dict:
+    """LLM-first spec synthesis: the sandbox-bridge model proposes the whole
+    design from the description + component library; py8n repairs it into a
+    valid spec. Fail-soft: an unreachable bridge or unparseable reply falls
+    back to the deterministic synthesis with an honest note - the builder
+    NEVER returns nothing."""
+    text = (description or "").strip()
+    if not text:
+        raise ValueError("description is required")
+    spec = synthesize_spec(text)  # deterministic baseline (schedule/source/persona parse)
+    refined, reason = await _bridge_json(_LLM_FIRST_SYSTEM, _llm_first_payload(text))
+    if refined is None:
+        spec["mode"] = "llm_first_fallback"
+        spec["notes"].append(
+            f"LLM-first fell back to the deterministic design: {reason}")
+        return spec
+    spec = _repair_llm_spec(refined, spec)
+    spec["mode"] = "llm_first"
+    spec["notes"].append(
+        "LLM-first mode: the sandbox-bridge model proposed this design - review the checklist before build")
     return spec
 
 

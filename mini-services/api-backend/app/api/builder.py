@@ -27,6 +27,7 @@ from ..services.system_builder import (
     build_system,
     enhance_spec_with_llm,
     synthesize_spec,
+    synthesize_spec_llm_first,
     toggle_component,
 )
 
@@ -35,7 +36,8 @@ router = APIRouter(prefix="/builder/systems", tags=["builder"])
 
 class SystemCreate(BaseModel):
     description: str = Field(..., min_length=8, max_length=4000)
-    use_llm: bool = Field(default=False, description="Refine the spec with the sandbox-bridge LLM (fail-soft)")
+    use_llm: bool = Field(default=False, description="v59: refine the deterministic spec with the sandbox-bridge LLM (fail-soft)")
+    llm_first: bool = Field(default=False, description="v64: LLM-FIRST mode - the model proposes the design, py8n validates it (fail-soft fallback to the deterministic synthesis)")
 
 
 class AnswersIn(BaseModel):
@@ -72,12 +74,15 @@ async def _get_draft(db: AsyncSession, draft_id: str, user) -> SystemDraft:
 
 @router.post("", status_code=201)
 async def create_system_draft(body: SystemCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    """Describe -> Discover: synthesize the SystemSpec from plain language."""
+    """Describe -> Discover: LLM-first (v64), LLM-enhanced (v59) or deterministic synthesis."""
     try:
-        spec = synthesize_spec(body.description)
+        if body.llm_first:
+            spec = await synthesize_spec_llm_first(body.description)
+        else:
+            spec = synthesize_spec(body.description)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if body.use_llm:
+    if body.use_llm and not body.llm_first:
         spec = await enhance_spec_with_llm(spec, body.description)
     draft = SystemDraft(
         name=spec.get("title") or "System",
@@ -165,15 +170,8 @@ async def toggle_system_component(draft_id: str, body: ComponentToggle, user=Dep
                      "selected": body.selected, "ts": _ts()})
     draft.spec_json = spec
     draft.messages_json = messages
-    import sys as _sys
-    print("DBG dirty:", [(type(a).__name__, id(a), (getattr(a, "built_json", {}) or {}).get("system_id")) for a in db.dirty], "| draft id:", id(draft), file=_sys.stderr)
     await db.commit()
-    from sqlalchemy import text as _text
-    _row = (await db.execute(_text("SELECT built_json FROM system_drafts WHERE id = :i"), {"i": draft.id})).first()
-    import json as _j; _b = _j.loads(_row[0]) if isinstance(_row[0], str) else _row[0]
-    print("DBG raw DB after commit system_id:", (_b or {}).get("system_id"), file=_sys.stderr)
     await db.refresh(draft)
-    print("DBG after refresh system_id:", (draft.built_json or {}).get("system_id"), file=_sys.stderr)
     return _out(draft)
 
 

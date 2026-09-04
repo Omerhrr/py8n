@@ -23,6 +23,7 @@ interface Detail extends ModelSystemCard {
   datasets: { id: string; name: string; rows: number; columns: (string | null)[] }[]
   training: {
     classical_versions: number; neural_versions: number; fine_tuned_versions: number
+    language_versions?: number; continued_pretrained_versions?: number
     distinct_models: number; total_versions: number
     latest: { id: string; name: string; version: number; algorithm: string; family: string; task: string; active: boolean; metrics: Record<string, any>; fine_tuned_from: string | null }[]
   }
@@ -77,6 +78,7 @@ const verdictMeta: Record<string, { chip: string; label: string }> = {
 const familyChip: Record<string, string> = {
   neural: 'bg-indigo-500/20 text-indigo-300',
   classical: 'bg-zinc-700/40 text-zinc-300',
+  language: 'bg-fuchsia-500/20 text-fuchsia-300',
 }
 
 const metricLabel: Record<string, string> = {
@@ -374,7 +376,9 @@ onMounted(async () => {
                 <div class="ml-auto flex gap-1.5 text-[10px]">
                   <span class="rounded-full bg-zinc-800 px-2 py-0.5">{{ detail.training.classical_versions }} classical</span>
                   <span class="rounded-full bg-indigo-500/20 px-2 py-0.5 text-indigo-300">{{ detail.training.neural_versions }} neural</span>
+                  <span v-if="detail.training.language_versions" class="rounded-full bg-fuchsia-500/20 px-2 py-0.5 text-fuchsia-300">{{ detail.training.language_versions }} language</span>
                   <span v-if="detail.training.fine_tuned_versions" class="rounded-full bg-sky-500/20 px-2 py-0.5 text-sky-300">{{ detail.training.fine_tuned_versions }} fine-tuned</span>
+                  <span v-if="detail.training.continued_pretrained_versions" class="rounded-full bg-purple-500/20 px-2 py-0.5 text-purple-300">{{ detail.training.continued_pretrained_versions }} continued</span>
                 </div>
               </div>
               <div v-if="detail.training.latest.length" class="space-y-1.5">

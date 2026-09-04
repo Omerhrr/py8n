@@ -159,6 +159,115 @@ API_MONITOR_GRAPH = {
     ],
 }
 
+# ---------------------------------------------------------------------------
+# v64: model solutions - packs whose install IS a model system. Each trains
+# (or serves) a real model through the engine, fully offline.
+# ---------------------------------------------------------------------------
+
+SENTIMENT_TRAIN_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Run Training",
+         "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "read", "type": "dataset_read", "name": "Labeled Corpus",
+         "position": {"x": 220, "y": 0}, "parameters": {"dataset": "sentiment_corpus"}},
+        {"id": "feats", "type": "text_features", "name": "Text Features (fit)",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"column": "text", "mode": "fit", "featurizer": "sentiment-vec",
+                        "svd_dims": 6, "ngram_max": 1, "prefix": "txt"}},
+        {"id": "train", "type": "neural_train", "name": "Train Sentiment Model",
+         "position": {"x": 660, "y": 0},
+         "parameters": {"task": "classification", "target": "label",
+                        "features": "txt_vec_0,txt_vec_1,txt_vec_2,txt_vec_3,txt_vec_4,txt_vec_5",
+                        "hidden_layers": "16,8", "epochs": 40, "batch_size": 8,
+                        "learning_rate": 0.02, "model_name": "sentiment_model", "register": True}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "read"},
+        {"id": "e2", "source": "read", "target": "feats"},
+        {"id": "e3", "source": "feats", "target": "train"},
+    ],
+}
+
+SENTIMENT_SERVE_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Run Scorer",
+         "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "read", "type": "dataset_read", "name": "Inbox",
+         "position": {"x": 220, "y": 0}, "parameters": {"dataset": "sentiment_inbox"}},
+        {"id": "feats", "type": "text_features", "name": "Text Features (transform)",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"column": "text", "mode": "transform", "featurizer": "sentiment-vec",
+                        "prefix": "txt"}},
+        {"id": "predict", "type": "model_predict", "name": "Score Sentiment",
+         "position": {"x": 660, "y": 0}, "parameters": {"model": "sentiment_model"}},
+        {"id": "write", "type": "dataset_write", "name": "Score Ledger",
+         "position": {"x": 880, "y": 0},
+         "parameters": {"dataset": "sentiment_scores", "mode": "append"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "read"},
+        {"id": "e2", "source": "read", "target": "feats"},
+        {"id": "e3", "source": "feats", "target": "predict"},
+        {"id": "e4", "source": "predict", "target": "write"},
+    ],
+}
+
+LM_PRETRAIN_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Run Pretraining",
+         "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "read", "type": "dataset_read", "name": "Support Corpus",
+         "position": {"x": 220, "y": 0}, "parameters": {"dataset": "lm_corpus"}},
+        {"id": "train", "type": "lm_train", "name": "Pretrain Language Model",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"text_column": "doc", "vocab_size": 200, "d_model": 32,
+                        "n_heads": 2, "n_ctx": 12, "epochs": 10, "batch_size": 8,
+                        "learning_rate": 0.005, "model_name": "support_lm", "register": True}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "read"},
+        {"id": "e2", "source": "read", "target": "train"},
+    ],
+}
+
+LM_CONTINUE_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Run Continued Pretraining",
+         "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "read", "type": "dataset_read", "name": "Legal Corpus",
+         "position": {"x": 220, "y": 0}, "parameters": {"dataset": "lm_corpus_legal"}},
+        {"id": "train", "type": "lm_train", "name": "Continue Pretraining",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"text_column": "doc", "base_model": "support_lm",
+                        "epochs": 8, "batch_size": 8, "learning_rate": 0.003,
+                        "model_name": "support_lm", "register": True}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "read"},
+        {"id": "e2", "source": "read", "target": "train"},
+    ],
+}
+
+LM_GENERATE_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Prompt",
+         "position": {"x": 0, "y": 0},
+         "parameters": {"payload": {"prompt": "the agent"}}},
+        {"id": "gen", "type": "lm_generate", "name": "Generate Text",
+         "position": {"x": 220, "y": 0},
+         "parameters": {"model": "support_lm",
+                        "prompt": "{{ nodes.intake.output.payload.prompt }}",
+                        "max_tokens": 8, "temperature": 0.7, "top_k": 20}},
+        {"id": "write", "type": "dataset_write", "name": "Sample Ledger",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"dataset": "lm_samples", "mode": "append"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "gen"},
+        {"id": "e2", "source": "gen", "target": "write"},
+    ],
+}
+
 CURATED_SOLUTIONS: list[dict] = [
     {
         "slug": "customer-support-automation",
@@ -255,6 +364,129 @@ CURATED_SOLUTIONS: list[dict] = [
                  "every 5 minutes the result lands in api_uptime. Chart it from the Reports page or "
                  "generate a dashboard over the dataset."),
     },
+    {
+        "slug": "sentiment-model-system",
+        "name": "Text Sentiment Model System",
+        "tagline": "A complete sentiment model as one operating unit: labeled corpus in, featurizer + trained classifier out, serving workflow on top - install it as a MODEL SYSTEM.",
+        "category": "AI Models",
+        "icon": "smile",
+        "color": "#34d399",
+        "model_system": {"modalities": ["text"]},
+        "outcomes_json": [
+            "Labeled sentiment corpus",
+            "Fitted text featurizer (serving parity)",
+            "From-scratch neural classifier",
+            "Model registry entry",
+            "Serving workflow (transform -> predict)",
+            "Score ledger dataset",
+        ],
+        "pack_json": _pack(
+            [
+                _wf("Train Sentiment Model",
+                    "Corpus -> text_features(fit) -> neural_train -> registry.",
+                    SENTIMENT_TRAIN_GRAPH),
+                _wf("Serve Sentiment Scorer",
+                    "Inbox -> text_features(transform) -> model_predict -> score ledger.",
+                    SENTIMENT_SERVE_GRAPH),
+            ],
+            [
+                _ds("sentiment_corpus", "Labeled sentiment training corpus",
+                    [{"name": "text", "dtype": "text"}, {"name": "label", "dtype": "text"}],
+                    [{"text": "the new update is fantastic and fast", "label": "positive"},
+                     {"text": "absolutely love the smooth experience", "label": "positive"},
+                     {"text": "great support and quick resolution", "label": "positive"},
+                     {"text": "the team delivered beyond expectations", "label": "positive"},
+                     {"text": "brilliant product worth every cent", "label": "positive"},
+                     {"text": "happy with the improved dashboard", "label": "positive"},
+                     {"text": "excellent quality and fast delivery", "label": "positive"},
+                     {"text": "the release works beautifully", "label": "positive"},
+                     {"text": "pricing is fair and the tool is great", "label": "positive"},
+                     {"text": "wonderful onboarding and clear docs", "label": "positive"},
+                     {"text": "the service keeps breaking weekly", "label": "negative"},
+                     {"text": "terrible latency and constant errors", "label": "negative"},
+                     {"text": "support never replied to my ticket", "label": "negative"},
+                     {"text": "the billing mistakes are frustrating", "label": "negative"},
+                     {"text": "worst upgrade we ever installed", "label": "negative"},
+                     {"text": "the app crashes on every export", "label": "negative"},
+                     {"text": "disappointed by the broken search", "label": "negative"},
+                     {"text": "slow imports ruin the workflow", "label": "negative"},
+                     {"text": "the connector fails without warning", "label": "negative"},
+                     {"text": "regret switching to this platform", "label": "negative"}]),
+                _ds("sentiment_inbox", "Fresh messages waiting to be scored",
+                    [{"name": "text", "dtype": "text"}],
+                    [{"text": "the export finally works great"}, {"text": "another crash during import"}]),
+                _ds("sentiment_scores", "Scored messages land here", [], []),
+            ],
+        ),
+        "docs": ("Install AS A MODEL SYSTEM, then run 'Train Sentiment Model' once - it fits the "
+                 "text featurizer and trains the classifier into the registry. Run 'Serve Sentiment "
+                 "Scorer' to score the inbox through the SAME featurizer into sentiment_scores. "
+                 "Runs fully offline."),
+    },
+    {
+        "slug": "language-model-system",
+        "name": "Language Model System",
+        "tagline": "A tiny causal transformer trained FROM SCRATCH on your support corpus, continued-pretrained on a legal corpus, then sampled for text - the full LM life cycle offline.",
+        "category": "AI Models",
+        "icon": "languages",
+        "color": "#c084fc",
+        "model_system": {"modalities": ["text"]},
+        "outcomes_json": [
+            "Support-domain training corpus",
+            "From-scratch transformer pretraining",
+            "Continued pretraining on a new domain",
+            "Version lineage (continued_pretrained_from)",
+            "Held-out perplexity evaluation",
+            "Autoregressive text generation workflow",
+        ],
+        "pack_json": _pack(
+            [
+                _wf("Pretrain Language Model",
+                    "Corpus -> lm_train (from-scratch transformer, registered as support_lm).",
+                    LM_PRETRAIN_GRAPH),
+                _wf("Continue Pretraining",
+                    "Legal corpus -> lm_train(base_model=support_lm) -> version 2 with lineage.",
+                    LM_CONTINUE_GRAPH),
+                _wf("Generate With Language Model",
+                    "Prompt -> lm_generate -> sample ledger.",
+                    LM_GENERATE_GRAPH),
+            ],
+            [
+                _ds("lm_corpus", "Support-domain pretraining corpus",
+                    [{"name": "doc", "dtype": "text"}],
+                    [{"doc": "the agent replies to the customer about the login issue"},
+                     {"doc": "the agent fixes the login bug today"},
+                     {"doc": "the customer asks about the refund policy"},
+                     {"doc": "the agent ships the order to the customer"},
+                     {"doc": "the ticket about the login issue is closed"},
+                     {"doc": "the refund policy covers the order"},
+                     {"doc": "the agent escalates the ticket to the team"},
+                     {"doc": "the customer thanks the agent today"},
+                     {"doc": "the login bug blocks the order today"},
+                     {"doc": "the team reviews the refund ticket"},
+                     {"doc": "the agent answers the ticket about the policy"},
+                     {"doc": "the customer reopens the login ticket"},
+                     {"doc": "the agent closes the refund ticket today"},
+                     {"doc": "the team fixes the policy bug"},
+                     {"doc": "the order ships after the agent reviews it"}]),
+                _ds("lm_corpus_legal", "Legal-domain corpus for continued pretraining",
+                    [{"name": "doc", "dtype": "text"}],
+                    [{"doc": "the contract defines the refund policy for the customer"},
+                     {"doc": "the policy states the order terms clearly"},
+                     {"doc": "the agent reviews the contract with the team"},
+                     {"doc": "the customer signs the policy today"},
+                     {"doc": "the contract covers the ticket escalation terms"},
+                     {"doc": "the team updates the refund contract"},
+                     {"doc": "the policy agent explains the terms"},
+                     {"doc": "the contract team closes the policy ticket"}]),
+                _ds("lm_samples", "Generated text samples land here", [], []),
+            ],
+        ),
+        "docs": ("Install AS A MODEL SYSTEM, then run the three workflows in order: 'Pretrain Language "
+                 "Model' trains the transformer from scratch, 'Continue Pretraining' adapts it to the "
+                 "legal corpus (weights + tokenizer carry over, lineage recorded), 'Generate With "
+                 "Language Model' samples text into lm_samples. Runs fully offline."),
+    },
 ]
 
 
@@ -270,9 +502,100 @@ def solution_summary(s: Solution) -> dict:
         "outcomes": list(s.outcomes_json or []),
         "installs": int(s.installs or 0),
         "curated": s.owner_id is None,
+        "model_system_ready": s.slug in MODEL_SYSTEM_MODALITIES,  # v64: installs as a model system
         "workflow_count": len((s.pack_json or {}).get("workflows", [])),
         "dataset_count": len((s.pack_json or {}).get("datasets", [])),
     }
+
+
+# ---------------------------------------------------------------------------
+# v64: model-system metadata + install-time model-name finalization
+# ---------------------------------------------------------------------------
+
+# Curated solutions whose install IS a model system: slug -> declared modalities.
+MODEL_SYSTEM_MODALITIES: dict[str, list[str]] = {
+    "sentiment-model-system": ["text"],
+    "language-model-system": ["text"],
+}
+
+_TRAINER_NODE_TYPES = {"model_train", "neural_train", "lm_train"}
+_SCORER_NODE_TYPES = {"model_predict", "drift_check", "lm_generate"}
+
+
+async def finalize_pack_model_names(db: AsyncSession, pack: dict, owner_id: str | None) -> dict:
+    """Second half of install-time finalization (v64): model registry names.
+
+    ``next_version`` and ``deactivate_others`` scope by NAME, so two users
+    installing the same solution would otherwise SHARE one version chain -
+    the second install would register as v2 of the FIRST user's model and
+    deactivate it. When a trainer node's model_name collides with a
+    registry chain owned by someone else, suffix it ("name 2", "name 3", ...)
+    and remap EVERY model reference in the pack (model_name on trainers,
+    base_model for fine-tune/continued-pretraining, model on scorers)
+    consistently - each install stays a self-consistent model system.
+    """
+    if owner_id is None:
+        return pack  # single-tenant installs intentionally share the namespace
+
+    created: set[str] = set()
+    for w in pack.get("workflows", []):
+        for n in (w.get("graph") or {}).get("nodes", []):
+            if n.get("type") in _TRAINER_NODE_TYPES:
+                name = str((n.get("parameters") or {}).get("model_name") or "").strip()
+                if name:
+                    created.add(name)
+    if not created:
+        return pack
+
+    from ..models import TrainedModel
+
+    async def _chain_owners(name: str) -> list[str | None]:
+        return list(
+            (await db.execute(select(TrainedModel.owner_id).where(TrainedModel.name == name)))
+            .scalars()
+            .all()
+        )
+
+    mapping: dict[str, str] = {}
+    for name in sorted(created):
+        owners = await _chain_owners(name)
+        if not owners or all(o in (owner_id, None) for o in owners):
+            continue  # unclaimed or already this user's chain
+        candidate = name
+        for suffix in range(2, 100):
+            candidate = f"{name} {suffix}"
+            owners2 = await _chain_owners(candidate)
+            if not owners2 or all(o in (owner_id, None) for o in owners2):
+                break
+        mapping[name] = candidate
+    if not mapping:
+        return pack
+
+    def _remap(graph: dict) -> dict:
+        g = {**graph, "nodes": [dict(n) for n in graph.get("nodes", [])]}
+        for n in g["nodes"]:
+            nt = n.get("type")
+            if nt not in _TRAINER_NODE_TYPES and nt not in _SCORER_NODE_TYPES:
+                continue
+            params = dict(n.get("parameters") or {})
+            touched = False
+            if nt in _TRAINER_NODE_TYPES:
+                for key in ("model_name", "base_model"):
+                    val = str(params.get(key) or "").strip()
+                    if val in mapping:
+                        params[key] = mapping[val]
+                        touched = True
+            val = str(params.get("model") or "").strip()
+            if val in mapping:
+                params["model"] = mapping[val]
+                touched = True
+            if touched:
+                n["parameters"] = params
+        return g
+
+    workflows_out = [{**w, "graph": _remap(w.get("graph") or {"nodes": [], "edges": []})}
+                     for w in pack.get("workflows", [])]
+    return {**pack, "workflows": workflows_out}
 
 
 def pack_summary(s: Solution) -> dict:

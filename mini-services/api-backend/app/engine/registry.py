@@ -34,6 +34,7 @@ from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode
 from .nodes.datascience import ChartNode, DriftCheckNode, ModelPredictNode, ModelTrainNode, PythonTransformNode  # v28 + v46 predict + v47 drift
 from .nodes.documents import DocumentExtractNode  # v32
 from .nodes.modal import AudioFeaturesNode, ImageFeaturesNode, NeuralTrainNode, TextFeaturesNode  # v63: multimodal + from-scratch neural
+from .nodes.lm import LMGenerateNode, LMTrainNode  # v64: from-scratch transformer LM + continued pretraining
 from .nodes.integrations import EmailSendNode, SlackMessageNode
 from .nodes.logic import CodeNode, DelayNode, IfConditionNode, SetVariableNode, StopAndErrorNode
 from .nodes.llm import LlmChatNode
@@ -98,6 +99,8 @@ for _cls in (
     ImageFeaturesNode,    # v63: stateless PIL image features per row
     AudioFeaturesNode,    # v63: stateless WAV features per row
     NeuralTrainNode,      # v63: from-scratch numpy MLP + fine-tuning from the registry
+    LMTrainNode,          # v64: from-scratch transformer LM + continued pretraining
+    LMGenerateNode,       # v64: autoregressive sampling from a registered LM
     DocumentExtractNode,  # v32: PDF/OCR/Word/Excel/CSV/JSON -> text + items
     LoopOverItemsNode,
     SetVariableNode,

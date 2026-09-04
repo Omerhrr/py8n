@@ -45,12 +45,14 @@ KIND_TABLES = {
     "report": ScheduledReport,
 }
 NEURAL_PREFIX = "mlp_"
+LANGUAGE_PREFIX = "lm_"
 HEALTH_BUDGET = 10
 
 # the honest modality capability matrix - what this inline-mode build can
 # actually extract today (video needs frame sampling; fail loud with guidance)
 CAPABILITIES = [
-    {"modality": "text", "available": True, "extractor": "text_features (TF-IDF+SVD, fit/transform)"},
+    {"modality": "text", "available": True,
+     "extractor": "text_features (TF-IDF+SVD, fit/transform) · lm_train (from-scratch transformer LM, continued pretraining) · lm_generate"},
     {"modality": "image", "available": True, "extractor": "image_features (PIL: channel stats, histogram, edges)"},
     {"modality": "audio", "available": True, "extractor": "audio_features (WAV: RMS, ZCR, FFT bands)"},
     {"modality": "document", "available": True, "extractor": "document_extract (PDF/DOCX/XLSX/CSV/JSON -> text) + text_features"},
@@ -64,8 +66,10 @@ MODALITY_NODE_TYPES = {
     "image_features": "image",
     "audio_features": "audio",
     "document_extract": "document",
+    "lm_train": "text",      # v64: language-model training is text evidence
+    "lm_generate": "text",   # v64: LM serving is text evidence
 }
-TRAINING_NODE_TYPES = {"model_train", "neural_train"}
+TRAINING_NODE_TYPES = {"model_train", "neural_train", "lm_train"}
 PREDICT_NODE_TYPE = "model_predict"
 
 
@@ -101,12 +105,15 @@ def model_system_summary(row: ModelSystem) -> dict:
 
 
 def _family(algorithm: str) -> str:
-    return "neural" if (algorithm or "").startswith(NEURAL_PREFIX) else "classical"
+    algo = algorithm or ""
+    if algo.startswith(LANGUAGE_PREFIX):
+        return "language"  # v64: lm_transformer and friends
+    return "neural" if algo.startswith(NEURAL_PREFIX) else "classical"
 
 
 def _metrics_top(metrics: dict) -> dict:
     keep = ("accuracy", "f1_weighted", "roc_auc", "r2", "mae", "rmse",
-            "architecture", "params_count", "epochs_run")
+            "perplexity", "architecture", "params_count", "epochs_run")
     return {k: metrics[k] for k in keep if k in (metrics or {})}
 
 
@@ -227,10 +234,13 @@ async def model_system_detail(db: AsyncSession, ms: ModelSystem) -> dict:
     neural = [m for m in model_rows if _family(m.algorithm) == "neural"]
     fine_tuned = [m for m in model_rows if (m.metrics or {}).get("fine_tuned_from")]
     names = {m.name for m in model_rows}
+    language = [m for m in model_rows if _family(m.algorithm) == "language"]
     training = {
         "classical_versions": len(classical),
         "neural_versions": len(neural),
+        "language_versions": len(language),
         "fine_tuned_versions": len(fine_tuned),
+        "continued_pretrained_versions": len([m for m in model_rows if (m.metrics or {}).get("continued_pretrained_from")]),
         "distinct_models": len(names),
         "total_versions": len(model_rows),
         "latest": [
@@ -252,8 +262,9 @@ async def model_system_detail(db: AsyncSession, ms: ModelSystem) -> dict:
             mod = MODALITY_NODE_TYPES.get(node.get("type") or "")
             if mod:
                 evidence.add(mod)
-            if node.get("type") in TRAINING_NODE_TYPES:
-                evidence.add("tabular")
+            nt = node.get("type") or ""
+            if nt in TRAINING_NODE_TYPES and nt != "lm_train":
+                evidence.add("tabular")  # table trainers; lm_train already proves 'text'
     modalities = {
         "declared": ms.modalities or [],
         "evidence": sorted(evidence),

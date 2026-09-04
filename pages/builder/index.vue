@@ -7,15 +7,15 @@ import {
 import { useApi } from '~/composables/useApi'
 
 // v59: AI System Builder - Describe -> Clarify -> Design -> Build -> Review.
-// The description synthesizes a SystemSpec (deterministic, so it can never
-// propose a component py8n cannot build); the interview + component toggles
-// refine it; Build translates the selected components into REAL primitives
-// (dataset, workflow graph, contract, policy, dashboard, report, alert rule).
+// The description synthesizes a SystemSpec; the interview + component toggles
+// refine it; Build translates the selected components into REAL primitives.
+// v64: three synthesis modes - deterministic (keyword), llm-enhance (v59),
+// and LLM-FIRST (the model proposes the design, py8n validates it, fail-soft).
 
 interface SpecComponent { id: string; label: string; tier: string; selected: boolean; note: string }
 interface SpecQuestion { id: string; question: string; key: string; answered: boolean; llm?: boolean }
 interface SystemSpec {
-  title: string; purpose: string; persona: string
+  title: string; purpose: string; persona: string; mode?: string
   source: { kind: string; backend: string; label: string; table: string; connection: string }
   schedule: Record<string, any>
   fields: { name: string; dtype: string }[]
@@ -32,6 +32,7 @@ interface Draft {
   spec: SystemSpec; messages: any[]; built: BuiltRefs | null
   created_at: string | null; updated_at: string | null
 }
+type SynthMode = 'deterministic' | 'enhance' | 'llm_first'
 interface BuiltRefs {
   workflow_id: string | null; workflow_name: string | null
   dataset_id: string | null; dataset_name: string | null
@@ -46,7 +47,7 @@ const loading = ref(true)
 const pageError = ref('')
 
 const description = ref('')
-const useLlm = ref(false)
+const synthMode = ref<SynthMode>('deterministic')
 const creating = ref(false)
 const draft = ref<Draft | null>(null)
 const drafts = ref<any[]>([])
@@ -66,6 +67,12 @@ const tierMeta: Record<string, { label: string; text: string }> = {
   core: { label: 'CORE', text: 'text-orange-300' },
   recommended: { label: 'RECOMMENDED', text: 'text-sky-300' },
   optional: { label: 'OPTIONAL', text: 'text-zinc-400' },
+}
+
+const modeMeta: Record<SynthMode, { label: string; hint: string }> = {
+  deterministic: { label: 'Deterministic', hint: 'keyword synthesis - testable, never overreaches' },
+  enhance: { label: 'AI enhance', hint: 'deterministic first, the bridge refines it (v59)' },
+  llm_first: { label: 'LLM-first', hint: 'the model proposes the design; py8n validates and repairs it' },
 }
 
 const selectedCount = computed(() => draft.value?.spec.components.filter(c => c.selected).length || 0)
@@ -112,7 +119,11 @@ async function createDraft() {
   creating.value = true
   pageError.value = ''
   try {
-    draft.value = await api.post('/builder/systems', { description: description.value.trim(), use_llm: useLlm.value })
+    draft.value = await api.post('/builder/systems', {
+      description: description.value.trim(),
+      use_llm: synthMode.value === 'enhance',
+      llm_first: synthMode.value === 'llm_first',
+    })
     answers.value = {}
     await loadDrafts()
   } catch (e: any) {
@@ -224,6 +235,20 @@ onMounted(async () => {
           class="mt-3 w-full resize-y rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-200 outline-none transition focus:border-pink-500/60"
           placeholder="I need a pipeline that pulls orders from Postgres every hour, validates the schema, handles late-arriving records, deduplicates them, writes to a curated dataset, and alerts me if quality drops."
         />
+        <div class="mt-3">
+          <p class="text-[10px] font-bold uppercase tracking-widest text-zinc-500">Synthesis mode</p>
+          <div class="mt-1.5 grid gap-1.5 sm:grid-cols-3">
+            <button
+              v-for="(m, key) in modeMeta" :key="key"
+              class="rounded-xl border px-3 py-2 text-left transition"
+              :class="synthMode === key ? 'border-pink-500/50 bg-pink-500/10' : 'border-zinc-800 bg-zinc-950/50 hover:border-zinc-700'"
+              @click="synthMode = key as SynthMode"
+            >
+              <span class="block text-[11px] font-bold" :class="synthMode === key ? 'text-pink-300' : 'text-zinc-300'">{{ m.label }}</span>
+              <span class="mt-0.5 block text-[10px] leading-snug text-zinc-500">{{ m.hint }}</span>
+            </button>
+          </div>
+        </div>
         <div class="mt-3 flex flex-wrap items-center gap-3">
           <button
             class="flex items-center gap-1.5 rounded-xl bg-pink-500 px-4 py-2 text-xs font-bold text-white transition hover:bg-pink-400 disabled:opacity-50"
@@ -232,16 +257,10 @@ onMounted(async () => {
           >
             <Loader2 v-if="creating" class="h-3.5 w-3.5 animate-spin" />
             <Wand2 v-else class="h-3.5 w-3.5" />
-            Design system
+            {{ synthMode === 'llm_first' ? 'Propose my system (LLM-first)' : 'Design system' }}
           </button>
-          <label class="flex cursor-pointer items-center gap-1.5 text-[11px] text-zinc-500">
-            <input v-model="useLlm" type="checkbox" class="h-3 w-3 accent-pink-500" />
-            AI enhancement via sandbox bridge (fail-soft)
-          </label>
         </div>
       </div>
-
-      <!-- drafts list -->
       <div v-if="!draft && drafts.length" class="mt-5">
         <h2 class="mb-2 text-sm font-bold">Your systems</h2>
         <div class="space-y-2">
@@ -270,6 +289,11 @@ onMounted(async () => {
               {{ personaMeta[draft.spec.persona]?.label || draft.spec.persona }}
             </span>
             <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" :class="draft.status === 'built' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-400'">{{ draft.status }}</span>
+            <span
+              v-if="draft.spec.mode?.startsWith('llm_first')"
+              class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase"
+              :class="draft.spec.mode === 'llm_first_fallback' ? 'bg-amber-500/15 text-amber-300' : 'bg-fuchsia-500/15 text-fuchsia-300'"
+            >{{ draft.spec.mode === 'llm_first_fallback' ? 'LLM-first fallback' : 'LLM-first draft' }}</span>
             <span class="ml-auto text-[10px] text-zinc-500">{{ selectedCount }} components selected</span>
           </div>
           <p class="mt-1.5 text-[11px] italic leading-relaxed text-zinc-400">"{{ draft.description }}"</p>
