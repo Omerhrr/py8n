@@ -617,6 +617,59 @@ async def end_meeting(meeting_id: str, user=Depends(get_optional_user),
 
 
 # ---------------------------------------------------------------------------
+# v75: the room's mix + floor controls
+# ---------------------------------------------------------------------------
+
+
+class MeetingMixBody(BaseModel):
+    muted: bool | None = Field(default=None,
+                               description="the room does not HEAR this member (no asr.final, no turn)")
+    deafened: bool | None = Field(default=None,
+                                  description="the agent does not SPEAK to this member (TTS withheld)")
+    solo: bool | None = Field(default=None,
+                              description="spotlight/whisper: ONLY this member's audio triggers turns "
+                                          "(exclusive - spotlighting one clears the others)")
+
+
+@router.patch("/meetings/{meeting_id}/participants/{participant_id}/mix")
+async def set_meeting_mix(meeting_id: str, participant_id: str, body: MeetingMixBody,
+                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Per-member mix controls (v75) - the SYSTEM-level gates on what the
+    agent hears and says per leg. Tri-state: omitted keys stay untouched."""
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.set_participant_mix(
+            db, getattr(user, "id", None), meeting_id, participant_id,
+            muted=body.muted, deafened=body.deafened, solo=body.solo)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+class MeetingFloorBody(BaseModel):
+    mode: str = Field(default="directed", max_length=20,
+                      description="auto (every live leg triggers turns) | directed (the holder only)")
+    participant_id: str | None = Field(default=None, max_length=36,
+                                       description="who holds the floor (required for directed)")
+
+
+@router.post("/meetings/{meeting_id}/floor")
+async def set_meeting_floor(meeting_id: str, body: MeetingFloorBody,
+                            user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Floor control (v75): who the room's agent is talking to. Directed
+    mode gates every non-holder's turns (they are still transcribed);
+    mode=auto releases the floor back to the room."""
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.set_floor(
+            db, getattr(user, "id", None), meeting_id,
+            mode=body.mode, participant_id=body.participant_id)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
 # v74: outbound campaigns - dial a list through an agent
 # ---------------------------------------------------------------------------
 
@@ -628,6 +681,9 @@ class CampaignCreate(BaseModel):
                                     description="the telnyx voice receiver that places the dials")
     targets: list[dict] = Field(..., min_length=1, max_length=500,
                                 description="[{address: 'E.164 | sip:', name?: 'who'}]")
+    config: dict | None = Field(default=None,
+                                description="v75 campaign config: retry {max_attempts, "
+                                            "delays_minutes, retry_on} + amd {mode, on_machine}")
 
 
 @router.post("/campaigns", status_code=201)
@@ -638,7 +694,8 @@ async def create_campaign(body: CampaignCreate, user=Depends(get_optional_user),
     try:
         return await campaigns_svc.create_campaign(
             db, owner_id=getattr(user, "id", None), agent_id=body.agent_id,
-            name=body.name, targets=body.targets, endpoint_id=body.endpoint_id)
+            name=body.name, targets=body.targets, endpoint_id=body.endpoint_id,
+            config=body.config)
     except (campaigns_svc.VoiceCampaignError, agent_svc.VoiceAgentError) as exc:
         raise _http(exc) from exc
 
@@ -691,18 +748,52 @@ async def stop_campaign(campaign_id: str, user=Depends(get_optional_user),
         raise _http(exc) from exc
 
 
+class CampaignRetryBody(BaseModel):
+    force: bool = Field(default=False,
+                        description="dial eligible targets even when their scheduled "
+                                    "retry_at has not passed yet (manual override)")
+    limit: int | None = Field(default=None, ge=1, le=500,
+                              description="retry at most N due targets this pass")
+
+
+@router.post("/campaigns/{campaign_id}/retry")
+async def retry_campaign(campaign_id: str, body: CampaignRetryBody | None = None,
+                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The retry pass (v75): dial the targets whose NEXT attempt is due
+    per the campaign's retry schedule (retry_on outcomes, attempts below
+    the cap, retry_at passed). Deferred targets keep their schedule."""
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.retry_due(
+            db, getattr(user, "id", None), campaign_id,
+            force=(body.force if body else False),
+            limit=(body.limit if body else None))
+    except campaigns_svc.VoiceCampaignError as exc:
+        raise _http(exc) from exc
+
+
+class SimulateAnswerBody(BaseModel):
+    as_machine: bool = Field(default=False,
+                             description="also walk the answering-machine sequence: the AMD "
+                                         "verdict lands and the campaign's on_machine policy applies")
+
+
 @router.post("/campaigns/{campaign_id}/targets/{target_id}/simulate-answer")
 async def simulate_campaign_answer(campaign_id: str, target_id: str,
+                                   body: SimulateAnswerBody | None = None,
                                    user=Depends(get_optional_user),
                                    db: AsyncSession = Depends(get_db)):
     """Walk ONE target through the answered path WITHOUT a carrier - the
     session is created through the same path a real answer takes, and the
-    session's context records it as simulated. Honest demo/test door."""
+    session's context records it as simulated. as_machine=true compresses
+    the carrier's AMD sequence into the same walk. Honest demo/test door."""
     from ..services import voice_campaigns as campaigns_svc
 
     try:
         return await campaigns_svc.simulate_answer(
-            db, getattr(user, "id", None), campaign_id, target_id)
+            db, getattr(user, "id", None), campaign_id, target_id,
+            as_machine=bool(body.as_machine) if body else False)
     except campaigns_svc.VoiceCampaignError as exc:
         raise _http(exc) from exc
 

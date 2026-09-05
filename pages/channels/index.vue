@@ -49,6 +49,7 @@ interface VoiceAgent {
 const { api } = useApi()
 const loading = ref(true)
 const pageError = ref('')
+const note = ref('')  // v75: the last retry-pass note, honest about what moved
 const endpoints = ref<Endpoint[]>([])
 const adapters = ref<Adapter[]>([])
 const sessions = ref<VoiceSession[]>([])
@@ -96,7 +97,8 @@ const joinForm = ref({ label: '', channel: 'web', address: '' })
 const meetingBusy = ref(false)
 const campaigns = ref<any[]>([])
 const selectedCampaign = ref<any>(null)
-const campaignForm = ref({ name: '', agent_id: '', endpoint_id: '', targets: '' })
+const campaignForm = ref({ name: '', agent_id: '', endpoint_id: '', targets: '',
+  max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup' })
 const campaignBusy = ref(false)
 const voiceEndpoints = computed(() => endpoints.value.filter(e => e.provider === 'telnyx_call_control'))
 
@@ -354,15 +356,24 @@ function parseTargets(text: string) {
 async function createCampaign() {
   meetingBusy.value = true
   try {
+    const delays = campaignForm.value.delays.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
     const created = await api('/voice/campaigns', {
       method: 'POST',
       body: JSON.stringify({
         name: campaignForm.value.name, agent_id: campaignForm.value.agent_id,
         endpoint_id: campaignForm.value.endpoint_id || null,
         targets: parseTargets(campaignForm.value.targets),
+        config: {
+          retry: { max_attempts: campaignForm.value.max_attempts,
+                   delays_minutes: delays.length ? delays : [15, 60, 1440],
+                   retry_on: ['no_answer'] },
+          amd: { mode: campaignForm.value.amd_mode,
+                 on_machine: campaignForm.value.amd_on_machine },
+        },
       }),
     })
-    campaignForm.value = { name: '', agent_id: '', endpoint_id: '', targets: '' }
+    campaignForm.value = { name: '', agent_id: '', endpoint_id: '', targets: '',
+      max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup' }
     await load()
     await loadCampaignDetail(created)
   } catch (e: any) {
@@ -385,6 +396,53 @@ async function startCampaign(c: any) {
 async function simulateAnswer(c: any, t: any) {
   try {
     await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, { method: 'POST' })
+    await load()
+    await loadCampaignDetail(c)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'simulate failed'
+  }
+}
+
+// v75: mix + floor controls, retry passes, AMD simulation
+async function setMix(m: any, p: any, key: 'muted' | 'deafened' | 'solo', val: boolean) {
+  meetingBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/participants/${p.id}/mix`, {
+      method: 'PATCH', body: JSON.stringify({ [key]: val }) })
+    await loadMeetingDetail(m)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'mix failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function setFloor(m: any, mode: 'auto' | 'directed', participantId?: string) {
+  meetingBusy.value = true
+  try {
+    const res = await api(`/voice/meetings/${m.id}/floor`, {
+      method: 'POST', body: JSON.stringify({ mode, participant_id: participantId || null }) })
+    selectedMeeting.value = res.meeting
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'floor failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function retryCampaign(c: any, force = false) {
+  campaignBusy.value = true
+  try {
+    const res = await api(`/voice/campaigns/${c.id}/retry`, {
+      method: 'POST', body: JSON.stringify({ force }) })
+    await load()
+    await loadCampaignDetail(c)
+    if (res.retry_note) note.value = res.retry_note
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'retry failed'
+  } finally { campaignBusy.value = false }
+}
+
+async function simulateMachine(c: any, t: any) {
+  try {
+    await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, {
+      method: 'POST', body: JSON.stringify({ as_machine: true }) })
     await load()
     await loadCampaignDetail(c)
   } catch (e: any) {
@@ -607,7 +665,7 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Users class="w-4 h-4 text-emerald-400" /> Voice meetings ({{ meetings.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">multi-party legs · one agent persona · merged speaker-attributed transcript</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">multi-party legs · mix controls (mute/deafen/solo) · floor control · merged transcript</span>
         </h2>
         <div class="flex flex-wrap items-end gap-2">
           <label class="text-xs text-zinc-500">title <input v-model="meetingForm.title" class="input input-xs w-48" placeholder="Monday standup room" /></label>
@@ -651,13 +709,35 @@ onMounted(load)
             <label v-if="joinForm.channel !== 'web'" class="text-zinc-500">address <input v-model="joinForm.address" class="input input-xs w-40" placeholder="+15551234567 / sip:..." /></label>
             <button class="btn btn-ghost text-xs" :disabled="meetingBusy || !joinForm.label" @click="joinMeeting(selectedMeeting)"><Plus class="w-3.5 h-3.5" /> Join leg</button>
           </div>
+          <div v-if="selectedMeeting.state === 'active'" class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-zinc-500">floor:</span>
+            <span class="px-2 py-0.5 rounded-full border"
+                  :class="selectedMeeting.floor?.mode === 'directed' ? 'border-sky-500/25 bg-sky-500/10 text-sky-300' : 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300'">
+              {{ selectedMeeting.floor?.mode === 'directed' ? `directed · ${selectedMeeting.floor.label}` : 'auto' }}
+            </span>
+            <button v-if="selectedMeeting.floor?.mode === 'directed'" class="btn btn-ghost text-xs" :disabled="meetingBusy" @click="setFloor(selectedMeeting, 'auto')">Release floor</button>
+            <span class="text-zinc-600">{{ selectedMeeting.floor?.note }}</span>
+          </div>
           <div class="space-y-1">
-            <div v-for="p in selectedMeeting.participants || []" :key="p.id" class="flex items-center gap-2 text-xs text-zinc-400">
+            <div v-for="p in selectedMeeting.participants || []" :key="p.id" class="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
               <span class="px-2 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-300">{{ p.channel }}</span>
               <span class="text-zinc-200">{{ p.label }}</span>
               <span>{{ p.state }}</span>
               <span v-if="p.session_state">session: {{ p.session_state }}</span>
               <span v-if="p.last_error" class="text-amber-300">{{ p.last_error }}</span>
+              <span v-if="selectedMeeting.floor?.participant_id === p.id" class="px-1.5 py-0.5 rounded-full border border-sky-500/25 bg-sky-500/10 text-sky-300">floor</span>
+              <template v-if="selectedMeeting.state === 'active' && p.state === 'joined'">
+                <button class="btn btn-ghost text-[11px] px-1.5"
+                        :class="p.mix?.muted ? 'text-rose-300' : 'text-zinc-400'"
+                        :disabled="meetingBusy" @click="setMix(selectedMeeting, p, 'muted', !p.mix?.muted)">{{ p.mix?.muted ? 'unmute' : 'mute' }}</button>
+                <button class="btn btn-ghost text-[11px] px-1.5"
+                        :class="p.mix?.deafened ? 'text-amber-300' : 'text-zinc-400'"
+                        :disabled="meetingBusy" @click="setMix(selectedMeeting, p, 'deafened', !p.mix?.deafened)">{{ p.mix?.deafened ? 'undeafen' : 'deafen' }}</button>
+                <button class="btn btn-ghost text-[11px] px-1.5"
+                        :class="p.mix?.solo ? 'text-emerald-300' : 'text-zinc-400'"
+                        :disabled="meetingBusy" @click="setMix(selectedMeeting, p, 'solo', !p.mix?.solo)">{{ p.mix?.solo ? 'unsolo' : 'solo' }}</button>
+                <button v-if="selectedMeeting.floor?.participant_id !== p.id" class="btn btn-ghost text-[11px] px-1.5 text-sky-300" :disabled="meetingBusy" @click="setFloor(selectedMeeting, 'directed', p.id)">give floor</button>
+              </template>
             </div>
           </div>
           <ol class="space-y-1.5 text-xs">
@@ -674,7 +754,7 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Megaphone class="w-4 h-4 text-amber-400" /> Outbound campaigns ({{ campaigns.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">dial a list through an agent · honest skips without carrier credentials</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">dial a list through an agent · retry schedules · answering machine detection · honest skips</span>
         </h2>
         <div class="flex flex-wrap items-end gap-2">
           <label class="text-xs text-zinc-500">name <input v-model="campaignForm.name" class="input input-xs w-40" placeholder="Renewal reminders" /></label>
@@ -691,7 +771,27 @@ onMounted(load)
             </select>
           </label>
           <label class="text-xs text-zinc-500">targets (address, name per line)
-            <textarea v-model="campaignForm.targets" class="input input-xs w-72 h-16 font-mono" placeholder="+15551234567, Alice&#10;sip:desk@pbx.example.com, Front desk" /></label>
+            <textarea v-model="campaignForm.targets" class="input input-xs w-72 h-16 font-mono" placeholder="+15551234567, Alice\nsip:desk@pbx.example.com, Front desk" /></label>
+          <label class="text-xs text-zinc-500">max attempts
+            <select v-model.number="campaignForm.max_attempts" class="input input-xs w-16">
+              <option v-for="n in [1, 2, 3, 4, 5]" :key="n" :value="n">{{ n }}</option>
+            </select>
+          </label>
+          <label class="text-xs text-zinc-500">retry after (min)
+            <input v-model="campaignForm.delays" class="input input-xs w-36" placeholder="15, 60, 1440" /></label>
+          <label class="text-xs text-zinc-500">AMD
+            <select v-model="campaignForm.amd_mode" class="input input-xs w-28">
+              <option value="disabled">disabled</option>
+              <option value="detect">detect</option>
+              <option value="greeting_end">greeting_end</option>
+            </select>
+          </label>
+          <label v-if="campaignForm.amd_mode !== 'disabled'" class="text-xs text-zinc-500">on machine
+            <select v-model="campaignForm.amd_on_machine" class="input input-xs w-28">
+              <option value="hangup">hangup</option>
+              <option value="continue">continue</option>
+            </select>
+          </label>
           <button class="btn btn-ghost text-xs" :disabled="meetingBusy || !campaignForm.name || !campaignForm.agent_id || !campaignForm.targets" @click="createCampaign"><Plus class="w-3.5 h-3.5" /> New campaign</button>
         </div>
         <p v-if="!campaigns.length" class="text-sm text-zinc-500">No campaigns yet - create one, start it (real dials through the endpoint's credentials, or honest skips), and watch answered calls open sessions bound to the agent.</p>
@@ -700,11 +800,13 @@ onMounted(load)
             <div class="flex items-center gap-2 text-sm">
               <span class="text-zinc-100">{{ c.name }}</span>
               <span class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">{{ c.status }}</span>
-              <span class="text-xs text-zinc-500">{{ c.progress?.total }} target(s) · {{ c.progress?.placed }} placed · {{ c.progress?.counts?.answered || 0 }} answered</span>
+              <span class="text-xs text-zinc-500">{{ c.progress?.total }} target(s) · {{ c.progress?.placed }} placed · {{ c.progress?.counts?.answered || 0 }} answered · {{ c.progress?.counts?.voicemail || 0 }} voicemail</span>
+              <span v-if="c.progress?.retry?.eligible" class="text-xs text-sky-300">{{ c.progress.retry.due }}/{{ c.progress.retry.eligible }} retry due</span>
               <span v-if="c.agent_name" class="text-xs text-fuchsia-300">agent: {{ c.agent_name }}</span>
             </div>
             <div class="flex items-center gap-2">
               <button class="btn btn-ghost text-xs" :disabled="campaignBusy" @click="startCampaign(c)">Start</button>
+              <button v-if="c.progress?.retry?.due" class="btn btn-ghost text-xs text-sky-300" :disabled="campaignBusy" @click="retryCampaign(c)">Retry due ({{ c.progress.retry.due }})</button>
               <button class="btn btn-ghost text-xs" @click="loadCampaignDetail(c)">Open</button>
             </div>
           </div>
@@ -712,18 +814,29 @@ onMounted(load)
         <div v-if="selectedCampaign" class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-2">
           <div class="flex items-center justify-between">
             <h3 class="text-sm text-zinc-200">{{ selectedCampaign.name }} · targets</h3>
-            <button class="btn btn-ghost" @click="selectedCampaign = null">Close</button>
+            <div class="flex items-center gap-2">
+              <button class="btn btn-ghost text-xs text-amber-300" :disabled="campaignBusy" @click="retryCampaign(selectedCampaign, true)">Retry force</button>
+              <button class="btn btn-ghost" @click="selectedCampaign = null">Close</button>
+            </div>
           </div>
-          <div v-for="t in selectedCampaign.targets || []" :key="t.id" class="flex items-center gap-2 text-xs text-zinc-400">
+          <p v-if="note" class="text-xs text-emerald-300">{{ note }}</p>
+          <p v-if="selectedCampaign.progress?.retry" class="text-xs text-zinc-500">
+            retry plan: {{ selectedCampaign.progress.retry.plan.retry_on.join('/') }} × up to {{ selectedCampaign.progress.retry.plan.max_attempts }} attempt(s) after [{{ selectedCampaign.progress.retry.plan.delays_minutes.join(', ') }}] min · {{ selectedCampaign.progress.retry.eligible }} eligible · {{ selectedCampaign.progress.retry.exhausted }} exhausted
+          </p>
+          <div v-for="t in selectedCampaign.targets || []" :key="t.id" class="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
             <span class="px-2 py-0.5 rounded-full border"
-                  :class="t.status === 'answered' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : t.status === 'pending' ? 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300' : 'border-amber-500/25 bg-amber-500/10 text-amber-300'">
+                  :class="t.status === 'answered' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : t.status === 'pending' ? 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300' : t.status === 'voicemail' ? 'border-purple-500/25 bg-purple-500/10 text-purple-300' : 'border-amber-500/25 bg-amber-500/10 text-amber-300'">
               {{ t.status }}
             </span>
             <span class="text-zinc-200">{{ t.name || t.address }}</span>
             <span class="font-mono">{{ t.address }}</span>
+            <span class="text-zinc-500">attempt {{ t.attempts }}</span>
             <span v-if="t.session_id" class="font-mono text-zinc-500">{{ t.session_id.slice(0, 8) }}</span>
+            <span v-if="t.retry_at" class="text-sky-300">retry at {{ t.retry_at.replace('T', ' ').slice(5, 16) }}</span>
+            <span v-if="t.amd" class="text-purple-300">amd: {{ t.amd.result }}</span>
             <span v-if="t.last_error" class="text-amber-300 truncate max-w-64">{{ t.last_error }}</span>
             <button v-if="t.status === 'pending'" class="btn btn-ghost text-xs" @click="simulateAnswer(selectedCampaign, t)">Simulate answer</button>
+            <button v-if="t.status === 'pending' && selectedCampaign.config?.amd?.mode !== 'disabled'" class="btn btn-ghost text-xs text-purple-300" @click="simulateMachine(selectedCampaign, t)">Simulate machine</button>
           </div>
         </div>
       </section>

@@ -59,6 +59,8 @@ EVENT_KINDS = (
     "voicemail_detected", "hangup", "failed",
     # v70: media transport (websocket audio streams) bookkeeping
     "media.stream_started", "media.stream_stopped",
+    # v75: meeting mix/floor gates - the turn pipeline refused audio honestly
+    "mix.gated",
 )
 
 END_KINDS = {  # event kind -> end_reason recorded on the session
@@ -503,6 +505,31 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
     if not session.conversation_id:
         raise VoiceError("session has no linked conversation")
 
+    # v75: the meeting MIX/FLOOR gate - py8n shapes what the agent hears
+    # and says per leg. muted = the room does not hear this member at all
+    # (no asr.final, no conversation record - only the honest mix.gated
+    # marker on the session timeline); solo/floor = the room still HEARS
+    # the member (asr.final + conversation stay) but their audio no longer
+    # triggers agent turns. A meeting leg only: non-meeting calls are
+    # never gated.
+    from . import voice_meetings as meetings_svc
+    gate = await meetings_svc.meeting_gate_for_session(db, session.id)
+    if gate is not None and gate.get("reason") == "muted":
+        gated_event = await _add_event(db, session, "mix.gated",
+                                       {"reason": "muted",
+                                        "transcript": asr["transcript"][:2000],
+                                        "confidence": asr["confidence"],
+                                        "meeting_id": gate["meeting_id"],
+                                        "participant_id": gate["participant_id"]})
+        await db.commit()
+        return {"gated": True, "reason": "muted",
+                "detail": ("this leg is muted in the meeting - the room does not hear "
+                           "the participant; the utterance is recorded only on the "
+                           "session's timeline as mix.gated"),
+                "event": _event_out(gated_event), "reply": None, "tts": None,
+                "state": session.state}
+    gated_reason = gate.get("reason") if gate is not None else None
+
     # record the caller's words on the shared transcript (no re-run of the
     # conversation handler - the voice session owns its own turn execution)
     from ..models import InteractionMessage
@@ -517,6 +544,21 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
                              {"transcript": asr["transcript"],
                               "confidence": asr["confidence"],
                               "language": asr["language"]})
+    if gated_reason:
+        # solo/floor: the room heard the member, the agent does not answer
+        await _add_event(db, session, "mix.gated",
+                         {"reason": gated_reason,
+                          "asr_event_id": event.id,
+                          "meeting_id": gate["meeting_id"],
+                          "participant_id": gate["participant_id"],
+                          "floor_holder": ((gate.get("floor") or {}).get("label"))})
+        await db.commit()
+        return {"gated": True, "reason": gated_reason,
+                "detail": (f"this member's audio is gated ({gated_reason}) - the room "
+                           "transcribed it but the agent does not turn on it"),
+                "event": _event_out(event), "reply": None, "tts": None,
+                "state": session.state}
+
     # COMMIT before the flow runs: execute_workflow writes on its own
     # sessions and SQLite allows a single writer - holding this request's
     # write transaction across the handler deadlocks the database (the
@@ -545,7 +587,14 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
 
     reply = await _run_handler(db, session, asr["transcript"],
                                knowledge=knowledge, knowledge_note=knowledge_note)
-    if reply:
+    # v75: the deafened OUTPUT gate - the agent does not speak to this leg.
+    # The handler ran (the agent listened); the reply is withheld from the
+    # leg's conversation and no tts.started opens on it - the meeting
+    # transcript (derived from tts.started) will not claim the agent
+    # spoke here. The withheld text rides the turn result so an operator
+    # sees what WOULD have been said.
+    deafened = bool(gate is not None and gate.get("deafened"))
+    if reply and not deafened:
         db.add(InteractionMessage(conversation_id=session.conversation_id, role="agent",
                                   channel="voice", text=reply[:20000],
                                   payload={"via": "voice_turn",
@@ -558,7 +607,7 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
     eff_tts_provider, eff_voice, eff_tts_format = resolve_turn_tts(
         session, tts_provider=tts_provider, voice=voice, tts_format=tts_format)
     tts_request = build_tts_request(reply or "", provider=eff_tts_provider,
-                                    voice=eff_voice, fmt=eff_tts_format) if reply else None
+                                    voice=eff_voice, fmt=eff_tts_format) if (reply and not deafened) else None
     if tts_request is not None:
         tts_event = await _add_event(db, session, "tts.started",
                                      {"text": reply[:500], "provider": eff_tts_provider,
@@ -569,9 +618,13 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
         db.add(session)
         tts_request["tts_id"] = tts_event.id
     await db.flush()
-    return {"event": _event_out(event), "asr": asr, "reply": reply or None,
-            "knowledge": knowledge or None, "knowledge_error": knowledge_note or None,
-            "tts": tts_request, "state": session.state}
+    out = {"event": _event_out(event), "asr": asr, "reply": reply or None,
+           "knowledge": knowledge or None, "knowledge_error": knowledge_note or None,
+           "tts": tts_request, "state": session.state}
+    if deafened:
+        out["reply_withheld"] = ("this leg is deafened in the meeting - the agent listened "
+                                 "but the reply is not spoken or recorded on this leg")
+    return out
 
 
 async def complete_tts(db: AsyncSession, session: VoiceSession, *, cancelled: bool = False) -> dict:

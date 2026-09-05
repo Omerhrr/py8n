@@ -45,6 +45,13 @@ class VoiceMeetingError(ValueError):
 
 PARTICIPANT_CHANNELS = ("web", "telnyx", "sip")
 MAX_PARTICIPANTS = 12
+# v75: the per-member mix - what the SYSTEM gates, not what a mixer blends.
+# py8n is not the audio mixer (the provider's media plane blends the audio);
+# what py8n owns is the conversation pipeline, so the mix gates are:
+#   muted    - the room does not HEAR this member (no ASR final, no turn)
+#   deafened - the agent does not SPEAK to this member (TTS withheld)
+#   solo     - spotlight/whisper: only this member's audio triggers turns
+FLOOR_MODES = ("auto", "directed")
 
 
 def _now():
@@ -82,6 +89,36 @@ def decode_client_state(client_state: str) -> dict:
         return {}
 
 
+def mix_of(p: VoiceMeetingParticipant) -> dict:
+    """The member's mix controls (v75) - defaults when never touched."""
+    raw = (p.meta or {}).get("mix") or {}
+    return {"muted": bool(raw.get("muted")),
+            "deafened": bool(raw.get("deafened")),
+            "solo": bool(raw.get("solo"))}
+
+
+def floor_state_of(row: VoiceMeeting,
+                   legs: list[VoiceMeetingParticipant] | None = None) -> dict:
+    """The room's floor state (v75) - the live control lives in
+    meeting.context["floor"]; labels resolve against the legs."""
+    raw = (row.context or {}).get("floor") or {}
+    mode = raw.get("mode") if raw.get("mode") in FLOOR_MODES else "auto"
+    holder: VoiceMeetingParticipant | None = None
+    if mode == "directed" and raw.get("participant_id"):
+        pid = str(raw["participant_id"])
+        for p in (legs or []):
+            if p.id == pid:
+                holder = p
+                break
+    return {"mode": mode,
+            "participant_id": raw.get("participant_id") if mode == "directed" else None,
+            "label": (holder.label or holder.address or "participant") if holder else None,
+            "since": raw.get("since") if mode == "directed" else None,
+            "note": ("directed: only the floor holder's audio triggers agent turns - "
+                     "everyone else is still transcribed (the room hears) but gated" if mode == "directed"
+                     else "auto: every live leg's audio triggers agent turns (v74 behavior)")}
+
+
 def participant_out(p: VoiceMeetingParticipant, session: VoiceSession | None) -> dict:
     return {
         "id": p.id, "label": p.label, "channel": p.channel, "address": p.address,
@@ -90,6 +127,7 @@ def participant_out(p: VoiceMeetingParticipant, session: VoiceSession | None) ->
         "session_state": session.state if session is not None else None,
         "media_stream": (f"ws://<host>/api/v1/voice/sessions/{p.session_id}/media?token=<jwt>"
                          if p.channel == "web" and p.session_id else None),
+        "mix": mix_of(p),
         "last_error": p.last_error or None,
         "joined_at": p.created_at.isoformat() if p.created_at else None,
         "left_at": p.left_at.isoformat() if p.left_at else None,
@@ -99,7 +137,8 @@ def participant_out(p: VoiceMeetingParticipant, session: VoiceSession | None) ->
 async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
                       include_transcript: bool = True) -> dict:
     """The meeting as the API returns it - participants, per-leg session
-    state and the DERIVED merged transcript (nothing stored)."""
+    state, the FLOOR state (v75) and the DERIVED merged transcript
+    (nothing stored)."""
     legs = await _participants(db, row.id)
     session_ids = [p.session_id for p in legs if p.session_id]
     sessions: dict[str, VoiceSession] = {}
@@ -113,12 +152,15 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
         agent = await db.get(VoiceAgent, row.agent_id)
         agent_name = agent.name if agent is not None else None
 
+    floor = floor_state_of(row, legs)
+
     out = {
         "id": row.id,
         "title": row.title,
         "state": row.state,
         "agent_id": row.agent_id,
         "agent_name": agent_name,
+        "floor": floor,
         "participants": [participant_out(p, sessions.get(p.session_id or ""))
                          for p in legs],
         "counts": {
@@ -132,6 +174,9 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
             "py8n is not the audio mixer: legs carry their own provider media "
             "(web legs attach to their session's media websocket, phone legs ride "
             "the provider's conference/bridge)",
+            "v75 mix controls (muted/deafened/solo per member) and floor control "
+            "(auto|directed) are SYSTEM gates enforced at the conversation pipeline: "
+            "they shape what the agent hears and says per leg, not the provider's blend",
             "the transcript below is DERIVED from the legs' event timelines at read "
             "time - nothing transcript-shaped is stored",
         ],
@@ -178,6 +223,134 @@ async def merged_transcript(db: AsyncSession, legs: list[VoiceMeetingParticipant
                 "source": payload.get("source") or "turn",
             })
     return lines
+
+
+async def set_participant_mix(db: AsyncSession, owner_id: str | None,
+                              meeting_id: str, participant_id: str, *,
+                              muted: bool | None = None,
+                              deafened: bool | None = None,
+                              solo: bool | None = None) -> dict:
+    """Set ONE member's mix controls (v75).
+
+    Tri-state: omitted keys are left untouched. ``solo`` is exclusive -
+    spotlighting one member clears every other member's solo flag. The
+    controls are SYSTEM-level gates enforced where py8n owns the
+    conversation pipeline (voice_turn); for provider legs the provider's
+    media plane still blends the audio - py8n gates what the AGENT hears
+    and says per leg, and says so."""
+    meeting = await _load(db, meeting_id, owner_id)
+    p = await db.get(VoiceMeetingParticipant, participant_id)
+    if p is None or p.meeting_id != meeting.id:
+        raise VoiceMeetingError(f"participant {participant_id!r} not found in meeting {meeting_id!r}")
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - mix controls apply to active rooms")
+    mix = dict((p.meta or {}).get("mix") or {})
+    changed = {}
+    for key, val in (("muted", muted), ("deafened", deafened), ("solo", solo)):
+        if val is None:
+            continue
+        mix[key] = bool(val)
+        changed[key] = bool(val)
+    if not changed:
+        raise VoiceMeetingError("nothing to set - pass muted / deafened / solo")
+    if mix.get("solo"):
+        # solo is exclusive: one spotlight at a time
+        others = [o for o in await _participants(db, meeting_id) if o.id != p.id]
+        for o in others:
+            omix = dict((o.meta or {}).get("mix") or {})
+            if omix.get("solo"):
+                omix["solo"] = False
+                o.meta = {**(o.meta or {}), "mix": omix}
+                db.add(o)
+    p.meta = {**(p.meta or {}), "mix": mix}
+    db.add(p)
+    await db.flush()
+    return {"participant": participant_out(p, None),
+            "changed": changed,
+            "note": ("mix gates are enforced at the conversation pipeline: muted = the agent "
+                     "does not hear this member, deafened = the agent does not speak to them, "
+                     "solo = only their audio triggers turns")}
+
+
+async def set_floor(db: AsyncSession, owner_id: str | None, meeting_id: str, *,
+                    mode: str = "directed", participant_id: str | None = None) -> dict:
+    """Floor control (v75): who the room's agent is talking to.
+
+    * ``directed`` - the named participant holds the floor; every other
+      member is still transcribed (the room hears) but their audio no
+      longer triggers agent turns.
+    * ``auto`` - the floor opens: every live leg's audio triggers turns
+      again (the v74 behavior).
+    """
+    meeting = await _load(db, meeting_id, owner_id)
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - floor control applies to active rooms")
+    mode = (mode or "").strip().lower()
+    if mode not in FLOOR_MODES:
+        raise VoiceMeetingError(f"floor mode must be {'|'.join(FLOOR_MODES)}, got {mode!r}")
+    ctx = dict(meeting.context or {})
+    if mode == "auto":
+        ctx["floor"] = {"mode": "auto"}
+    else:
+        if not participant_id:
+            raise VoiceMeetingError(
+                "directed floor needs participant_id (who holds the floor); "
+                "mode=auto releases it")
+        p = await db.get(VoiceMeetingParticipant, participant_id)
+        if p is None or p.meeting_id != meeting.id:
+            raise VoiceMeetingError(
+                f"participant {participant_id!r} not found in meeting {meeting_id!r}")
+        if p.state != "joined":
+            raise VoiceMeetingError(
+                f"the floor holder must be a joined leg, got {p.state!r}")
+        ctx["floor"] = {"mode": "directed", "participant_id": p.id,
+                        "since": _now().isoformat()}
+    meeting.context = ctx
+    db.add(meeting)
+    await db.flush()
+    return {"meeting": await meeting_out(db, meeting)}
+
+
+async def meeting_gate_for_session(db: AsyncSession, session_id: str) -> dict | None:
+    """The mix/floor gate that applies to THIS session's turns (v75).
+
+    Resolved at turn time from the participant rows + the meeting's floor
+    context. Returns None when the session is not a meeting leg or no
+    gate applies. ``reason`` names WHY a turn would be gated - precedence
+    muted > solo > floor (first match wins):
+    * ``muted`` - this member is muted: the room does not hear them
+    * ``solo``  - another member holds the solo spotlight
+    * ``floor`` - the room is directed and another member holds the floor
+    ``deafened`` rides along - it gates the agent's OUTPUT to this leg,
+    not the input.
+    """
+    q = (select(VoiceMeetingParticipant)
+         .where(VoiceMeetingParticipant.session_id == session_id)
+         .order_by(VoiceMeetingParticipant.created_at.desc()))
+    p = (await db.execute(q)).scalars().first()
+    if p is None:
+        return None
+    meeting = await db.get(VoiceMeeting, p.meeting_id)
+    if meeting is None:
+        return None
+    legs = await _participants(db, meeting.id)
+    mix = mix_of(p)
+    reason = None
+    if mix["muted"]:
+        reason = "muted"
+    else:
+        solo = next((o for o in legs if o.id != p.id and mix_of(o)["solo"]), None)
+        if solo is not None:
+            reason = "solo"
+        else:
+            floor = floor_state_of(meeting, legs)
+            if (floor["mode"] == "directed" and floor["participant_id"]
+                    and floor["participant_id"] != p.id):
+                reason = "floor"
+    return {"meeting_id": meeting.id, "participant_id": p.id,
+            "label": p.label, "mix": mix, "deafened": mix["deafened"],
+            "reason": reason,
+            "floor": floor_state_of(meeting, legs)}
 
 
 async def create_meeting(db: AsyncSession, *, owner_id: str | None,

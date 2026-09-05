@@ -349,7 +349,7 @@ async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
     attempted - skipped loudly when no api_key is configured.
     """
     from ..models import VoiceSession  # noqa: F401  (session table touchpoint)
-    from .voice import VoiceError, _add_event, apply_event, complete_tts, voice_turn
+    from .voice import VoiceError, _add_event, apply_event, complete_tts, hangup as _voice_hangup, voice_turn
 
     if not endpoint.enabled:
         raise ChannelEndpointError("this endpoint is disabled")
@@ -450,9 +450,49 @@ async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
                     await complete_tts(db, session)
                     actions.append("utterance_closed")
             elif ev.kind == "voicemail_detected":
-                await apply_event(db, session, "voicemail_detected", {})
+                await apply_event(db, session, "voicemail_detected",
+                                  {"source": "telnyx_amd"})
+                # v75: the carrier's answering-machine verdict on a
+                # CAMPAIGN call - the campaign's on_machine policy decides
+                # whether the agent stops spending time on the machine
+                # (hang up through the provider, honestly attempted) or
+                # keeps talking. Non-campaign calls just record the state.
+                try:
+                    from . import voice_campaigns as campaigns_svc
+
+                    clink = await campaigns_svc.on_call_event(
+                        db, call_control_id=ev.call_control_id,
+                        client_state=ev.client_state,
+                        event_kind="voicemail_detected", session=session)
+                except Exception:  # noqa: BLE001 - the campaign linkage must not break the call
+                    clink = None
+                if clink and (clink.get("amd") or {}).get("hangup"):
+                    # the session already sits in the voicemail state after
+                    # apply_event - ended is legal from there (the machine
+                    # gets the hangup, the agent stops spending time)
+                    if session.state != "ended":
+                        await _voice_hangup(db, session, reason="answering_machine")
+                    cmd = adapters.telnyx_build_command(config, ev.call_control_id, "hangup")
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("amd_hangup_built")
+                elif clink:
+                    actions.append("amd_continue")
             elif ev.end_kind:
                 await apply_event(db, session, ev.kind, {"hangup_cause": ev.hangup_cause})
+                # v75: an ending carrier event closes the CAMPAIGN target
+                # honestly too (no_answer/busy/failed schedule the retry per
+                # the campaign's plan; a post-answer hangup completes it)
+                try:
+                    from . import voice_campaigns as campaigns_svc
+
+                    clink = await campaigns_svc.on_call_event(
+                        db, call_control_id=ev.call_control_id,
+                        client_state=ev.client_state,
+                        event_kind=ev.kind, session=session)
+                except Exception:  # noqa: BLE001 - the campaign linkage must not break the call
+                    clink = None
+                if clink:
+                    actions.append(f"campaign_{clink['status']}")
         except VoiceError as exc:
             handled.append({"event": ev.out(), "session_id": session.id,
                             "created": created, "error": str(exc),

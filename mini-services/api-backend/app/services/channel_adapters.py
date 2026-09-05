@@ -722,7 +722,8 @@ def telnyx_build_command(config: dict, call_control_id: str, command: str,
 def telnyx_build_dial(config: dict, *, to: str, from_ref: str,
                       connection_id: str, webhook_url: str,
                       client_state: str = "",
-                      timeout_secs: int = 45) -> dict:
+                      timeout_secs: int = 45,
+                      machine_detection: str = "") -> dict:
     """v74: OUTBOUND DIAL - ``POST {api}/v2/calls``.
 
     Call Control's commands act on calls that already exist; a campaign or
@@ -732,7 +733,13 @@ def telnyx_build_dial(config: dict, *, to: str, from_ref: str,
     json {cmp, tgt} / {mtg, prt}) rides EVERY event back so the receiver
     can bind the call to the row that placed it - the same trick the
     provider docs recommend. The api_key rides the Authorization header
-    only at delivery, like every other command."""
+    only at delivery, like every other command.
+
+    v75: ``machine_detection`` opts the dial into the carrier's answering
+    machine detection - ``detect`` answers and reports the verdict while
+    the call stays up; ``greeting_end`` waits out the machine's greeting;
+    ``disabled`` or empty sends no AMD parameter at all (the honest
+    default: py8n does not claim detection it never asked for)."""
     to = str(to or "").strip()
     from_ref = str(from_ref or "").strip()
     connection_id = str(connection_id or "").strip()
@@ -747,6 +754,9 @@ def telnyx_build_dial(config: dict, *, to: str, from_ref: str,
     if not webhook_url.startswith(("http://", "https://")):
         raise ValueError("dial requires webhook_url (absolute http(s) URL the call "
                          "events will be posted to)")
+    machine_detection = str(machine_detection or "").strip()
+    if machine_detection and machine_detection not in ("detect", "greeting_end", "disabled"):
+        raise ValueError("machine_detection must be detect | greeting_end | disabled")
     api_key = str(config.get("api_key") or "")
     api_base = str(config.get("api_base") or TELNYX_API_BASE).rstrip("/")
     json_body: dict = {"connection_id": connection_id, "to": to,
@@ -754,6 +764,8 @@ def telnyx_build_dial(config: dict, *, to: str, from_ref: str,
                        "timeout_secs": int(timeout_secs)}
     if client_state:
         json_body["client_state"] = client_state
+    if machine_detection and machine_detection != "disabled":
+        json_body["machine_detection"] = machine_detection
     return {
         "method": "POST",
         "url": f"{api_base}/calls",
