@@ -39,10 +39,28 @@ router = APIRouter(prefix="/solutions", tags=["solutions"])
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,120}$")
 
 
+def _find_installed(created: list[dict], declared_name: str) -> str | None:
+    """Resolve an installed object id by its pack-declared name.
+
+    Dataset names are finalized at install (suffixed on collision), so the
+    match is exact-first, then declared-name prefix ('faq 2' after 'faq').
+    """
+    if not declared_name:
+        return created[0]["id"] if created else None
+    for row in created:
+        if row.get("name") == declared_name:
+            return row["id"]
+    for row in created:
+        if str(row.get("name") or "").startswith(declared_name):
+            return row["id"]
+    return created[0]["id"] if created else None
+
+
 class SolutionInstallRequest(BaseModel):
     note: str = Field(default="", max_length=300, description="Optional install note for the response")
     as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything this install created")
     as_model_system: bool = Field(default=False, description="v64: also create a Model System (datasets + training/serving workflows as one operating unit)")
+    as_voice_agent: bool = Field(default=False, description="v72: also create a Voice Agent bound to the installed handler + knowledge dataset (one-click phone agent)")
 
 
 class SolutionAuthorRequest(BaseModel):
@@ -163,6 +181,49 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         await db.flush()
         model_system_ref = {"id": ms_row.id, "name": ms_row.name, "modalities": declared}
 
+    voice_agent_ref = None
+    if body and body.as_voice_agent:
+        from ..models import VoiceAgent
+        from ..services import voice_agents as va_svc
+
+        spec = (s.pack_json or {}).get("voice_agent") or {}
+        if not spec:
+            raise HTTPException(status_code=400, detail="this solution does not declare a voice agent pack")
+        # resolve the INSTALLED objects: the handler workflow and the knowledge
+        # dataset (final names may be suffixed - match by declared-name prefix)
+        kb_decl = spec.get("knowledge") or {}
+        handler_id = _find_installed(result.get("workflows", []),
+                                     "Voice Agent Handler")
+        if not handler_id and result.get("workflows"):
+            handler_id = result["workflows"][0]["id"]  # single-workflow packs
+        dataset_id = _find_installed(result.get("datasets", []),
+                                     kb_decl.get("dataset") or "")
+        speech = spec.get("speech") or {}
+        try:
+            va = await va_svc.create_agent(
+                db, owner_id=owner,
+                name=f"{s.name} {spec.get('name_suffix') or 'phone agent'}"[:140],
+                description=f"Installed from the '{s.name}' solution - " + (body.note or s.tagline or "")[:400],
+                greeting_text=spec.get("greeting_text") or "",
+                system_prompt=spec.get("system_prompt") or "",
+                handler_workflow_id=handler_id,
+                knowledge_dataset_id=dataset_id,
+                knowledge_text_column=kb_decl.get("text_column"),
+                knowledge_answer_column=kb_decl.get("answer_column"),
+                knowledge_top_k=1,
+                asr_provider=speech.get("asr_provider") or "py8n_local",
+                tts_provider=speech.get("tts_provider") or "openai_tts",
+                tts_voice=speech.get("tts_voice") or "alloy",
+                tts_format=speech.get("tts_format") or "wav",
+                language=speech.get("language") or "en-US",
+                barge_in=bool(speech.get("barge_in", True)))
+        except va_svc.VoiceAgentError as exc:
+            raise HTTPException(status_code=400, detail=f"voice agent install failed: {exc}") from exc
+        voice_agent_ref = {"id": va["id"], "name": va["name"],
+                           "handler_workflow_id": va["handler_workflow_id"],
+                           "knowledge": va["knowledge"],
+                           "wiring": va["wiring"]}
+
     await db.commit()
     return {
         "slug": s.slug,
@@ -175,6 +236,7 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         "warnings": result.get("warnings", []),
         "system": system_ref,
         "model_system": model_system_ref,
+        "voice_agent": voice_agent_ref,
     }
 
 

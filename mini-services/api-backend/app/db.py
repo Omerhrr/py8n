@@ -110,5 +110,15 @@ async def init_db() -> None:
             ):
                 if col not in ds54_cols:
                     sync_conn.execute(text(f"ALTER TABLE datasets ADD COLUMN {col} {ddl}"))
+            # v72: voice agent knowledge binding (dataset-backed phone answers)
+            va_cols = {c["name"] for c in insp.get_columns("voice_agents")}
+            if "knowledge_dataset_id" not in va_cols:
+                sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_dataset_id VARCHAR(36)"))
+            if "knowledge_text_column" not in va_cols:
+                sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_text_column VARCHAR(80)"))
+            if "knowledge_answer_column" not in va_cols:
+                sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_answer_column VARCHAR(80)"))
+            if "knowledge_top_k" not in va_cols:
+                sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_top_k INTEGER DEFAULT 1"))
 
         await conn.run_sync(_add_missing_columns)

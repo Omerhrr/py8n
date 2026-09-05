@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Store, CheckCircle2, Download, Search, PackageOpen,
-  AlertTriangle, ExternalLink, Sparkles, X, Layers, BrainCircuit, Boxes,
+  AlertTriangle, ExternalLink, Sparkles, X, Layers, BrainCircuit, Boxes, Phone,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -12,11 +12,13 @@ import { useApi } from '~/composables/useApi'
 // (workflows land inactive, datasets carry sample rows) into your estate.
 // v64: three install modes - plain, AS a Py8n System (v61), and AS a
 // MODEL SYSTEM (datasets + training/serving workflows as one unit).
+// v72: + AS A VOICE AGENT (knowledge dataset + handler + phone agent,
+// one click -> a full phone-agent system).
 
 interface SolutionSummary {
   id: string; slug: string; name: string; tagline: string; category: string
   icon: string; color: string; outcomes: string[]
-  installs: number; curated: boolean; model_system_ready?: boolean
+  installs: number; curated: boolean; model_system_ready?: boolean; voice_agent_ready?: boolean
   workflow_count: number; dataset_count: number
 }
 interface SolutionDetail extends SolutionSummary {
@@ -28,6 +30,7 @@ interface InstallResult {
   created_workflows?: any[]; created_datasets?: any[]; skipped?: any[]; warnings?: string[]
   system?: { id: string; name: string } | null
   model_system?: { id: string; name: string; modalities: string[] } | null
+  voice_agent?: { id: string; name: string; handler_workflow_id?: string; knowledge?: any } | null
 }
 
 const { api } = useApi()
@@ -72,7 +75,7 @@ async function openDetail(slug: string) {
   }
 }
 
-async function install(mode: 'plain' | 'system' | 'model_system' = 'plain') {
+async function install(mode: 'plain' | 'system' | 'model_system' | 'voice_agent' = 'plain') {
   if (!detail.value) return
   installing.value = true
   installError.value = ''
@@ -80,6 +83,7 @@ async function install(mode: 'plain' | 'system' | 'model_system' = 'plain') {
     installResult.value = await api.post<InstallResult>(`/solutions/${detail.value.slug}/install`, {
       as_system: mode === 'system',
       as_model_system: mode === 'model_system',
+      as_voice_agent: mode === 'voice_agent',
     })
     await loadShelf()
   } catch (e: any) {
@@ -173,6 +177,7 @@ onMounted(async () => {
                 · {{ s.installs }} install{{ s.installs === 1 ? '' : 's' }}
                 <span v-if="s.curated" class="ml-1 rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300">curated</span>
                 <span v-if="s.model_system_ready" class="ml-1 rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300">model system</span>
+                <span v-if="s.voice_agent_ready" class="ml-1 rounded-full bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-bold text-orange-300">voice agent</span>
               </p>
             </div>
           </div>
@@ -265,6 +270,10 @@ onMounted(async () => {
                   <span class="flex items-center gap-1.5 text-xs font-semibold text-fuchsia-200"><BrainCircuit class="h-3.5 w-3.5" /> {{ installResult.model_system.name }}</span>
                   <NuxtLink to="/model-systems" class="flex items-center gap-1 text-[10px] text-zinc-500">open model systems <ExternalLink class="h-3 w-3" /></NuxtLink>
                 </p>
+                <p v-if="installResult.voice_agent" class="mt-2 flex items-center justify-between rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2">
+                  <span class="flex items-center gap-1.5 text-xs font-semibold text-orange-200"><Phone class="h-3.5 w-3.5" /> {{ installResult.voice_agent.name }}</span>
+                  <NuxtLink to="/channels" class="flex items-center gap-1 text-[10px] text-zinc-500">open channels <ExternalLink class="h-3 w-3" /></NuxtLink>
+                </p>
                 <p v-if="installResult.skipped?.length" class="mt-2 text-[10px] text-amber-400/80">skipped: {{ installResult.skipped.length }} item(s)</p>
               </template>
               <p v-if="installError" class="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">{{ installError }}</p>
@@ -298,6 +307,14 @@ onMounted(async () => {
                 <BrainCircuit class="h-3.5 w-3.5" /> as Model System
               </button>
             </div>
+            <button
+              v-if="detail.voice_agent_ready"
+              class="flex w-full items-center justify-center gap-1.5 rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-[11px] font-bold text-orange-300 transition hover:bg-orange-500/20 disabled:opacity-50"
+              :disabled="installing"
+              @click="install('voice_agent')"
+            >
+              <Phone class="h-3.5 w-3.5" /> as Voice Agent (one-click phone agent)
+            </button>
             </div>
             <p v-else class="text-center text-[10px] text-zinc-600">
               Workflows install INACTIVE - open them, run training, then activate triggers. {{ installResult.installs }} installs so far.

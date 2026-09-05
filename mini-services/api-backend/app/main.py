@@ -35,6 +35,17 @@ async def lifespan(app: FastAPI):
     start_scheduler()
     await resync_all_jobs()  # register schedule_trigger jobs from saved workflows
     await resync_all_report_jobs()  # v48: register scheduled report export jobs
+    # v72: local speech engines (vosk / whisper.cpp / piper) bind best-effort
+    # at boot - bridges that cannot run are simply not registered and the
+    # transport keeps reporting asr.unavailable. Never blocks startup.
+    try:
+        from .services.speech_engines import bind_local_engines
+
+        bound = bind_local_engines()
+        logger.info("speech engines: asr=%s tts=%s",
+                    bound.get("asr") or "not bound", bound.get("tts") or "not bound")
+    except Exception:  # noqa: BLE001 - speech binding must never block startup
+        logger.exception("speech engine binding failed at startup")
     # v19: execution data retention - best-effort purge at boot + daily job
     try:
         await retention.purge_execution_data()

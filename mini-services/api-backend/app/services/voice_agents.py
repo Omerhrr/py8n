@@ -59,7 +59,20 @@ _SCAFFOLD_CODE = (
 )
 
 
-def _agent_ctx(agent: VoiceAgent) -> dict:
+def _knowledge_ctx(agent: VoiceAgent, dataset_name: str | None) -> dict | None:
+    """The knowledge binding copied into a session's context (or None)."""
+    if not agent.knowledge_dataset_id:
+        return None
+    return {
+        "dataset_id": agent.knowledge_dataset_id,
+        "dataset_name": dataset_name,
+        "text_column": agent.knowledge_text_column or "",
+        "answer_column": agent.knowledge_answer_column or agent.knowledge_text_column or "",
+        "top_k": max(1, min(int(agent.knowledge_top_k or 1), 5)),
+    }
+
+
+def _agent_ctx(agent: VoiceAgent, dataset_name: str | None = None) -> dict:
     """The config block copied into a session's context at creation."""
     return {
         "voice_agent_id": agent.id,
@@ -72,12 +85,31 @@ def _agent_ctx(agent: VoiceAgent) -> dict:
         "language": agent.language,
         "barge_in": bool(agent.barge_in),
         "system_prompt": agent.system_prompt,
+        "knowledge": _knowledge_ctx(agent, dataset_name),  # v72: dataset-backed answers
     }
 
 
-def agent_out(row: VoiceAgent, handler_name: str | None = None) -> dict:
+def agent_out(row: VoiceAgent, handler_name: str | None = None,
+              dataset_name: str | None = None) -> dict:
     """The API shape: config + derived wiring guidance (nothing stored)."""
     from . import voice_transport as transport
+    wiring = {
+            "inbound_webhook": "point the provider's call-control webhook at "
+                               "/api/v1/channels/telnyx/{endpoint_id}/webhook (or the twilio "
+                               "status callback at /api/v1/voice/webhooks/twilio/{session_id})",
+            "media_stream": "point the provider's audio fork/stream at "
+                            "ws://<host>/api/v1/voice/sessions/{session_id}/media",
+            "asr_note": (f"no ASR engine is registered for {row.asr_provider!r} in this process - "
+                         "the transport will honestly report asr.unavailable until one binds"
+                         if row.asr_provider not in transport.registered_asr_engines()
+                         else f"engine {row.asr_provider!r} is live in this process"),
+        }
+    knowledge = _knowledge_ctx(row, dataset_name)
+    if knowledge:
+        wiring["knowledge_note"] = (
+            f"every turn is grounded on dataset {knowledge['dataset_name'] or knowledge['dataset_id']!r} "
+            f"(matches ride the handler envelope's metadata.knowledge); "
+            "preview with POST /voice/agents/{id}/knowledge/search")
     return {
         "id": row.id,
         "name": row.name,
@@ -96,20 +128,53 @@ def agent_out(row: VoiceAgent, handler_name: str | None = None) -> dict:
         "handler_workflow_id": row.handler_workflow_id,
         "handler_workflow_name": handler_name,
         "handler_is_scaffold": bool((row.context or {}).get("scaffolded_handler")),
-        "wiring": {
-            "inbound_webhook": "point the provider's call-control webhook at "
-                               "/api/v1/channels/telnyx/{endpoint_id}/webhook (or the twilio "
-                               "status callback at /api/v1/voice/webhooks/twilio/{session_id})",
-            "media_stream": "point the provider's audio fork/stream at "
-                            "ws://<host>/api/v1/voice/sessions/{session_id}/media",
-            "asr_note": (f"no ASR engine is registered for {row.asr_provider!r} in this process - "
-                         "the transport will honestly report asr.unavailable until one binds"
-                         if row.asr_provider not in transport.registered_asr_engines()
-                         else f"engine {row.asr_provider!r} is live in this process"),
-        },
+        "knowledge": knowledge,
+        "wiring": wiring,
         "context": row.context or {},
         "created_at": row.created_at.isoformat() if row.created_at else None,
     }
+
+
+async def _dataset_name(db: AsyncSession, dataset_id: str | None) -> str | None:
+    if not dataset_id:
+        return None
+    from ..models import Dataset
+
+    row = await db.get(Dataset, dataset_id)
+    return row.name if row is not None else None
+
+
+async def _validate_knowledge(db: AsyncSession, owner_id: str | None, *,
+                              dataset_id: str | None, text_column: str | None,
+                              answer_column: str | None, top_k) -> tuple[str | None, str | None, str | None, int]:
+    """A knowledge binding must point at a REAL dataset the owner can read."""
+    if not dataset_id:
+        return None, None, None, 1
+    from . import knowledge as knowledge_svc
+
+    try:
+        ds = await knowledge_svc.load_knowledge_dataset(db, dataset_id, owner_id)
+    except knowledge_svc.KnowledgeError as exc:
+        raise VoiceAgentError(str(exc)) from exc
+    cols = [str((c or {}).get("name") or "") for c in (ds.schema_json or [])
+            if str((c or {}).get("name") or "")]
+    if not cols:
+        raise VoiceAgentError(f"knowledge dataset {ds.name!r} has no schema columns")
+    text_col = text_column or cols[0]  # honest default: the first column
+    if text_col not in cols:
+        raise VoiceAgentError(f"knowledge dataset {ds.name!r} has no column "
+                              f"{text_col!r} - columns: {', '.join(cols)}")
+    answer_col = answer_column or text_col
+    if answer_col not in cols:
+        raise VoiceAgentError(f"knowledge dataset {ds.name!r} has no answer column "
+                              f"{answer_col!r} - columns: {', '.join(cols)}")
+    try:
+        k = int(top_k or 1)
+    except (TypeError, ValueError):
+        raise VoiceAgentError("knowledge_top_k must be an integer 1..5") from None
+    if not 1 <= k <= 5:
+        raise VoiceAgentError("knowledge_top_k must be an integer 1..5")
+    return dataset_id, text_col, answer_col, k
 
 
 async def _load(db: AsyncSession, agent_id: str, owner_id: str | None) -> VoiceAgent:
@@ -168,12 +233,20 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
                        language: str = "en-US", barge_in: bool = True,
                        system_prompt: str = "",
                        handler_workflow_id: str | None = None,
-                       scaffold_handler: bool = False) -> dict:
+                       scaffold_handler: bool = False,
+                       knowledge_dataset_id: str | None = None,
+                       knowledge_text_column: str | None = None,
+                       knowledge_answer_column: str | None = None,
+                       knowledge_top_k: int = 1) -> dict:
     """Create an agent; scaffold a runnable handler when none is bound."""
     if not name or not name.strip():
         raise VoiceAgentError("an agent name is required")
     _validate_speech(asr_provider=asr_provider, tts_provider=tts_provider,
                      tts_format=tts_format, language=language)
+    kb_dataset, kb_text, kb_answer, kb_topk = await _validate_knowledge(
+        db, owner_id, dataset_id=knowledge_dataset_id or None,
+        text_column=knowledge_text_column, answer_column=knowledge_answer_column,
+        top_k=knowledge_top_k)
     if handler_workflow_id:
         wf = await db.get(Workflow, handler_workflow_id)
         if wf is None or (owner_id is not None and wf.owner_id is not None
@@ -193,13 +266,16 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
         tts_provider=tts_provider, tts_voice=tts_voice, tts_format=tts_format,
         language=language, barge_in=bool(barge_in), system_prompt=system_prompt,
         handler_workflow_id=handler_workflow_id,
+        knowledge_dataset_id=kb_dataset, knowledge_text_column=kb_text,
+        knowledge_answer_column=kb_answer, knowledge_top_k=kb_topk,
         context={"scaffolded_handler": scaffolded},
     )
     row.owner_id = owner_id
     db.add(row)
     await db.flush()
     await db.refresh(row)
-    return agent_out(row, await _wf_name(db, row.handler_workflow_id))
+    return agent_out(row, await _wf_name(db, row.handler_workflow_id),
+                     await _dataset_name(db, row.knowledge_dataset_id))
 
 
 async def list_agents(db: AsyncSession, owner_id: str | None) -> list[dict]:
@@ -207,12 +283,14 @@ async def list_agents(db: AsyncSession, owner_id: str | None) -> list[dict]:
     rows = (await db.execute(q)).scalars().all()
     if owner_id is not None:
         rows = [r for r in rows if r.owner_id is None or r.owner_id == owner_id]
-    return [agent_out(r, await _wf_name(db, r.handler_workflow_id)) for r in rows]
+    return [agent_out(r, await _wf_name(db, r.handler_workflow_id),
+                      await _dataset_name(db, r.knowledge_dataset_id)) for r in rows]
 
 
 async def get_agent(db: AsyncSession, agent_id: str, owner_id: str | None) -> dict:
     row = await _load(db, agent_id, owner_id)
-    return agent_out(row, await _wf_name(db, row.handler_workflow_id))
+    return agent_out(row, await _wf_name(db, row.handler_workflow_id),
+                     await _dataset_name(db, row.knowledge_dataset_id))
 
 
 async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **fields) -> dict:
@@ -230,6 +308,37 @@ async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **
             setattr(row, key, fields[key])
     if fields.get("barge_in") is not None:
         row.barge_in = bool(fields["barge_in"])
+    # v72: knowledge binding - '' clears the dataset (the handler_workflow_id
+    # convention); a non-empty id is validated (exists + owner-readable)
+    if "knowledge_dataset_id" in fields:
+        kb_id = fields.get("knowledge_dataset_id") or ""
+        if kb_id:
+            kb_dataset, kb_text, kb_answer, kb_topk = await _validate_knowledge(
+                db, owner_id, dataset_id=kb_id,
+                text_column=fields.get("knowledge_text_column"),
+                answer_column=fields.get("knowledge_answer_column"),
+                top_k=fields.get("knowledge_top_k") or row.knowledge_top_k)
+            row.knowledge_dataset_id, row.knowledge_text_column = kb_dataset, kb_text
+            row.knowledge_answer_column, row.knowledge_top_k = kb_answer, kb_topk
+        else:
+            row.knowledge_dataset_id = None
+            row.knowledge_text_column = None
+            row.knowledge_answer_column = None
+    else:
+        # columns/top_k may be adjusted on an existing binding
+        touched = False
+        for key, val in (("knowledge_text_column", fields.get("knowledge_text_column")),
+                         ("knowledge_answer_column", fields.get("knowledge_answer_column")),
+                         ("knowledge_top_k", fields.get("knowledge_top_k"))):
+            if val is not None and getattr(row, key) != val:
+                setattr(row, key, val)
+                touched = True
+        if touched and row.knowledge_dataset_id:
+            await _validate_knowledge(
+                db, owner_id, dataset_id=row.knowledge_dataset_id,
+                text_column=row.knowledge_text_column,
+                answer_column=row.knowledge_answer_column,
+                top_k=row.knowledge_top_k)
     if "handler_workflow_id" in fields:
         hwid = fields["handler_workflow_id"]
         if hwid:
@@ -241,7 +350,8 @@ async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **
     db.add(row)
     await db.flush()
     await db.refresh(row)
-    return agent_out(row, await _wf_name(db, row.handler_workflow_id))
+    return agent_out(row, await _wf_name(db, row.handler_workflow_id),
+                     await _dataset_name(db, row.knowledge_dataset_id))
 
 
 async def delete_agent(db: AsyncSession, agent_id: str, owner_id: str | None) -> dict:
@@ -268,7 +378,7 @@ async def bind_to_session(db: AsyncSession, session: "object", agent_id: str,
     """
     row = await _load(db, agent_id, owner_id)
     ctx = dict(session.context or {})
-    ctx["voice_agent"] = _agent_ctx(row)
+    ctx["voice_agent"] = _agent_ctx(row, await _dataset_name(db, row.knowledge_dataset_id))
     session.context = ctx
     db.add(session)
     return row.handler_workflow_id

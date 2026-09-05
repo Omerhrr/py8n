@@ -49,6 +49,8 @@ const selected = ref<VoiceSession | null>(null)
 const copied = ref('')
 
 const workflows = ref<any[]>([])
+const datasets = ref<any[]>([])
+const speechEngines = ref<any>(null)
 const agents = ref<VoiceAgent[]>([])
 const showCreate = ref(false)
 const busy = ref(false)
@@ -63,7 +65,7 @@ const agentBusy = ref(false)
 const agentForm = ref({
   name: '', greeting_text: '', asr_provider: 'py8n_local', tts_provider: 'openai_tts',
   tts_voice: 'alloy', language: 'en-US', barge_in: true, system_prompt: '',
-  handler_workflow_id: '', scaffold_handler: true,
+  handler_workflow_id: '', scaffold_handler: true, knowledge_dataset_id: '',
 })
 const ASR_PROVIDERS = ['py8n_local', 'openai_whisper', 'deepgram', 'assemblyai']
 const TTS_PROVIDERS = ['openai_tts', 'elevenlabs', 'piper_local', 'meta_mms']
@@ -86,15 +88,18 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    const [eps, ads, vss, wfs, ags] = await Promise.all([
+    const [eps, ads, vss, wfs, ags, dss, se] = await Promise.all([
       api('/channels/endpoints'), api('/channels/adapters'),
       api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
+      api('/datasets?limit=200'), api('/voice/speech/engines').catch(() => null),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
     sessions.value = vss.sessions || []
     workflows.value = wfs.workflows || wfs || []
     agents.value = ags.agents || []
+    datasets.value = dss.datasets || dss || []
+    speechEngines.value = se
   } catch (e: any) {
     pageError.value = e?.message || 'failed to load channels'
   } finally {
@@ -191,12 +196,14 @@ async function createAgent() {
         barge_in: agentForm.value.barge_in, system_prompt: agentForm.value.system_prompt,
         handler_workflow_id: agentForm.value.handler_workflow_id || null,
         scaffold_handler: !agentForm.value.handler_workflow_id && agentForm.value.scaffold_handler,
+        knowledge_dataset_id: agentForm.value.knowledge_dataset_id || null,
       }),
     })
     showAgentCreate.value = false
     agentForm.value = { name: '', greeting_text: '', asr_provider: agentForm.value.asr_provider,
       tts_provider: agentForm.value.tts_provider, tts_voice: 'alloy', language: 'en-US',
-      barge_in: true, system_prompt: '', handler_workflow_id: '', scaffold_handler: true }
+      barge_in: true, system_prompt: '', handler_workflow_id: '', scaffold_handler: true,
+      knowledge_dataset_id: '' }
     await load()
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'agent create failed'
@@ -228,8 +235,9 @@ onMounted(load)
           and Email (inbound parse + SMTP) - each webhook-native and verified with its own
           credentials, feeding the SAME conversation layer. Voice Agents compose the voice stack
           (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into one deployable phone
-          persona; sessions inherit the agent's config and the v70 media transport transcribes
-          through the agent's engine.
+          persona, bound to a KNOWLEDGE DATASET so every call answers from your data; sessions
+          inherit the agent's config and the v70 media transport transcribes through the agent's
+          engine (local whisper.cpp / vosk / piper bridges when installed).
         </p>
       </div>
       <div class="flex gap-2 shrink-0">
@@ -299,8 +307,22 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Bot class="w-4 h-4 text-fuchsia-400" /> Voice agents ({{ agents.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">greeting · ASR engine · TTS voice · barge-in · scaffolded handler</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">greeting · ASR engine · TTS voice · barge-in · knowledge binding</span>
         </h2>
+        <details v-if="speechEngines" class="text-xs">
+          <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">
+            Local speech engines - ASR:
+            <span :class="speechEngines.asr?.local_engine_registered ? 'text-emerald-300' : 'text-amber-300'">{{ speechEngines.asr?.local_engine_registered ? 'py8n_local live' : 'not bound' }}</span>
+            · TTS:
+            <span :class="speechEngines.tts?.local_engine_registered ? 'text-emerald-300' : 'text-amber-300'">{{ speechEngines.tts?.local_engine_registered ? 'piper live' : 'not bound' }}</span>
+            (probe details)
+          </summary>
+          <div class="mt-2 space-y-1 text-zinc-400">
+            <p>vosk: {{ speechEngines.asr?.vosk?.note }}</p>
+            <p>whisper.cpp: {{ speechEngines.asr?.['whisper.cpp']?.note }}</p>
+            <p>piper: {{ speechEngines.tts?.piper?.note }}</p>
+          </div>
+        </details>
         <p v-if="!agents.length" class="text-sm text-zinc-500">No agents yet - create one to compose the voice primitives into a deployable phone persona.</p>
         <div v-for="a in agents" :key="a.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
           <div class="flex items-center justify-between gap-3 flex-wrap">
@@ -314,6 +336,7 @@ onMounted(load)
                 {{ a.speech.barge_in ? 'barge-in ok' : 'no barge-in' }}
               </span>
               <span v-if="a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">scaffolded handler</span>
+              <span v-if="a.knowledge" class="text-xs px-2 py-0.5 rounded-full border border-teal-500/25 bg-teal-500/10 text-teal-300">knowledge: {{ a.knowledge.dataset_name || a.knowledge.dataset_id }} · top {{ a.knowledge.top_k }}</span>
             </div>
             <button class="btn btn-ghost text-rose-300 text-xs" @click="removeAgent(a)"><Ban class="w-3.5 h-3.5" /></button>
           </div>
@@ -323,11 +346,12 @@ onMounted(load)
             <span v-if="a.system_prompt"> · persona: <span class="text-zinc-400">{{ a.system_prompt.slice(0, 60) }}{{ a.system_prompt.length > 60 ? '…' : '' }}</span></span>
           </div>
           <details class="text-xs">
-            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">Wiring (provider webhook + media stream)</summary>
+            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">Wiring (provider webhook + media stream + knowledge)</summary>
             <div class="mt-2 space-y-1">
               <p class="text-zinc-400">{{ a.wiring.inbound_webhook }}</p>
               <p class="text-zinc-400">{{ a.wiring.media_stream }}</p>
               <p class="text-amber-300/80">{{ a.wiring.asr_note }}</p>
+              <p v-if="a.wiring.knowledge_note" class="text-teal-300/80">{{ a.wiring.knowledge_note }}</p>
             </div>
           </details>
         </div>
@@ -449,6 +473,12 @@ onMounted(load)
           <select v-model="agentForm.handler_workflow_id" class="input mt-1 w-full">
             <option value="">- scaffold one for me -</option>
             <option v-for="w in workflows" :key="w.id" :value="w.id">{{ w.name }}</option>
+          </select>
+        </label>
+        <label class="block text-sm text-zinc-400">Knowledge dataset (every turn is grounded on its rows)
+          <select v-model="agentForm.knowledge_dataset_id" class="input mt-1 w-full">
+            <option value="">- none (the handler answers ungrounded) -</option>
+            <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }} ({{ d.row_count }} rows)</option>
           </select>
         </label>
         <label class="flex items-center gap-2 text-sm text-zinc-400">

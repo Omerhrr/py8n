@@ -268,6 +268,37 @@ LM_GENERATE_GRAPH = {
     ],
 }
 
+# v72: the voice agent system's handler. The voice turn loop grounds every
+# utterance against the bound FAQ dataset and rides the matches in
+# metadata.knowledge; this code node speaks the best match's answer (or the
+# honest take-a-message line when nothing matched). Swap the code node for
+# ai_agent when you want an LLM brain over the SAME knowledge.
+VOICE_AGENT_HANDLER_GRAPH = {
+    "nodes": [
+        {"id": "t", "type": "manual_trigger", "name": "Trigger",
+         "position": {"x": 0, "y": 0}, "parameters": {}},
+        {"id": "reply", "type": "code", "name": "Answer from knowledge",
+         "position": {"x": 220, "y": 0},
+         "parameters": {"code": (
+             "# Voice agent handler - answers FROM the knowledge binding (v72)\n"
+             "# input_data['payload'] = the voice envelope: {text, metadata:\n"
+             "#   {knowledge: [{question, answer, score}...], system_prompt, ...}}\n"
+             "env = input_data.get('payload', {})\n"
+             "meta = env.get('metadata') or {}\n"
+             "matches = meta.get('knowledge') or []\n"
+             "if matches:\n"
+             "    best = matches[0]\n"
+             "    reply = str(best.get('answer') or '')\n"
+             "else:\n"
+             "    reply = ('I am sorry, I do not have that in my knowledge yet - '\n"
+             "             'let me take a message and a human will call you back.')\n"
+             "result = {'text': reply}\n"
+         )}},
+    ],
+    "edges": [{"id": "e1", "source": "t", "target": "reply",
+               "sourceHandle": "main", "targetHandle": "main"}],
+}
+
 CURATED_SOLUTIONS: list[dict] = [
     {
         "slug": "customer-support-automation",
@@ -487,6 +518,78 @@ CURATED_SOLUTIONS: list[dict] = [
                  "legal corpus (weights + tokenizer carry over, lineage recorded), 'Generate With "
                  "Language Model' samples text into lm_samples. Runs fully offline."),
     },
+    {
+        # v72: the install IS a phone agent. The pack carries the knowledge
+        # dataset + the knowledge-aware handler; the voice_agent block tells
+        # the installer what the VoiceAgent row looks like (bound to the
+        # installed handler + dataset, greeting + persona included).
+        "slug": "voice-agent-system",
+        "name": "Voice Agent System",
+        "tagline": "A complete phone agent in one click: FAQ knowledge dataset, knowledge-grounded handler, and a Voice Agent wired for any provider - Telnyx, Twilio, SIP or in-app.",
+        "category": "Voice",
+        "icon": "phone",
+        "color": "#f97316",
+        "outcomes_json": [
+            "Support FAQ knowledge dataset",
+            "Knowledge-grounded handler workflow",
+            "Voice Agent with interruptible greeting",
+            "Every call answered from YOUR data",
+            "Wired for Telnyx / Twilio / SIP / in-app",
+            "Speech engine inventory + live ASR/TTS bridges",
+        ],
+        "pack_json": {**_pack(
+            [
+                _wf("Voice Agent Handler",
+                    "Trigger -> knowledge-aware reply. metadata.knowledge (grounded by the "
+                    "voice turn loop) answers the caller; unmatched questions get an honest "
+                    "take-a-message line.",
+                    VOICE_AGENT_HANDLER_GRAPH),
+            ],
+            [
+                _ds("voice_agent_faq", "The phone agent's knowledge - questions it can answer",
+                    [{"name": "question", "dtype": "text"}, {"name": "answer", "dtype": "text"}],
+                    [{"question": "What are your opening hours",
+                      "answer": "We are open Monday to Friday from nine AM to six PM, and Saturdays from ten AM to two PM."},
+                     {"question": "Where are you located",
+                      "answer": "Our office is at forty-two Market Street, downtown. Parking is available behind the building."},
+                     {"question": "How do I return a product",
+                      "answer": "You can return any product within thirty days with the receipt. Bring it to the front desk and we will process the refund the same day."},
+                     {"question": "How do I book an appointment",
+                      "answer": "You can book an appointment on our website or by leaving your number with this line. We call back within one business hour."},
+                     {"question": "What does the subscription cost",
+                      "answer": "The standard plan costs twenty dollars a month. The team plan is fifty dollars a month for up to five people."},
+                     {"question": "Which payment methods do you accept",
+                      "answer": "We accept cards, bank transfer, and mobile money. Cash is accepted in store only."},
+                     {"question": "How long does shipping take",
+                      "answer": "Standard shipping takes three to five business days. Express shipping arrives the next business day."},
+                     {"question": "Can I speak to a human",
+                      "answer": "Of course. I will take a message and a human colleague will call you back within one business hour."},
+                     {"question": "Do you offer support after purchase",
+                      "answer": "Yes, every purchase includes ninety days of free support by phone and email."},
+                     {"question": "Is there a warranty on your products",
+                      "answer": "All products carry a one year warranty covering manufacturing defects."}]),
+            ],
+        ),
+        # the installer reads THIS block from the stored pack_json (extra
+        # pack keys are ignored by the validator): the VoiceAgent row it
+        # creates is bound to the installed handler + knowledge dataset
+        "voice_agent": {
+            "name_suffix": "phone agent",
+            "greeting_text": "Hello, and thanks for calling. You can ask me about our hours, returns, bookings or anything in our support FAQ.",
+            "system_prompt": "You are a courteous phone support agent. Answer ONLY from the knowledge matches in metadata.knowledge; when nothing matches, say you will take a message.",
+            "knowledge": {"dataset": "voice_agent_faq", "text_column": "question", "answer_column": "answer"},
+            "speech": {"asr_provider": "py8n_local", "tts_provider": "openai_tts",
+                       "tts_voice": "alloy", "tts_format": "wav", "language": "en-US", "barge_in": True},
+        }},
+        "docs": ("Install AS A VOICE AGENT. The install creates the FAQ knowledge dataset, the "
+                 "knowledge-grounded handler and a Voice Agent bound to both - sessions inherit "
+                 "the greeting, the speech config and the knowledge binding. Point a provider "
+                 "(Telnyx call control + media stream, Twilio, SIP or the in-app UI) at the "
+                 "session's webhook/media URL and the phone answers from YOUR data. Preview the "
+                 "grounding with POST /voice/agents/{id}/knowledge/search, and check "
+                 "GET /voice/speech/engines for the live local ASR/TTS bridges (whisper.cpp, "
+                 "vosk, piper)."),
+    },
 ]
 
 
@@ -503,6 +606,7 @@ def solution_summary(s: Solution) -> dict:
         "installs": int(s.installs or 0),
         "curated": s.owner_id is None,
         "model_system_ready": s.slug in MODEL_SYSTEM_MODALITIES,  # v64: installs as a model system
+        "voice_agent_ready": bool((s.pack_json or {}).get("voice_agent")),  # v72: installs as a phone agent
         "workflow_count": len((s.pack_json or {}).get("workflows", [])),
         "dataset_count": len((s.pack_json or {}).get("datasets", [])),
     }

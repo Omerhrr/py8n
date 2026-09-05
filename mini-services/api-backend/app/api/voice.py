@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -66,6 +67,10 @@ class AgentCreate(BaseModel):
     system_prompt: str = Field(default="", max_length=8000, description="the persona injected into the handler envelope's metadata")
     handler_workflow_id: str | None = None
     scaffold_handler: bool = Field(default=False, description="scaffold a runnable trigger -> code handler when none is bound")
+    knowledge_dataset_id: str | None = Field(default=None, max_length=36, description="v72: bind a dataset - every turn is grounded on its rows")
+    knowledge_text_column: str | None = Field(default=None, max_length=80, description="the question/text column (default: the dataset's first column)")
+    knowledge_answer_column: str | None = Field(default=None, max_length=80, description="the answer column (default: the text column)")
+    knowledge_top_k: int = Field(default=1, ge=1, le=5, description="how many knowledge matches ride the handler envelope")
 
 
 @router.post("/agents", status_code=201)
@@ -80,7 +85,11 @@ async def create_agent(body: AgentCreate, user=Depends(get_optional_user),
             language=body.language, barge_in=body.barge_in,
             system_prompt=body.system_prompt,
             handler_workflow_id=body.handler_workflow_id,
-            scaffold_handler=body.scaffold_handler)
+            scaffold_handler=body.scaffold_handler,
+            knowledge_dataset_id=body.knowledge_dataset_id,
+            knowledge_text_column=body.knowledge_text_column,
+            knowledge_answer_column=body.knowledge_answer_column,
+            knowledge_top_k=body.knowledge_top_k)
     except agent_svc.VoiceAgentError as exc:
         raise _http(exc) from exc
 
@@ -111,6 +120,11 @@ class AgentUpdate(BaseModel):
     barge_in: bool | None = None
     system_prompt: str | None = Field(default=None, max_length=8000)
     handler_workflow_id: str | None = None
+    knowledge_dataset_id: str | None = Field(default=None, max_length=36,
+                                             description="v72: non-empty binds/rewires, empty string clears")
+    knowledge_text_column: str | None = Field(default=None, max_length=80)
+    knowledge_answer_column: str | None = Field(default=None, max_length=80)
+    knowledge_top_k: int | None = Field(default=None, ge=1, le=5)
 
 
 @router.put("/agents/{agent_id}")
@@ -124,7 +138,11 @@ async def update_agent(agent_id: str, body: AgentUpdate,
             tts_provider=body.tts_provider, tts_voice=body.tts_voice,
             tts_format=body.tts_format, language=body.language,
             barge_in=body.barge_in, system_prompt=body.system_prompt,
-            handler_workflow_id=body.handler_workflow_id)
+            handler_workflow_id=body.handler_workflow_id,
+            knowledge_dataset_id=body.knowledge_dataset_id,
+            knowledge_text_column=body.knowledge_text_column,
+            knowledge_answer_column=body.knowledge_answer_column,
+            knowledge_top_k=body.knowledge_top_k)
     except agent_svc.VoiceAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -136,6 +154,93 @@ async def delete_agent(agent_id: str, user=Depends(get_optional_user),
         return await agent_svc.delete_agent(db, agent_id, getattr(user, "id", None))
     except agent_svc.VoiceAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# v72: knowledge binding - dataset-backed answers over the phone
+# ---------------------------------------------------------------------------
+
+
+class KnowledgeSearchBody(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000, description="what a caller just said")
+    top_k: int | None = Field(default=None, ge=1, le=5, description="override the agent's bound top_k")
+
+
+@router.post("/agents/{agent_id}/knowledge/search")
+async def knowledge_search(agent_id: str, body: KnowledgeSearchBody,
+                           user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Preview what a voice turn would be grounded on (no call needed).
+
+    Runs the exact retrieval the turn loop runs against the agent's bound
+    dataset - matches carry score + row evidence, so wiring is testable
+    before a single phone rings.
+    """
+    from ..services import knowledge as knowledge_svc
+    from ..services.knowledge import KnowledgeError
+
+    try:
+        agent = await agent_svc.get_agent(db, agent_id, getattr(user, "id", None))
+    except agent_svc.VoiceAgentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    kb = agent.get("knowledge") or {}
+    if not kb.get("dataset_id"):
+        raise HTTPException(status_code=409, detail="this agent has no knowledge dataset bound - "
+                                                    "set knowledge_dataset_id on the agent first")
+    try:
+        return await knowledge_svc.knowledge_search(
+            db, dataset_id=kb["dataset_id"], query=body.query,
+            text_column=kb.get("text_column") or "",
+            answer_column=kb.get("answer_column") or None,
+            top_k=body.top_k or int(kb.get("top_k") or 1),
+            owner_id=getattr(user, "id", None))
+    except KnowledgeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# v72: live speech engine bridges - the honest machine inventory + TTS
+# ---------------------------------------------------------------------------
+
+
+@router.get("/speech/engines")
+async def speech_engines():
+    """Which local ASR/TTS bridges can actually run on this machine.
+
+    The devices.py pattern, for speech: availability is probed (binary +
+    model), never assumed - a missing bridge reports exact remediation and
+    the transport keeps reporting asr.unavailable for it.
+    """
+    from ..services import speech_engines as speech_svc
+
+    return speech_svc.speech_inventory()
+
+
+class TTSBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
+    provider: str = Field(default="piper_local", max_length=40,
+                          description="the registered engine to use (piper_local)")
+    voice: str = Field(default="", max_length=80)
+    format: str = Field(default="wav", max_length=10)
+
+
+@router.post("/tts/synthesize")
+async def tts_synthesize(body: TTSBody, user=Depends(get_optional_user)):
+    """Synthesize text through a REGISTERED local TTS engine (v72).
+
+    Returns the v69 TTS contract result (audio_b64 + honest duration).
+    Hosted providers (openai_tts / elevenlabs) are executed by their own
+    bridges at delivery time - this endpoint runs the in-process ones.
+    """
+    from ..services import speech_engines
+    from ..services.voice import VoiceError
+
+    try:
+        result = speech_engines.synthesize(body.provider, body.text,
+                                           voice=body.voice, fmt=body.format)
+        result["provider"] = body.provider
+        return result
+    except VoiceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 async def _own_session(db: AsyncSession, session_id: str, user) -> VoiceSession:
@@ -492,7 +597,10 @@ async def media_stream(websocket: WebSocket, session_id: str):
                                          "segment": seg.out()})
                         else:
                             try:
-                                asr_raw = engine(seg.pcm, frame.sample_rate)
+                                # v72: real engines (vosk/whisper.cpp) do actual
+                                # compute - run the sync callable off the event
+                                # loop so the stream keeps flowing
+                                asr_raw = await asyncio.to_thread(engine, seg.pcm, frame.sample_rate)
                                 asr = voice_svc.validate_asr_result(asr_raw)
                             except voice_svc.VoiceError as exc:
                                 await _send({"event": "asr.error", "detail": str(exc),

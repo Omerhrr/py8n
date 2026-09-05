@@ -436,7 +436,9 @@ async def barge_in(db: AsyncSession, session: VoiceSession) -> dict:
                                   if e.kind == "barge_in")}
 
 
-async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> str:
+async def _run_handler(db: AsyncSession, session: VoiceSession, text: str,
+                       knowledge: list[dict] | None = None,
+                       knowledge_note: str = "") -> str:
     """The interaction-layer handler convention, over the voice conversation."""
     from .executor import execute_workflow
     from .interactions import _extract_reply
@@ -450,7 +452,16 @@ async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> st
     tail = [{"role": m.role, "channel": m.channel, "text": m.text} for m in history[-10:]]
     # v71: the VoiceAgent's persona rides the envelope so AI handlers speak
     # with the agent's voice (the scaffold reads metadata.system_prompt)
+    # v72: knowledge matches ride metadata.knowledge so handlers answer
+    # from the bound dataset (dataset-backed answers over the phone)
     agent = (session.context or {}).get("voice_agent") or {}
+    metadata = {"provider": session.provider, "call_ref": session.call_ref,
+                "voice_agent_id": agent.get("voice_agent_id") or "",
+                "system_prompt": agent.get("system_prompt") or ""}
+    if knowledge:
+        metadata["knowledge"] = knowledge
+    if knowledge_note:
+        metadata["knowledge_error"] = knowledge_note
     envelope = {
         "conversation_id": session.conversation_id,
         "channel": "voice",
@@ -458,9 +469,7 @@ async def _run_handler(db: AsyncSession, session: VoiceSession, text: str) -> st
         "participant": {"id": session.from_ref, "name": ""},
         "text": text,
         "history": tail,
-        "metadata": {"provider": session.provider, "call_ref": session.call_ref,
-                     "voice_agent_id": agent.get("voice_agent_id") or "",
-                     "system_prompt": agent.get("system_prompt") or ""},
+        "metadata": metadata,
     }
     result = await execute_workflow(
         session.handler_workflow_id, trigger_type="webhook",
@@ -514,7 +523,28 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
     # same discipline interactions.ingest learned in v68).
     await db.commit()
 
-    reply = await _run_handler(db, session, asr["transcript"])
+    # v72: ground the turn on the agent's knowledge binding BEFORE the
+    # handler runs - matches ride the envelope's metadata.knowledge. A live
+    # call must not die because the binding broke (dataset deleted
+    # mid-call): the failure is recorded honestly and the handler runs
+    # ungrounded (the same honesty as asr.unavailable).
+    knowledge: list[dict] = []
+    knowledge_note = ""
+    kb = ((session.context or {}).get("voice_agent") or {}).get("knowledge") or {}
+    if kb.get("dataset_id"):
+        from . import knowledge as knowledge_svc
+        try:
+            kb_res = await knowledge_svc.knowledge_search(
+                db, dataset_id=kb["dataset_id"], query=asr["transcript"],
+                text_column=kb.get("text_column") or "",
+                answer_column=kb.get("answer_column") or None,
+                top_k=int(kb.get("top_k") or 1), owner_id=session.owner_id)
+            knowledge = kb_res["matches"]
+        except knowledge_svc.KnowledgeError as exc:
+            knowledge_note = str(exc)
+
+    reply = await _run_handler(db, session, asr["transcript"],
+                               knowledge=knowledge, knowledge_note=knowledge_note)
     if reply:
         db.add(InteractionMessage(conversation_id=session.conversation_id, role="agent",
                                   channel="voice", text=reply[:20000],
@@ -540,6 +570,7 @@ async def voice_turn(db: AsyncSession, session: VoiceSession, *, transcript: str
         tts_request["tts_id"] = tts_event.id
     await db.flush()
     return {"event": _event_out(event), "asr": asr, "reply": reply or None,
+            "knowledge": knowledge or None, "knowledge_error": knowledge_note or None,
             "tts": tts_request, "state": session.state}
 
 

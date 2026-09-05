@@ -1286,5 +1286,13 @@ class VoiceAgent(Base):
     barge_in: Mapped[bool] = mapped_column(Boolean, default=True)
     system_prompt: Mapped[str] = mapped_column(Text, default="")
     handler_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # v72: knowledge binding - a dataset the agent answers FROM. The binding
+    # is config (copied into sessions at creation); the dataset's CONTENT is
+    # read live at every turn, so FAQ updates take effect on live calls
+    # without dropping them.
+    knowledge_dataset_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    knowledge_text_column: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    knowledge_answer_column: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    knowledge_top_k: Mapped[int] = mapped_column(Integer, default=1)
     context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
