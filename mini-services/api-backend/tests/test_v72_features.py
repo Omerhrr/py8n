@@ -252,9 +252,11 @@ def test_v72_speech_inventory_is_honest(monkeypatch, tmp_path):
     monkeypatch.delenv("PY8N_PIPER_VOICE", raising=False)
     monkeypatch.setattr(engines, "models_root", lambda: tmp_path)
     inv = engines.speech_inventory()
-    # in this sandbox vosk is not installed - the note must say how to fix it
+    # an unavailable bridge must say how to fix it - whichever leg is missing
+    # (v73: the sandbox may carry the vosk PACKAGE, so the honest note is
+    # about the MODEL then; both remediation paths name the env override)
     if not inv["asr"]["vosk"]["available"]:
-        assert "pip install vosk" in inv["asr"]["vosk"]["note"]
+        assert "PY8N_VOSK_MODEL" in inv["asr"]["vosk"]["note"]
     if not inv["asr"]["whisper.cpp"]["available"]:
         assert "whisper-cli" in inv["asr"]["whisper.cpp"]["note"]
     if not inv["tts"]["piper"]["available"]:
@@ -571,7 +573,7 @@ def test_v72_version_and_contracts():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] == "1.72.0"
+            assert res.json()["version"] >= "1.72.0"  # v73 relaxes the pin forward
             res = await client.get("/voice/contracts")
             assert res.status_code == 200
             contracts = res.json()

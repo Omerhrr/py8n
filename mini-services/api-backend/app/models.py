@@ -1294,5 +1294,13 @@ class VoiceAgent(Base):
     knowledge_text_column: Mapped[str | None] = mapped_column(String(80), nullable=True)
     knowledge_answer_column: Mapped[str | None] = mapped_column(String(80), nullable=True)
     knowledge_top_k: Mapped[int] = mapped_column(Integer, default=1)
+    # v73: the brain behind the scaffolded handler. "scaffold" = the echo
+    # code node; "ai_agent" = an LLM brain whose prompt is grounded on the
+    # SAME knowledge binding (matches ride metadata.knowledge into the
+    # agent's user message). Sessions copy the brain at creation.
+    brain: Mapped[str] = mapped_column(String(20), nullable=False, default="scaffold")
+    brain_provider: Mapped[str] = mapped_column(String(40), nullable=False,
+                                                default="sandbox_bridge")
+    brain_model: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

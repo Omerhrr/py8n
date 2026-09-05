@@ -39,6 +39,39 @@ class VoiceAgentError(ValueError):
     """Honest 4xx-grade agent failures."""
 
 
+BRAINS = ("scaffold", "ai_agent")
+BRAIN_PROVIDERS = ("sandbox_bridge", "openai_compatible")
+
+# v73: the LLM-brain scaffold. The ai_agent node's params are JINJA
+# TEMPLATES resolved against the live execution context at every turn -
+# the trigger node's output IS the template context (input.payload = the
+# handler envelope), so the caller's words AND the knowledge matches
+# retrieved from the SAME binding the deterministic handler reads ride
+# straight into the model's user message. One binding, two brains.
+_AI_BRAIN_USER_TMPL = (
+    "Phone call turn. The caller said: {{ input.payload.text }}\n\n"
+    "Grounded knowledge matches from the company dataset (a JSON list; "
+    "answer ONLY from these when one fits):\n"
+    "{{ (input.payload.metadata.get('knowledge') or []) | tojson }}\n\n"
+    "Knowledge service status this turn: "
+    "{{ input.payload.metadata.get('knowledge_error') or 'ok' }}.\n"
+    "Speak the answer aloud: plain short sentences, no markdown, no lists."
+)
+_AI_BRAIN_SYSTEM_TMPL = (
+    "{{ input.payload.metadata.get('system_prompt') or 'You are a courteous "
+    "phone agent. Answer ONLY from the grounded knowledge matches provided; "
+    "when nothing fits, say you will take a message.' }}"
+)
+
+
+def _validate_brain(*, brain: str, brain_provider: str) -> None:
+    if brain not in BRAINS:
+        raise VoiceAgentError(f"brain must be {'|'.join(BRAINS)}, got {brain!r}")
+    if brain_provider not in BRAIN_PROVIDERS:
+        raise VoiceAgentError(f"brain_provider must be {'|'.join(BRAIN_PROVIDERS)}, "
+                              f"got {brain_provider!r}")
+
+
 # The scaffolded handler template: a REAL runnable workflow (manual
 # trigger -> code node) that answers with the envelope's text through the
 # agent's persona line. The comment IS the builder instruction: swap the
@@ -86,6 +119,8 @@ def _agent_ctx(agent: VoiceAgent, dataset_name: str | None = None) -> dict:
         "barge_in": bool(agent.barge_in),
         "system_prompt": agent.system_prompt,
         "knowledge": _knowledge_ctx(agent, dataset_name),  # v72: dataset-backed answers
+        "brain": {"kind": agent.brain, "provider": agent.brain_provider,  # v73
+                  "model": agent.brain_model or None},
     }
 
 
@@ -110,6 +145,15 @@ def agent_out(row: VoiceAgent, handler_name: str | None = None,
             f"every turn is grounded on dataset {knowledge['dataset_name'] or knowledge['dataset_id']!r} "
             f"(matches ride the handler envelope's metadata.knowledge); "
             "preview with POST /voice/agents/{id}/knowledge/search")
+    brain = {"kind": row.brain, "provider": row.brain_provider,
+             "model": row.brain_model or None}
+    if row.brain == "ai_agent":
+        wiring["brain_note"] = (
+            "the scaffolded handler runs an ai_agent (LLM) node grounded on the SAME "
+            "knowledge binding - its user message is a template over the envelope "
+            "(caller words + metadata.knowledge); the sandbox_bridge provider uses "
+            "settings.llm_bridge_url, or edit the workflow for openai_compatible + "
+            "a credential")
     return {
         "id": row.id,
         "name": row.name,
@@ -128,6 +172,7 @@ def agent_out(row: VoiceAgent, handler_name: str | None = None,
         "handler_workflow_id": row.handler_workflow_id,
         "handler_workflow_name": handler_name,
         "handler_is_scaffold": bool((row.context or {}).get("scaffolded_handler")),
+        "brain": brain,
         "knowledge": knowledge,
         "wiring": wiring,
         "context": row.context or {},
@@ -201,24 +246,55 @@ def _validate_speech(*, asr_provider: str, tts_provider: str, tts_format: str,
 
 
 async def _scaffold_handler(db: AsyncSession, owner_id: str | None,
-                            agent_name: str) -> Workflow:
-    """A REAL, runnable handler workflow: trigger -> voice-agent code node."""
+                            agent_name: str, *, brain: str = "scaffold",
+                            brain_provider: str = "sandbox_bridge",
+                            brain_model: str = "") -> Workflow:
+    """A REAL, runnable handler workflow, in either brain flavor.
+
+    * ``scaffold`` - trigger -> code node (the v71 offline echo).
+    * ``ai_agent`` - trigger -> ai_agent node whose prompt is grounded on
+      metadata.knowledge (v73): the LLM answers from the SAME binding the
+      deterministic knowledge handler reads.
+    """
+    if brain == "ai_agent":
+        nodes = [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger",
+             "position": {"x": 0, "y": 0}, "parameters": {}},
+            {"id": "brain", "type": "ai_agent", "name": "LLM brain (grounded)",
+             "position": {"x": 200, "y": 0},
+             "parameters": {
+                 "provider": brain_provider or "sandbox_bridge",
+                 "model": brain_model or "",
+                 "system_prompt": _AI_BRAIN_SYSTEM_TMPL,
+                 "user_message": _AI_BRAIN_USER_TMPL,
+                 "max_iterations": 3, "temperature": 0.3,
+                 "memory": "none", "tools": [],
+             }},
+        ]
+        desc = (f"Scaffolded by the voice agent builder for {agent_name!r} - "
+                "an ai_agent brain grounded on the agent's knowledge binding "
+                "(metadata.knowledge); edit the node to point the LLM at your "
+                "own provider + credential")
+        tags = ["voice-agent", "scaffold", "ai-brain"]
+    else:
+        nodes = [
+            {"id": "t", "type": "manual_trigger", "name": "Trigger",
+             "position": {"x": 0, "y": 0}, "parameters": {}},
+            {"id": "reply", "type": "code", "name": "Voice reply",
+             "position": {"x": 200, "y": 0}, "parameters": {"code": _SCAFFOLD_CODE}},
+        ]
+        desc = (f"Scaffolded by the voice agent builder for {agent_name!r} - "
+                "swap the code node for ai_agent + knowledge when ready")
+        tags = ["voice-agent", "scaffold"]
     wf = Workflow(
         name=f"{agent_name} - voice handler",
-        description=f"Scaffolded by the voice agent builder for {agent_name!r} - "
-                    "swap the code node for ai_agent + knowledge when ready",
-        graph={
-            "nodes": [
-                {"id": "t", "type": "manual_trigger", "name": "Trigger",
-                 "position": {"x": 0, "y": 0}, "parameters": {}},
-                {"id": "reply", "type": "code", "name": "Voice reply",
-                 "position": {"x": 200, "y": 0}, "parameters": {"code": _SCAFFOLD_CODE}},
-            ],
-            "edges": [{"id": "e1", "source": "t", "target": "reply",
-                       "sourceHandle": "main", "targetHandle": "main"}],
-        },
+        description=desc,
+        graph={"nodes": nodes,
+               "edges": [{"id": "e1", "source": "t",
+                          "target": "brain" if brain == "ai_agent" else "reply",
+                          "sourceHandle": "main", "targetHandle": "main"}]},
         is_active=False,  # handlers run through execute_workflow directly, like every channel
-        tags=["voice-agent", "scaffold"],
+        tags=tags,
     )
     wf.owner_id = owner_id
     db.add(wf)
@@ -237,12 +313,16 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
                        knowledge_dataset_id: str | None = None,
                        knowledge_text_column: str | None = None,
                        knowledge_answer_column: str | None = None,
-                       knowledge_top_k: int = 1) -> dict:
+                       knowledge_top_k: int = 1,
+                       brain: str = "scaffold",
+                       brain_provider: str = "sandbox_bridge",
+                       brain_model: str = "") -> dict:
     """Create an agent; scaffold a runnable handler when none is bound."""
     if not name or not name.strip():
         raise VoiceAgentError("an agent name is required")
     _validate_speech(asr_provider=asr_provider, tts_provider=tts_provider,
                      tts_format=tts_format, language=language)
+    _validate_brain(brain=brain, brain_provider=brain_provider)
     kb_dataset, kb_text, kb_answer, kb_topk = await _validate_knowledge(
         db, owner_id, dataset_id=knowledge_dataset_id or None,
         text_column=knowledge_text_column, answer_column=knowledge_answer_column,
@@ -254,7 +334,9 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
             raise VoiceAgentError(f"handler workflow {handler_workflow_id!r} not found")
         scaffolded = False
     elif scaffold_handler:
-        wf = await _scaffold_handler(db, owner_id, name.strip()[:100])
+        wf = await _scaffold_handler(db, owner_id, name.strip()[:100], brain=brain,
+                                     brain_provider=brain_provider,
+                                     brain_model=brain_model.strip()[:120])
         handler_workflow_id = wf.id
         scaffolded = True
     else:
@@ -268,6 +350,8 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
         handler_workflow_id=handler_workflow_id,
         knowledge_dataset_id=kb_dataset, knowledge_text_column=kb_text,
         knowledge_answer_column=kb_answer, knowledge_top_k=kb_topk,
+        brain=brain, brain_provider=brain_provider,
+        brain_model=brain_model.strip()[:120],
         context={"scaffolded_handler": scaffolded},
     )
     row.owner_id = owner_id
@@ -347,6 +431,34 @@ async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **
                               and wf.owner_id != owner_id):
                 raise VoiceAgentError(f"handler workflow {hwid!r} not found")
         row.handler_workflow_id = hwid or None
+    # v73: brain changes. A custom handler workflow is NEVER replaced -
+    # py8n refuses loudly instead. A scaffolded handler is re-scaffolded as
+    # a NEW workflow (live sessions keep the one they copied at creation;
+    # the old scaffold is left in the estate, inactive and tagged).
+    brain_requested = fields.get("brain") or row.brain
+    provider_requested = fields.get("brain_provider") or row.brain_provider
+    model_requested = (fields.get("brain_model") if fields.get("brain_model") is not None
+                       else row.brain_model) or ""
+    _validate_brain(brain=brain_requested, brain_provider=provider_requested)
+    brain_changed = (brain_requested != row.brain
+                     or provider_requested != row.brain_provider
+                     or model_requested != (row.brain_model or ""))
+    if brain_changed:
+        if not (row.context or {}).get("scaffolded_handler"):
+            raise VoiceAgentError(
+                "this agent runs a custom handler workflow - py8n will not replace it; "
+                "bind your own ai_agent workflow, or clear handler_workflow_id first")
+        wf = await _scaffold_handler(db, owner_id, row.name.strip()[:100],
+                                     brain=brain_requested,
+                                     brain_provider=provider_requested,
+                                     brain_model=model_requested.strip()[:120])
+        row.handler_workflow_id = wf.id
+        ctx = dict(row.context or {})
+        ctx["handler_regenerated"] = "v73 brain change"
+        row.context = ctx
+    row.brain = brain_requested
+    row.brain_provider = provider_requested
+    row.brain_model = model_requested.strip()[:120]
     db.add(row)
     await db.flush()
     await db.refresh(row)

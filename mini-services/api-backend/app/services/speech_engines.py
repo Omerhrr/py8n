@@ -119,6 +119,12 @@ def make_vosk_engine(model_dir: str, language: str = ""):
     The model is loaded ONCE at bind time (Kaldi models are expensive);
     recognition creates a recognizer per utterance, which is the pattern
     vosk itself documents for short segments.
+
+    v73: word data is ON - the utterance's confidence is the MEAN of the
+    per-word confidences vosk's acoustic model produces, so voice session
+    analytics get REAL numbers from a local engine instead of the honest
+    0.0 "not reported" default. A build that still reports no words falls
+    back to the payload's top-level confidence, then to 0.0.
     """
     from vosk import KaldiRecognizer, Model  # noqa: import guarded by probe
 
@@ -128,18 +134,32 @@ def make_vosk_engine(model_dir: str, language: str = ""):
     def _recognize(pcm: bytes, sample_rate: int) -> dict:
         data = pcm if sample_rate == 16000 else resample_linear16(pcm, sample_rate, 16000)
         rec = KaldiRecognizer(model, 16000)
-        rec.SetWords(False)
+        rec.SetWords(True)
         rec.AcceptWaveform(data)
         raw = rec.FinalResult()
         payload = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
         transcript = str(payload.get("text") or "").strip()
-        # vosk historically reports no confidence on FinalResult; when the
-        # build does, use it - otherwise the contract's honest default (0.0)
-        # stands. An empty transcript raises through validate_asr_result,
-        # which the transport surfaces as asr.error (silence is not words).
+        words = [w for w in (payload.get("result") or []) if isinstance(w, dict)]
+        confs = []
+        for w in words:
+            try:
+                confs.append(float(w.get("conf", w.get("confidence", 0.0))))
+            except (TypeError, ValueError):
+                continue
+        if confs:
+            confidence = sum(confs) / len(confs)
+        else:
+            # vosk historically reports no confidence on FinalResult; when the
+            # build does, use it - otherwise the contract's honest default (0.0)
+            # stands. An empty transcript raises through validate_asr_result,
+            # which the transport surfaces as asr.error (silence is not words).
+            try:
+                confidence = float(payload.get("confidence", 0.0))
+            except (TypeError, ValueError):
+                confidence = 0.0
         return voice_svc.validate_asr_result({
             "transcript": transcript,
-            "confidence": payload.get("confidence", 0.0),
+            "confidence": confidence,
             "language": language,
             "is_final": True,
         })
@@ -342,6 +362,19 @@ def _first_match(patterns: list[str]) -> Path | None:
     return None
 
 
+def _bin_dir(*names: str) -> Path | None:
+    """v73: installed binaries live under data/models/bin/ (the model
+    installer's drop location) - durable across restarts, no env needed."""
+    root = models_root() / "bin"
+    if not root.exists():
+        return None
+    for name in names:
+        hit = root / name
+        if hit.exists() and hit.is_file():
+            return hit
+    return None
+
+
 def probe_vosk() -> dict:
     try:
         import vosk  # noqa: F401
@@ -359,22 +392,29 @@ def probe_vosk() -> dict:
 
 
 def probe_whispercpp() -> dict:
-    binary = _env_path("PY8N_WHISPER_CPP_BIN") or _which("whisper-cli", "whisper.cpp")
+    env_bin = _env_path("PY8N_WHISPER_CPP_BIN")
+    binary = (env_bin if env_bin and env_bin.exists() else None) \
+        or _which("whisper-cli", "whisper.cpp") or _bin_dir("whisper-cli", "whisper.cpp")
     if binary is None:
         return {"available": False,
                 "note": "no whisper.cpp binary found - build whisper-cli and set "
-                        "PY8N_WHISPER_CPP_BIN (or put it on PATH)"}
+                        "PY8N_WHISPER_CPP_BIN (or put it on PATH, or install it "
+                        "through POST /voice/speech/models/install when the "
+                        "catalog carries a binary for this platform)"}
     model = _env_path("PY8N_WHISPER_MODEL") or _first_match(["ggml-*.bin", "whisper/*.bin"])
     if model is None or not Path(model).exists():
         return {"available": False,
                 "note": f"binary {binary.name!r} found but no ggml model - set "
-                        "PY8N_WHISPER_MODEL (or drop ggml-*.bin under data/models/)"}
+                        "PY8N_WHISPER_MODEL, or install one through POST "
+                        "/voice/speech/models/install (slug whisper-tiny-en)"}
     return {"available": True, "binary": str(binary), "model": str(model),
             "note": f"whisper.cpp {binary.name!r} + {Path(model).name!r} ready (16 kHz CLI)"}
 
 
 def probe_piper() -> dict:
-    binary = _env_path("PY8N_PIPER_BIN") or _which("piper")
+    env_bin = _env_path("PY8N_PIPER_BIN")
+    binary = (env_bin if env_bin and env_bin.exists() else None) \
+        or _which("piper") or _bin_dir("piper")
     if binary is None:
         return {"available": False,
                 "note": "no piper binary found - install piper-tts and set PY8N_PIPER_BIN "

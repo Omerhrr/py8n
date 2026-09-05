@@ -71,6 +71,9 @@ class AgentCreate(BaseModel):
     knowledge_text_column: str | None = Field(default=None, max_length=80, description="the question/text column (default: the dataset's first column)")
     knowledge_answer_column: str | None = Field(default=None, max_length=80, description="the answer column (default: the text column)")
     knowledge_top_k: int = Field(default=1, ge=1, le=5, description="how many knowledge matches ride the handler envelope")
+    brain: str = Field(default="scaffold", max_length=20, description="v73: scaffold (echo code node) | ai_agent (LLM brain grounded on the SAME knowledge binding)")
+    brain_provider: str = Field(default="sandbox_bridge", max_length=40, description="v73: sandbox_bridge | openai_compatible")
+    brain_model: str = Field(default="", max_length=120, description="v73: optional model name for the brain provider")
 
 
 @router.post("/agents", status_code=201)
@@ -89,7 +92,9 @@ async def create_agent(body: AgentCreate, user=Depends(get_optional_user),
             knowledge_dataset_id=body.knowledge_dataset_id,
             knowledge_text_column=body.knowledge_text_column,
             knowledge_answer_column=body.knowledge_answer_column,
-            knowledge_top_k=body.knowledge_top_k)
+            knowledge_top_k=body.knowledge_top_k,
+            brain=body.brain, brain_provider=body.brain_provider,
+            brain_model=body.brain_model)
     except agent_svc.VoiceAgentError as exc:
         raise _http(exc) from exc
 
@@ -125,6 +130,9 @@ class AgentUpdate(BaseModel):
     knowledge_text_column: str | None = Field(default=None, max_length=80)
     knowledge_answer_column: str | None = Field(default=None, max_length=80)
     knowledge_top_k: int | None = Field(default=None, ge=1, le=5)
+    brain: str | None = Field(default=None, max_length=20, description="v73: flip the brain (scaffold <-> ai_agent); re-scaffolds a scaffolded handler, refuses on a custom one")
+    brain_provider: str | None = Field(default=None, max_length=40)
+    brain_model: str | None = Field(default=None, max_length=120)
 
 
 @router.put("/agents/{agent_id}")
@@ -142,7 +150,9 @@ async def update_agent(agent_id: str, body: AgentUpdate,
             knowledge_dataset_id=body.knowledge_dataset_id,
             knowledge_text_column=body.knowledge_text_column,
             knowledge_answer_column=body.knowledge_answer_column,
-            knowledge_top_k=body.knowledge_top_k)
+            knowledge_top_k=body.knowledge_top_k,
+            brain=body.brain, brain_provider=body.brain_provider,
+            brain_model=body.brain_model)
     except agent_svc.VoiceAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -198,6 +208,43 @@ async def knowledge_search(agent_id: str, body: KnowledgeSearchBody,
 
 
 # ---------------------------------------------------------------------------
+# v73: voice session analytics - per-turn ASR confidence trends (derived)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/agents/{agent_id}/analytics")
+async def agent_voice_analytics(agent_id: str, user=Depends(get_optional_user),
+                                db: AsyncSession = Depends(get_db)):
+    """ASR confidence analytics pooled across an agent's sessions.
+
+    Per-session confidence summaries + trend directions, pooled statistics
+    and the weak-turn rate - derived from each session's asr.final events
+    at read time, never stored.
+    """
+    from ..services import voice_analytics
+
+    try:
+        return await voice_analytics.agent_analytics(db, agent_id, getattr(user, "id", None))
+    except agent_svc.VoiceAgentError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/sessions/{session_id}/analytics")
+async def session_voice_analytics(session_id: str, user=Depends(get_optional_user),
+                                  db: AsyncSession = Depends(get_db)):
+    """Per-turn ASR confidence analytics for ONE call.
+
+    The turn-by-turn confidence series, summary statistics, weak turns
+    (below the 0.6 gate) and a least-squares trend over the turn indices -
+    is the caller being understood better or worse as the call goes on?
+    """
+    from ..services import voice_analytics
+
+    row = await _own_session(db, session_id, user)
+    return await voice_analytics.session_analytics(db, row)
+
+
+# ---------------------------------------------------------------------------
 # v72: live speech engine bridges - the honest machine inventory + TTS
 # ---------------------------------------------------------------------------
 
@@ -213,6 +260,62 @@ async def speech_engines():
     from ..services import speech_engines as speech_svc
 
     return speech_svc.speech_inventory()
+
+
+# ---------------------------------------------------------------------------
+# v73: real model installs - the fully offline phone
+# ---------------------------------------------------------------------------
+
+
+@router.get("/speech/models")
+async def speech_models():
+    """The curated model catalog + what is already on this machine."""
+    from ..services import speech_engines as speech_svc
+    from ..services import speech_models
+
+    inv = speech_svc.speech_inventory()
+    out = speech_models.catalog_out()
+    out["inventory"] = inv
+    out["offline_phone"] = {
+        "asr_local": bool(inv["asr"]["local_engine_registered"]),
+        "tts_local": bool(inv["tts"]["local_engine_registered"]),
+        "ready": bool(inv["asr"]["local_engine_registered"]
+                      and inv["tts"]["local_engine_registered"]),
+        "note": "ready = the whole loop (in-process ASR, handler, local TTS) runs "
+                "on this machine with no cloud dependency",
+    }
+    return out
+
+
+class ModelInstallBody(BaseModel):
+    slug: str = Field(..., min_length=1, max_length=80,
+                      description="a catalog slug (GET /voice/speech/models)")
+
+
+@router.post("/speech/models/install")
+async def install_speech_model(body: ModelInstallBody, user=Depends(get_optional_user)):
+    """Download + verify + install a REAL speech model, then re-bind.
+
+    Streams the artifact to <dest>.part (atomic), verifies it (zip CRC +
+    Kaldi layout / ggml magic / onnx+json pair), lays it out exactly where
+    the probes look and re-runs bind_local_engines() - a bare machine gains
+    its offline ASR/TTS in one call. Downloads are blocking and honest:
+    the response lands when the bytes are on disk.
+    """
+    from ..services import speech_engines as speech_svc
+    from ..services import speech_models
+    from ..services.speech_models import SpeechModelError
+
+    try:
+        result = await asyncio.to_thread(speech_models.install_model, body.slug.strip())
+    except SpeechModelError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - network errors surface honestly
+        raise HTTPException(status_code=502,
+                            detail=f"download failed: {type(exc).__name__}: {exc}") from exc
+    bound = await asyncio.to_thread(speech_svc.bind_local_engines)
+    return {"install": result, "bound": bound,
+            "inventory": speech_svc.speech_inventory()}
 
 
 class TTSBody(BaseModel):

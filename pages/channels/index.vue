@@ -10,7 +10,9 @@ import { useApi } from '~/composables/useApi'
 // v71: the matrix completes (Telnyx SMS, the any-gateway SMS contract,
 // email inbound parse + SMTP) and VOICE AGENTS compose the primitives
 // (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into
-// one deployable phone persona.
+// one deployable phone persona. v73: the agent gains a BRAIN (echo or an
+// LLM ai_agent grounded on the SAME knowledge binding), per-agent ASR
+// confidence analytics, and a REAL model installer for the offline phone.
 
 interface Endpoint {
   id: string; name: string; provider: string; channel: string; enabled: boolean
@@ -37,6 +39,7 @@ interface VoiceAgent {
   speech: Record<string, any>; system_prompt: string
   handler_workflow_id: string | null; handler_workflow_name: string | null
   handler_is_scaffold: boolean; wiring: Record<string, any>
+  brain: Record<string, any> | null; knowledge: Record<string, any> | null
 }
 
 const { api } = useApi()
@@ -66,9 +69,16 @@ const agentForm = ref({
   name: '', greeting_text: '', asr_provider: 'py8n_local', tts_provider: 'openai_tts',
   tts_voice: 'alloy', language: 'en-US', barge_in: true, system_prompt: '',
   handler_workflow_id: '', scaffold_handler: true, knowledge_dataset_id: '',
+  brain: 'scaffold', brain_model: '',
 })
 const ASR_PROVIDERS = ['py8n_local', 'openai_whisper', 'deepgram', 'assemblyai']
 const TTS_PROVIDERS = ['openai_tts', 'elevenlabs', 'piper_local', 'meta_mms']
+
+// v73: real model installs + per-agent confidence analytics
+const speechModels = ref<any>(null)
+const installing = ref('')
+const agentAnalytics = ref<Record<string, any>>({})
+const analyticsBusy = ref('')
 
 const stateChip: Record<string, string> = {
   initiated: 'bg-zinc-500/10 text-zinc-300 border-zinc-500/25',
@@ -88,10 +98,11 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    const [eps, ads, vss, wfs, ags, dss, se] = await Promise.all([
+    const [eps, ads, vss, wfs, ags, dss, se, sm] = await Promise.all([
       api('/channels/endpoints'), api('/channels/adapters'),
       api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
       api('/datasets?limit=200'), api('/voice/speech/engines').catch(() => null),
+      api('/voice/speech/models').catch(() => null),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
@@ -100,6 +111,7 @@ async function load() {
     agents.value = ags.agents || []
     datasets.value = dss.datasets || dss || []
     speechEngines.value = se
+    speechModels.value = sm
   } catch (e: any) {
     pageError.value = e?.message || 'failed to load channels'
   } finally {
@@ -197,13 +209,15 @@ async function createAgent() {
         handler_workflow_id: agentForm.value.handler_workflow_id || null,
         scaffold_handler: !agentForm.value.handler_workflow_id && agentForm.value.scaffold_handler,
         knowledge_dataset_id: agentForm.value.knowledge_dataset_id || null,
+        brain: agentForm.value.handler_workflow_id ? undefined : agentForm.value.brain,
+        brain_model: agentForm.value.brain_model || '',
       }),
     })
     showAgentCreate.value = false
     agentForm.value = { name: '', greeting_text: '', asr_provider: agentForm.value.asr_provider,
       tts_provider: agentForm.value.tts_provider, tts_voice: 'alloy', language: 'en-US',
       barge_in: true, system_prompt: '', handler_workflow_id: '', scaffold_handler: true,
-      knowledge_dataset_id: '' }
+      knowledge_dataset_id: '', brain: 'scaffold', brain_model: '' }
     await load()
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'agent create failed'
@@ -214,6 +228,31 @@ async function removeAgent(a: VoiceAgent) {
   if (!confirm(`Delete voice agent "${a.name}"? Sessions keep the config they copied.`)) return
   await api(`/voice/agents/${a.id}`, { method: 'DELETE' })
   await load()
+}
+
+async function installModel(slug: string) {
+  if (!confirm(`Download + install the "${slug}" model now? The download is real and blocking.`)) return
+  installing.value = slug
+  try {
+    await api('/voice/speech/models/install', { method: 'POST', body: JSON.stringify({ slug }) })
+    speechModels.value = await api('/voice/speech/models')
+    speechEngines.value = await api('/voice/speech/engines').catch(() => null)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'model install failed'
+  } finally { installing.value = '' }
+}
+
+async function showAnalytics(a: VoiceAgent) {
+  analyticsBusy.value = a.id
+  try {
+    agentAnalytics.value = { ...agentAnalytics.value, [a.id]: await api(`/voice/agents/${a.id}/analytics`) }
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'analytics failed'
+  } finally { analyticsBusy.value = '' }
+}
+
+function trendColor(d: string) {
+  return ({ improving: 'text-emerald-300', stable: 'text-sky-300', degrading: 'text-amber-300', unknown: 'text-zinc-400' } as Record<string, string>)[d] || 'text-zinc-400'
 }
 
 const liveSessions = computed(() => sessions.value.filter(s => s.state !== 'ended'))
@@ -323,6 +362,33 @@ onMounted(load)
             <p>piper: {{ speechEngines.tts?.piper?.note }}</p>
           </div>
         </details>
+        <details v-if="speechModels" class="text-xs">
+          <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">
+            Speech models
+            <span v-if="speechModels.offline_phone?.ready" class="ml-1 px-2 py-0.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 text-emerald-300">offline phone ready</span>
+            <span class="text-zinc-500">- download real vosk / whisper.cpp / piper artifacts and rebind</span>
+          </summary>
+          <div class="mt-2 space-y-2">
+            <p v-if="!speechModels.offline_phone?.ready" class="text-zinc-500">
+              ASR {{ speechModels.offline_phone?.asr_local ? 'local' : 'not bound' }} · TTS {{ speechModels.offline_phone?.tts_local ? 'local' : 'not bound' }}
+              - install what is missing for a fully offline phone.
+            </p>
+            <div v-for="m in speechModels.models || []" :key="m.slug" class="flex items-center justify-between gap-3 rounded-lg border border-zinc-800 bg-zinc-900/60 px-3 py-2">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <span class="text-zinc-200">{{ m.title }}</span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-400">{{ m.engine }}</span>
+                  <span v-if="m.installed" class="text-[10px] px-1.5 py-0.5 rounded-full border border-emerald-500/25 bg-emerald-500/10 text-emerald-300">on disk</span>
+                </div>
+                <p class="text-zinc-500 truncate">{{ m.description }}</p>
+                <p class="text-zinc-600">needs: {{ m.requires }} · {{ m.after }}</p>
+              </div>
+              <button class="btn btn-ghost text-xs shrink-0" :disabled="installing === m.slug" @click="installModel(m.slug)">
+                <Loader2 v-if="installing === m.slug" class="w-3.5 h-3.5 animate-spin" />{{ m.installed ? 'Reinstall' : 'Install' }}
+              </button>
+            </div>
+          </div>
+        </details>
         <p v-if="!agents.length" class="text-sm text-zinc-500">No agents yet - create one to compose the voice primitives into a deployable phone persona.</p>
         <div v-for="a in agents" :key="a.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-3">
           <div class="flex items-center justify-between gap-3 flex-wrap">
@@ -336,6 +402,8 @@ onMounted(load)
                 {{ a.speech.barge_in ? 'barge-in ok' : 'no barge-in' }}
               </span>
               <span v-if="a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">scaffolded handler</span>
+              <span v-if="a.brain?.kind === 'ai_agent'" class="text-xs px-2 py-0.5 rounded-full border border-violet-500/25 bg-violet-500/10 text-violet-300">LLM brain<span v-if="a.brain.model"> · {{ a.brain.model }}</span></span>
+              <span v-else-if="a.brain?.kind === 'scaffold' && a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-400">echo brain</span>
               <span v-if="a.knowledge" class="text-xs px-2 py-0.5 rounded-full border border-teal-500/25 bg-teal-500/10 text-teal-300">knowledge: {{ a.knowledge.dataset_name || a.knowledge.dataset_id }} · top {{ a.knowledge.top_k }}</span>
             </div>
             <button class="btn btn-ghost text-rose-300 text-xs" @click="removeAgent(a)"><Ban class="w-3.5 h-3.5" /></button>
@@ -345,6 +413,31 @@ onMounted(load)
             · handler: <span class="text-zinc-300">{{ a.handler_workflow_name || 'none' }}</span>
             <span v-if="a.system_prompt"> · persona: <span class="text-zinc-400">{{ a.system_prompt.slice(0, 60) }}{{ a.system_prompt.length > 60 ? '…' : '' }}</span></span>
           </div>
+          <div class="flex items-center gap-2">
+            <button class="btn btn-ghost text-xs text-sky-300" :disabled="analyticsBusy === a.id" @click="showAnalytics(a)">
+              <Loader2 v-if="analyticsBusy === a.id" class="w-3.5 h-3.5 animate-spin" />ASR analytics
+            </button>
+          </div>
+          <div v-if="agentAnalytics[a.id]" class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 text-xs space-y-1">
+            <div class="flex items-center gap-3 flex-wrap text-zinc-300">
+              <span>{{ agentAnalytics[a.id].turns_total }} turns</span>
+              <span>mean confidence: <span class="text-zinc-100">{{ agentAnalytics[a.id].confidence.mean ?? 'n/a' }}</span></span>
+              <span>weak: {{ agentAnalytics[a.id].confidence.weak_turns }} ({{ agentAnalytics[a.id].confidence.weak_turn_rate ?? 0 }} rate)</span>
+              <span>directions:
+                <span :class="trendColor('improving')">↑{{ agentAnalytics[a.id].directions.improving }}</span>
+                <span class="text-sky-300">→{{ agentAnalytics[a.id].directions.stable }}</span>
+                <span :class="trendColor('degrading')">↓{{ agentAnalytics[a.id].directions.degrading }}</span>
+                <span class="text-zinc-500">?{{ agentAnalytics[a.id].directions.unknown }}</span>
+              </span>
+            </div>
+            <div v-for="s in agentAnalytics[a.id].per_session || []" :key="s.session_id" class="flex items-center gap-2 text-zinc-500">
+              <span class="font-mono">{{ s.session_id.slice(0, 8) }}</span>
+              <span>{{ s.confidence.turns }} turns</span>
+              <span>mean {{ s.confidence.mean ?? 'n/a' }}</span>
+              <span :class="trendColor(s.direction)">{{ s.direction }}</span>
+            </div>
+            <p class="text-zinc-600">{{ agentAnalytics[a.id].note }}</p>
+          </div>
           <details class="text-xs">
             <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">Wiring (provider webhook + media stream + knowledge)</summary>
             <div class="mt-2 space-y-1">
@@ -352,6 +445,7 @@ onMounted(load)
               <p class="text-zinc-400">{{ a.wiring.media_stream }}</p>
               <p class="text-amber-300/80">{{ a.wiring.asr_note }}</p>
               <p v-if="a.wiring.knowledge_note" class="text-teal-300/80">{{ a.wiring.knowledge_note }}</p>
+              <p v-if="a.wiring.brain_note" class="text-violet-300/80">{{ a.wiring.brain_note }}</p>
             </div>
           </details>
         </div>
@@ -481,6 +575,14 @@ onMounted(load)
             <option v-for="d in datasets" :key="d.id" :value="d.id">{{ d.name }} ({{ d.row_count }} rows)</option>
           </select>
         </label>
+        <label v-if="!agentForm.handler_workflow_id" class="block text-sm text-zinc-400">Brain (the scaffolded handler's answerer)
+          <select v-model="agentForm.brain" class="input mt-1 w-full">
+            <option value="scaffold">echo - deterministic, fully offline</option>
+            <option value="ai_agent">ai_agent - an LLM brain grounded on the SAME knowledge binding</option>
+          </select>
+        </label>
+        <label v-if="agentForm.brain === 'ai_agent' && !agentForm.handler_workflow_id" class="block text-sm text-zinc-400">Brain model (optional - passed to the provider)
+          <input v-model="agentForm.brain_model" class="input mt-1 w-full" placeholder="default chosen by the bridge" /></label>
         <label class="flex items-center gap-2 text-sm text-zinc-400">
           <input v-model="agentForm.barge_in" type="checkbox" class="accent-fuchsia-500" />
           the caller may barge-in over the greeting and turns

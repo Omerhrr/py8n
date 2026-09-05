@@ -30,6 +30,12 @@ opencv-python-headless>=4.9  # v65: video_features frame sampling (headless cont
 # are ~2GB. Install manually:  uv pip install torch --index-url https://download.pytorch.org/whl/cpu
 # The platform runs the numpy core when torch is absent; the v66 torch tests skip.
 
+# v73 OPTIONAL local speech engines (the in-process bridges behind py8n_local /
+# piper_local - vosk ASR + a whisper.cpp CLI + the piper binary install through
+# POST /voice/speech/models/install). The platform stays honest when absent:
+# bridges simply do not register and the transport reports asr.unavailable.
+# Install manually:  pip install vosk   (models land via the speech-models API)
+
 # Document extraction (v32 documents node)
 pdfplumber>=0.11       # pdf text/tables
 pillow>=10.0           # image handling (PIL)

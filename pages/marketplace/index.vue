@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Store, CheckCircle2, Download, Search, PackageOpen,
-  AlertTriangle, ExternalLink, Sparkles, X, Layers, BrainCircuit, Boxes, Phone,
+  AlertTriangle, ExternalLink, Sparkles, X, Layers, BrainCircuit, Boxes, Phone, Bot,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -75,7 +75,7 @@ async function openDetail(slug: string) {
   }
 }
 
-async function install(mode: 'plain' | 'system' | 'model_system' | 'voice_agent' = 'plain') {
+async function install(mode: 'plain' | 'system' | 'model_system' | 'voice_agent' = 'plain', brain = 'scaffold') {
   if (!detail.value) return
   installing.value = true
   installError.value = ''
@@ -84,6 +84,7 @@ async function install(mode: 'plain' | 'system' | 'model_system' | 'voice_agent'
       as_system: mode === 'system',
       as_model_system: mode === 'model_system',
       as_voice_agent: mode === 'voice_agent',
+      brain, // v73: scaffold = deterministic knowledge handler; ai_agent = LLM brain on the SAME binding
     })
     await loadShelf()
   } catch (e: any) {
@@ -307,14 +308,22 @@ onMounted(async () => {
                 <BrainCircuit class="h-3.5 w-3.5" /> as Model System
               </button>
             </div>
-            <button
-              v-if="detail.voice_agent_ready"
-              class="flex w-full items-center justify-center gap-1.5 rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-[11px] font-bold text-orange-300 transition hover:bg-orange-500/20 disabled:opacity-50"
-              :disabled="installing"
-              @click="install('voice_agent')"
-            >
-              <Phone class="h-3.5 w-3.5" /> as Voice Agent (one-click phone agent)
-            </button>
+            <div v-if="detail.voice_agent_ready" class="grid grid-cols-2 gap-2">
+              <button
+                class="flex items-center justify-center gap-1.5 rounded-xl border border-orange-500/40 bg-orange-500/10 px-3 py-2 text-[11px] font-bold text-orange-300 transition hover:bg-orange-500/20 disabled:opacity-50"
+                :disabled="installing"
+                @click="install('voice_agent', 'scaffold')"
+              >
+                <Phone class="h-3.5 w-3.5" /> as Voice Agent
+              </button>
+              <button
+                class="flex items-center justify-center gap-1.5 rounded-xl border border-violet-500/40 bg-violet-500/10 px-3 py-2 text-[11px] font-bold text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-50"
+                :disabled="installing"
+                @click="install('voice_agent', 'ai_agent')"
+              >
+                <Bot class="h-3.5 w-3.5" /> + LLM brain (v73)
+              </button>
+            </div>
             </div>
             <p v-else class="text-center text-[10px] text-zinc-600">
               Workflows install INACTIVE - open them, run training, then activate triggers. {{ installResult.installs }} installs so far.

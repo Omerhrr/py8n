@@ -108,7 +108,10 @@ CHANNEL_CATALOG: dict[str, dict] = {
 }
 
 ROLES = ("user", "agent", "human_agent", "system")
-_REPLY_KEYS = ("text", "reply", "generated", "message", "output", "content")
+# v73: "answer" joins the reply keys - the ai_agent node (the voice agents'
+# LLM brain) answers with {"answer": ...}, and a handler built on it must
+# extract that as the reply without a wrapper node.
+_REPLY_KEYS = ("text", "reply", "generated", "message", "answer", "output", "content")
 
 
 class InteractionError(ValueError):

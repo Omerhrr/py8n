@@ -61,6 +61,7 @@ class SolutionInstallRequest(BaseModel):
     as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything this install created")
     as_model_system: bool = Field(default=False, description="v64: also create a Model System (datasets + training/serving workflows as one operating unit)")
     as_voice_agent: bool = Field(default=False, description="v72: also create a Voice Agent bound to the installed handler + knowledge dataset (one-click phone agent)")
+    brain: str = Field(default="scaffold", description="v73: voice-agent brain - 'scaffold' (deterministic knowledge handler) or 'ai_agent' (LLM brain scaffolded over the SAME installed knowledge dataset)")
 
 
 class SolutionAuthorRequest(BaseModel):
@@ -199,14 +200,23 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         dataset_id = _find_installed(result.get("datasets", []),
                                      kb_decl.get("dataset") or "")
         speech = spec.get("speech") or {}
+        brain = (body.brain or "scaffold").strip()
+        if brain not in va_svc.BRAINS:
+            raise HTTPException(status_code=400,
+                                detail=f"brain must be {'|'.join(va_svc.BRAINS)}, got {brain!r}")
         try:
+            # v73: brain='ai_agent' scaffolds a FRESH LLM-brain handler over the
+            # SAME installed knowledge dataset (the pack's deterministic handler
+            # still installs for comparison); brain='scaffold' binds it directly.
+            use_pack_handler = brain == "scaffold"
             va = await va_svc.create_agent(
                 db, owner_id=owner,
                 name=f"{s.name} {spec.get('name_suffix') or 'phone agent'}"[:140],
                 description=f"Installed from the '{s.name}' solution - " + (body.note or s.tagline or "")[:400],
                 greeting_text=spec.get("greeting_text") or "",
                 system_prompt=spec.get("system_prompt") or "",
-                handler_workflow_id=handler_id,
+                handler_workflow_id=handler_id if use_pack_handler else None,
+                scaffold_handler=not use_pack_handler,
                 knowledge_dataset_id=dataset_id,
                 knowledge_text_column=kb_decl.get("text_column"),
                 knowledge_answer_column=kb_decl.get("answer_column"),
@@ -216,7 +226,8 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
                 tts_voice=speech.get("tts_voice") or "alloy",
                 tts_format=speech.get("tts_format") or "wav",
                 language=speech.get("language") or "en-US",
-                barge_in=bool(speech.get("barge_in", True)))
+                barge_in=bool(speech.get("barge_in", True)),
+                brain=brain)
         except va_svc.VoiceAgentError as exc:
             raise HTTPException(status_code=400, detail=f"voice agent install failed: {exc}") from exc
         voice_agent_ref = {"id": va["id"], "name": va["name"],
