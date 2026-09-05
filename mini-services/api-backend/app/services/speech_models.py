@@ -256,11 +256,20 @@ def _verify_zip(path: Path, dest_dir: Path) -> list[str]:
         raise SpeechModelError(f"not a valid zip: {exc}") from exc
 
 
+GGML_MAGICS = (b"lmgg", b"ggml", b"ggmf")
+
+
 def _verify_ggml(path: Path) -> None:
-    """A whisper.cpp ggml model starts with the b'ggml' magic."""
+    """A whisper.cpp ggml model starts with the ggml container magic.
+
+    The REAL artifacts (HF ggml-tiny.en.bin verified live in the v74
+    smoke) open with the uint32 0x67676d6c written little-endian - the
+    bytes ``lmgg`` on disk. The naive ``ggml`` byte string and the older
+    ``ggmf`` container are tolerated so hand-converted files probe too;
+    anything else is refused as not-a-whisper-model."""
     with open(path, "rb") as fh:
         magic = fh.read(4)
-    if magic != b"ggml":
+    if magic not in GGML_MAGICS:
         raise SpeechModelError(
             f"missing the ggml magic (got {magic!r}) - this is not a whisper.cpp model")
 

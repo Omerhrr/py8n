@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear, Bot, Wand2 } from 'lucide-vue-next'
+import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear, Bot, Wand2, Users, Megaphone, Volume2 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 // v69: the REAL adapter surface. A channel endpoint registers a provider
@@ -13,6 +13,10 @@ import { useApi } from '~/composables/useApi'
 // one deployable phone persona. v73: the agent gains a BRAIN (echo or an
 // LLM ai_agent grounded on the SAME knowledge binding), per-agent ASR
 // confidence analytics, and a REAL model installer for the offline phone.
+// v74: the brain routes through a REAL LLM credential (openai, claude,
+// deepseek, kimi, qwen, openrouter, ...), the speech loop is VERIFIABLE
+// (piper speaks, whisper.cpp hears), and the voice stack grows multi-party
+// MEETINGS (legs + merged transcript) and OUTBOUND CAMPAIGNS.
 
 interface Endpoint {
   id: string; name: string; provider: string; channel: string; enabled: boolean
@@ -69,7 +73,7 @@ const agentForm = ref({
   name: '', greeting_text: '', asr_provider: 'py8n_local', tts_provider: 'openai_tts',
   tts_voice: 'alloy', language: 'en-US', barge_in: true, system_prompt: '',
   handler_workflow_id: '', scaffold_handler: true, knowledge_dataset_id: '',
-  brain: 'scaffold', brain_model: '',
+  brain: 'scaffold', brain_model: '', llm_credential_id: '',
 })
 const ASR_PROVIDERS = ['py8n_local', 'openai_whisper', 'deepgram', 'assemblyai']
 const TTS_PROVIDERS = ['openai_tts', 'elevenlabs', 'piper_local', 'meta_mms']
@@ -79,6 +83,24 @@ const speechModels = ref<any>(null)
 const installing = ref('')
 const agentAnalytics = ref<Record<string, any>>({})
 const analyticsBusy = ref('')
+
+// v74: LLM credentials for the brain, the speech-loop verifier, meetings + campaigns
+const allCredentials = ref<any[]>([])
+const llmCredentials = computed(() => allCredentials.value.filter(c => c.type === 'openai_compatible' || c.type === 'anthropic'))
+const verifyBusy = ref(false)
+const verifyResult = ref<any>(null)
+const meetings = ref<any[]>([])
+const selectedMeeting = ref<any>(null)
+const meetingForm = ref({ title: '', agent_id: '' })
+const joinForm = ref({ label: '', channel: 'web', address: '' })
+const meetingBusy = ref(false)
+const campaigns = ref<any[]>([])
+const selectedCampaign = ref<any>(null)
+const campaignForm = ref({ name: '', agent_id: '', endpoint_id: '', targets: '' })
+const campaignBusy = ref(false)
+const voiceEndpoints = computed(() => endpoints.value.filter(e => e.provider === 'telnyx_call_control'))
+
+const credTypeLabel: Record<string, string> = { openai_compatible: 'openai-compatible', anthropic: 'claude' }
 
 const stateChip: Record<string, string> = {
   initiated: 'bg-zinc-500/10 text-zinc-300 border-zinc-500/25',
@@ -98,11 +120,14 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    const [eps, ads, vss, wfs, ags, dss, se, sm] = await Promise.all([
+    const [eps, ads, vss, wfs, ags, dss, se, sm, crs, mts, cmps] = await Promise.all([
       api('/channels/endpoints'), api('/channels/adapters'),
       api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
       api('/datasets?limit=200'), api('/voice/speech/engines').catch(() => null),
       api('/voice/speech/models').catch(() => null),
+      api('/credentials').catch(() => []),
+      api('/voice/meetings').catch(() => ({ meetings: [] })),
+      api('/voice/campaigns').catch(() => ({ campaigns: [] })),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
@@ -112,6 +137,9 @@ async function load() {
     datasets.value = dss.datasets || dss || []
     speechEngines.value = se
     speechModels.value = sm
+    allCredentials.value = Array.isArray(crs) ? crs : (crs.credentials || [])
+    meetings.value = mts.meetings || []
+    campaigns.value = cmps.campaigns || []
   } catch (e: any) {
     pageError.value = e?.message || 'failed to load channels'
   } finally {
@@ -211,13 +239,14 @@ async function createAgent() {
         knowledge_dataset_id: agentForm.value.knowledge_dataset_id || null,
         brain: agentForm.value.handler_workflow_id ? undefined : agentForm.value.brain,
         brain_model: agentForm.value.brain_model || '',
+        llm_credential_id: (!agentForm.value.handler_workflow_id && agentForm.value.brain === 'ai_agent' && agentForm.value.llm_credential_id) ? agentForm.value.llm_credential_id : null,
       }),
     })
     showAgentCreate.value = false
     agentForm.value = { name: '', greeting_text: '', asr_provider: agentForm.value.asr_provider,
       tts_provider: agentForm.value.tts_provider, tts_voice: 'alloy', language: 'en-US',
       barge_in: true, system_prompt: '', handler_workflow_id: '', scaffold_handler: true,
-      knowledge_dataset_id: '', brain: 'scaffold', brain_model: '' }
+      knowledge_dataset_id: '', brain: 'scaffold', brain_model: '', llm_credential_id: '' }
     await load()
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'agent create failed'
@@ -255,6 +284,114 @@ function trendColor(d: string) {
   return ({ improving: 'text-emerald-300', stable: 'text-sky-300', degrading: 'text-amber-300', unknown: 'text-zinc-400' } as Record<string, string>)[d] || 'text-zinc-400'
 }
 
+// v74: the speech-loop verifier, meetings, campaigns
+async function runVerify() {
+  verifyBusy.value = true
+  verifyResult.value = null
+  try {
+    verifyResult.value = await api('/voice/speech/verify', { method: 'POST', body: JSON.stringify({}) })
+  } catch (e: any) {
+    verifyResult.value = { ok: false, error: e?.data?.detail || e?.message || 'verify failed' }
+  } finally { verifyBusy.value = false }
+}
+
+async function loadMeetingDetail(m: any) {
+  selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+}
+
+async function createMeeting() {
+  meetingBusy.value = true
+  try {
+    const created = await api('/voice/meetings', {
+      method: 'POST',
+      body: JSON.stringify({ title: meetingForm.value.title, agent_id: meetingForm.value.agent_id || null }),
+    })
+    meetingForm.value = { title: '', agent_id: '' }
+    await load()
+    await loadMeetingDetail(created)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'meeting create failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function joinMeeting(m: any) {
+  if (!joinForm.value.label) return
+  meetingBusy.value = true
+  try {
+    const res = await api(`/voice/meetings/${m.id}/join`, {
+      method: 'POST',
+      body: JSON.stringify({
+        label: joinForm.value.label, channel: joinForm.value.channel,
+        address: joinForm.value.address || '',
+      }),
+    })
+    joinForm.value = { label: '', channel: joinForm.value.channel, address: '' }
+    await load()
+    await loadMeetingDetail(res.meeting)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'join failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function endMeeting(m: any) {
+  if (!confirm('End the meeting? Every live leg hangs up.')) return
+  await api(`/voice/meetings/${m.id}/end`, { method: 'POST' })
+  await load()
+  await loadMeetingDetail(m)
+}
+
+async function loadCampaignDetail(c: any) {
+  selectedCampaign.value = await api(`/voice/campaigns/${c.id}`)
+}
+
+function parseTargets(text: string) {
+  return text.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+    const [address, name] = l.split(',').map(s => (s || '').trim())
+    return name ? { address, name } : { address }
+  })
+}
+
+async function createCampaign() {
+  meetingBusy.value = true
+  try {
+    const created = await api('/voice/campaigns', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: campaignForm.value.name, agent_id: campaignForm.value.agent_id,
+        endpoint_id: campaignForm.value.endpoint_id || null,
+        targets: parseTargets(campaignForm.value.targets),
+      }),
+    })
+    campaignForm.value = { name: '', agent_id: '', endpoint_id: '', targets: '' }
+    await load()
+    await loadCampaignDetail(created)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'campaign create failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function startCampaign(c: any) {
+  campaignBusy.value = true
+  try {
+    const res = await api(`/voice/campaigns/${c.id}/start`, { method: 'POST', body: JSON.stringify({}) })
+    await load()
+    await loadCampaignDetail(c)
+    if (res.start_note) pageError.value = ''
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'start failed'
+  } finally { campaignBusy.value = false }
+}
+
+async function simulateAnswer(c: any, t: any) {
+  try {
+    await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, { method: 'POST' })
+    await load()
+    await loadCampaignDetail(c)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'simulate failed'
+  }
+}
+
 const liveSessions = computed(() => sessions.value.filter(s => s.state !== 'ended'))
 const endedSessions = computed(() => sessions.value.filter(s => s.state === 'ended'))
 
@@ -274,9 +411,12 @@ onMounted(load)
           and Email (inbound parse + SMTP) - each webhook-native and verified with its own
           credentials, feeding the SAME conversation layer. Voice Agents compose the voice stack
           (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into one deployable phone
-          persona, bound to a KNOWLEDGE DATASET so every call answers from your data; sessions
-          inherit the agent's config and the v70 media transport transcribes through the agent's
-          engine (local whisper.cpp / vosk / piper bridges when installed).
+          persona, bound to a KNOWLEDGE DATASET so every call answers from your data, with the LLM
+          brain routed through a REAL provider credential (openai, claude, deepseek, kimi, qwen,
+          openrouter, ...). Meetings give the stack legs (multi-party rooms with a merged,
+          speaker-attributed transcript) and campaigns dial outbound lists through the same agents;
+          the v70 media transport transcribes through the agent's engine (local whisper.cpp /
+          vosk / piper bridges when installed).
         </p>
       </div>
       <div class="flex gap-2 shrink-0">
@@ -360,6 +500,19 @@ onMounted(load)
             <p>vosk: {{ speechEngines.asr?.vosk?.note }}</p>
             <p>whisper.cpp: {{ speechEngines.asr?.['whisper.cpp']?.note }}</p>
             <p>piper: {{ speechEngines.tts?.piper?.note }}</p>
+            <div class="flex items-center gap-2 pt-1">
+              <button class="btn btn-ghost text-xs text-emerald-300" :disabled="verifyBusy" @click="runVerify">
+                <Loader2 v-if="verifyBusy" class="w-3.5 h-3.5 animate-spin" /><Volume2 class="w-3.5 h-3.5" /> Verify the speech loop (piper speaks, the ASR hears)
+              </button>
+            </div>
+            <div v-if="verifyResult" class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3 space-y-1">
+              <template v-if="verifyResult.error"><p class="text-amber-300">{{ verifyResult.error }}</p></template>
+              <template v-else>
+                <p>spoken: <span class="text-zinc-200">"{{ verifyResult.spoken }}"</span> · heard: <span :class="verifyResult.ok ? 'text-emerald-300' : 'text-amber-300'">"{{ verifyResult.heard }}"</span></p>
+                <p>match: {{ verifyResult.match_ratio }} ({{ verifyResult.exact ? 'exact' : 'fuzzy' }}) · confidence: {{ verifyResult.confidence }} · asr backend: {{ verifyResult.asr?.backend || verifyResult.asr?.engine }}</p>
+                <p class="text-zinc-500">{{ verifyResult.note }}</p>
+              </template>
+            </div>
           </div>
         </details>
         <details v-if="speechModels" class="text-xs">
@@ -402,7 +555,7 @@ onMounted(load)
                 {{ a.speech.barge_in ? 'barge-in ok' : 'no barge-in' }}
               </span>
               <span v-if="a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">scaffolded handler</span>
-              <span v-if="a.brain?.kind === 'ai_agent'" class="text-xs px-2 py-0.5 rounded-full border border-violet-500/25 bg-violet-500/10 text-violet-300">LLM brain<span v-if="a.brain.model"> · {{ a.brain.model }}</span></span>
+              <span v-if="a.brain?.kind === 'ai_agent'" class="text-xs px-2 py-0.5 rounded-full border border-violet-500/25 bg-violet-500/10 text-violet-300">LLM brain<span v-if="a.brain.model"> · {{ a.brain.model }}</span><span v-if="a.brain.credential_name"> · via {{ a.brain.credential_name }} ({{ credTypeLabel[allCredentials.find(c => c.id === a.brain.credential_id)?.type] || 'credential' }})</span></span>
               <span v-else-if="a.brain?.kind === 'scaffold' && a.handler_is_scaffold" class="text-xs px-2 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-400">echo brain</span>
               <span v-if="a.knowledge" class="text-xs px-2 py-0.5 rounded-full border border-teal-500/25 bg-teal-500/10 text-teal-300">knowledge: {{ a.knowledge.dataset_name || a.knowledge.dataset_id }} · top {{ a.knowledge.top_k }}</span>
             </div>
@@ -448,6 +601,130 @@ onMounted(load)
               <p v-if="a.wiring.brain_note" class="text-violet-300/80">{{ a.wiring.brain_note }}</p>
             </div>
           </details>
+        </div>
+      </section>
+
+      <section class="space-y-3">
+        <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
+          <Users class="w-4 h-4 text-emerald-400" /> Voice meetings ({{ meetings.length }})
+          <span class="text-xs text-zinc-500 normal-case font-normal">multi-party legs · one agent persona · merged speaker-attributed transcript</span>
+        </h2>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="text-xs text-zinc-500">title <input v-model="meetingForm.title" class="input input-xs w-48" placeholder="Monday standup room" /></label>
+          <label class="text-xs text-zinc-500">agent
+            <select v-model="meetingForm.agent_id" class="input input-xs w-44">
+              <option value="">- no persona -</option>
+              <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }}</option>
+            </select>
+          </label>
+          <button class="btn btn-ghost text-xs" :disabled="meetingBusy" @click="createMeeting"><Plus class="w-3.5 h-3.5" /> New meeting</button>
+        </div>
+        <p v-if="!meetings.length" class="text-sm text-zinc-500">No meetings yet - create a room, then join legs: web participants attach their media stream to the leg's session websocket, phone legs are dialed through a telnyx endpoint.</p>
+        <div v-for="m in meetings" :key="m.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="text-zinc-100">{{ m.title || 'untitled room' }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border" :class="m.state === 'active' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/25 bg-rose-500/10 text-rose-300'">{{ m.state }}</span>
+              <span class="text-xs text-zinc-500">{{ m.counts?.participants }} leg(s) · {{ m.counts?.live_legs }} live</span>
+              <span v-if="m.agent_name" class="text-xs text-fuchsia-300">agent: {{ m.agent_name }}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button class="btn btn-ghost text-xs" @click="loadMeetingDetail(m)">Open</button>
+              <button v-if="m.state === 'active'" class="btn btn-ghost text-rose-300 text-xs" @click="endMeeting(m)">End</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="selectedMeeting" class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm text-zinc-200">{{ selectedMeeting.title || 'room' }} · transcript &amp; legs</h3>
+            <button class="btn btn-ghost" @click="selectedMeeting = null">Close</button>
+          </div>
+          <div v-if="selectedMeeting.state === 'active'" class="flex flex-wrap items-end gap-2 text-xs">
+            <label class="text-zinc-500">label <input v-model="joinForm.label" class="input input-xs w-32" placeholder="Alice (web)" /></label>
+            <label class="text-zinc-500">channel
+              <select v-model="joinForm.channel" class="input input-xs w-28">
+                <option value="web">web</option>
+                <option value="telnyx">telnyx (dial)</option>
+                <option value="sip">sip (dial)</option>
+              </select>
+            </label>
+            <label v-if="joinForm.channel !== 'web'" class="text-zinc-500">address <input v-model="joinForm.address" class="input input-xs w-40" placeholder="+15551234567 / sip:..." /></label>
+            <button class="btn btn-ghost text-xs" :disabled="meetingBusy || !joinForm.label" @click="joinMeeting(selectedMeeting)"><Plus class="w-3.5 h-3.5" /> Join leg</button>
+          </div>
+          <div class="space-y-1">
+            <div v-for="p in selectedMeeting.participants || []" :key="p.id" class="flex items-center gap-2 text-xs text-zinc-400">
+              <span class="px-2 py-0.5 rounded-full border border-zinc-600/40 bg-zinc-700/20 text-zinc-300">{{ p.channel }}</span>
+              <span class="text-zinc-200">{{ p.label }}</span>
+              <span>{{ p.state }}</span>
+              <span v-if="p.session_state">session: {{ p.session_state }}</span>
+              <span v-if="p.last_error" class="text-amber-300">{{ p.last_error }}</span>
+            </div>
+          </div>
+          <ol class="space-y-1.5 text-xs">
+            <li v-for="(l, i) in selectedMeeting.transcript || []" :key="i" class="flex gap-3">
+              <span class="text-zinc-500 w-36 shrink-0">{{ (l.at || '').replace('T', ' ').slice(0, 19) }}</span>
+              <span class="w-40 shrink-0 truncate" :class="l.side === 'agent' ? 'text-fuchsia-300' : 'text-sky-300'">{{ l.speaker }}</span>
+              <span class="text-zinc-300">{{ l.text }}</span>
+            </li>
+          </ol>
+          <p v-for="n in selectedMeeting.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
+        </div>
+      </section>
+
+      <section class="space-y-3">
+        <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
+          <Megaphone class="w-4 h-4 text-amber-400" /> Outbound campaigns ({{ campaigns.length }})
+          <span class="text-xs text-zinc-500 normal-case font-normal">dial a list through an agent · honest skips without carrier credentials</span>
+        </h2>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="text-xs text-zinc-500">name <input v-model="campaignForm.name" class="input input-xs w-40" placeholder="Renewal reminders" /></label>
+          <label class="text-xs text-zinc-500">agent
+            <select v-model="campaignForm.agent_id" class="input input-xs w-44">
+              <option value="">- pick an agent -</option>
+              <option v-for="a in agents" :key="a.id" :value="a.id">{{ a.name }}</option>
+            </select>
+          </label>
+          <label class="text-xs text-zinc-500">telnyx endpoint
+            <select v-model="campaignForm.endpoint_id" class="input input-xs w-44">
+              <option value="">- none (dials skipped honestly) -</option>
+              <option v-for="e in voiceEndpoints" :key="e.id" :value="e.id">{{ e.name }}</option>
+            </select>
+          </label>
+          <label class="text-xs text-zinc-500">targets (address, name per line)
+            <textarea v-model="campaignForm.targets" class="input input-xs w-72 h-16 font-mono" placeholder="+15551234567, Alice&#10;sip:desk@pbx.example.com, Front desk" /></label>
+          <button class="btn btn-ghost text-xs" :disabled="meetingBusy || !campaignForm.name || !campaignForm.agent_id || !campaignForm.targets" @click="createCampaign"><Plus class="w-3.5 h-3.5" /> New campaign</button>
+        </div>
+        <p v-if="!campaigns.length" class="text-sm text-zinc-500">No campaigns yet - create one, start it (real dials through the endpoint's credentials, or honest skips), and watch answered calls open sessions bound to the agent.</p>
+        <div v-for="c in campaigns" :key="c.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="text-zinc-100">{{ c.name }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">{{ c.status }}</span>
+              <span class="text-xs text-zinc-500">{{ c.progress?.total }} target(s) · {{ c.progress?.placed }} placed · {{ c.progress?.counts?.answered || 0 }} answered</span>
+              <span v-if="c.agent_name" class="text-xs text-fuchsia-300">agent: {{ c.agent_name }}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button class="btn btn-ghost text-xs" :disabled="campaignBusy" @click="startCampaign(c)">Start</button>
+              <button class="btn btn-ghost text-xs" @click="loadCampaignDetail(c)">Open</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="selectedCampaign" class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm text-zinc-200">{{ selectedCampaign.name }} · targets</h3>
+            <button class="btn btn-ghost" @click="selectedCampaign = null">Close</button>
+          </div>
+          <div v-for="t in selectedCampaign.targets || []" :key="t.id" class="flex items-center gap-2 text-xs text-zinc-400">
+            <span class="px-2 py-0.5 rounded-full border"
+                  :class="t.status === 'answered' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : t.status === 'pending' ? 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300' : 'border-amber-500/25 bg-amber-500/10 text-amber-300'">
+              {{ t.status }}
+            </span>
+            <span class="text-zinc-200">{{ t.name || t.address }}</span>
+            <span class="font-mono">{{ t.address }}</span>
+            <span v-if="t.session_id" class="font-mono text-zinc-500">{{ t.session_id.slice(0, 8) }}</span>
+            <span v-if="t.last_error" class="text-amber-300 truncate max-w-64">{{ t.last_error }}</span>
+            <button v-if="t.status === 'pending'" class="btn btn-ghost text-xs" @click="simulateAnswer(selectedCampaign, t)">Simulate answer</button>
+          </div>
         </div>
       </section>
 
@@ -583,6 +860,12 @@ onMounted(load)
         </label>
         <label v-if="agentForm.brain === 'ai_agent' && !agentForm.handler_workflow_id" class="block text-sm text-zinc-400">Brain model (optional - passed to the provider)
           <input v-model="agentForm.brain_model" class="input mt-1 w-full" placeholder="default chosen by the bridge" /></label>
+        <label v-if="agentForm.brain === 'ai_agent' && !agentForm.handler_workflow_id" class="block text-sm text-zinc-400">LLM credential (REAL routing - openai, claude, deepseek, kimi, qwen, openrouter, ...)
+          <select v-model="agentForm.llm_credential_id" class="input mt-1 w-full">
+            <option value="">- none: the brain stays on the free sandbox bridge -</option>
+            <option v-for="c in llmCredentials" :key="c.id" :value="c.id">{{ c.name }} ({{ credTypeLabel[c.type] || c.type }})</option>
+          </select>
+        </label>
         <label class="flex items-center gap-2 text-sm text-zinc-400">
           <input v-model="agentForm.barge_in" type="checkbox" class="accent-fuchsia-500" />
           the caller may barge-in over the greeting and turns

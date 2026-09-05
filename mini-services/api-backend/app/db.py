@@ -120,5 +120,8 @@ async def init_db() -> None:
                 sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_answer_column VARCHAR(80)"))
             if "knowledge_top_k" not in va_cols:
                 sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN knowledge_top_k INTEGER DEFAULT 1"))
+            # v74: the real LLM credential behind an openai_compatible brain
+            if "llm_credential_id" not in va_cols:
+                sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN llm_credential_id VARCHAR(36)"))
 
         await conn.run_sync(_add_missing_columns)

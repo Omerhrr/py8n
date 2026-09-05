@@ -130,6 +130,29 @@ def _probe_openai_compatible(data: dict) -> dict[str, Any]:
     }
 
 
+def _probe_anthropic(data: dict) -> dict[str, Any]:
+    """Claude's native Messages API - auth is x-api-key + anthropic-version,
+    and GET /models is the honest key check (same shape the OpenAI probe
+    uses, different headers)."""
+    base_url = (data.get("base_url") or "https://api.anthropic.com/v1").rstrip("/")
+    if not data.get("api_key"):
+        raise ProbeError("anthropic credential is missing 'api_key'")
+    headers = {"x-api-key": data["api_key"], "anthropic-version": "2023-06-01"}
+    url = f"{base_url}/models"
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            resp = client.get(url, headers=headers)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "message": f"GET {url} failed: {exc}", "status_code": 0}
+    ok = resp.status_code < 400
+    note = "" if ok else " - check the api_key (and that it starts with 'sk-ant-')"
+    return {
+        "ok": ok,
+        "message": f"GET {url} → HTTP {resp.status_code}{note}",
+        "status_code": resp.status_code,
+    }
+
+
 def _probe_generic(data: dict, test_url: str) -> dict[str, Any]:
     """Best-effort: webhook_url → POST ping; token → Bearer GET; else honest no-op."""
     if data.get("webhook_url"):
@@ -154,6 +177,7 @@ PROBES = {
     "smtp": lambda data, test_url: _probe_smtp(data),
     "slack": lambda data, test_url: _probe_slack(data),
     "openai_compatible": lambda data, test_url: _probe_openai_compatible(data),
+    "anthropic": lambda data, test_url: _probe_anthropic(data),
     "generic": lambda data, test_url: _probe_generic(data, test_url),
 }
 

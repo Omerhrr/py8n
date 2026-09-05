@@ -51,44 +51,48 @@ class LlmChatNode(BaseNode):
             payload = {"messages": messages, "temperature": p.temperature, "max_tokens": p.max_tokens}
             if p.model:
                 payload["model"] = p.model
-        else:
-            if not p.credential_id:
-                raise NodeExecutionError("openai_compatible provider requires a credential")
-            from ...services.crypto import decrypt_credential
 
-            cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
-            if cred.get("type") != "openai_compatible":
-                raise NodeExecutionError("Selected credential is not of type openai_compatible")
-            base = (cred.get("base_url") or "").rstrip("/")
-            if not base:
-                raise NodeExecutionError("Credential is missing base_url")
-            url = f"{base}/chat/completions"
-            headers = {"Authorization": f"Bearer {cred.get('api_key', '')}"}
-            payload = {
-                "model": p.model or "gpt-4o-mini",
-                "messages": messages,
-                "temperature": p.temperature,
-                "max_tokens": p.max_tokens,
-            }
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
+            except httpx.HTTPError as exc:
+                raise NodeExecutionError(f"LLM request failed: {exc}") from exc
 
+            if resp.status_code >= 400:
+                raise NodeExecutionError(f"LLM API returned HTTP {resp.status_code}: {resp.text[:300]}")
+
+            data = resp.json()
+            # OpenAI-compatible shape
+            content = ""
+            try:
+                choice = data["choices"][0]
+                content = choice["message"]["content"]
+            except (KeyError, IndexError):
+                content = data.get("content") or str(data)[:500]
+            usage = data.get("usage") or {}
+            return self._single({"text": content, "model": data.get("model", p.model or "bridge"), "usage": usage})
+
+        # v74: every real provider routes through services/llm_routing -
+        # OpenAI-shape providers AND Claude's native Messages wire.
+        if not p.credential_id:
+            raise NodeExecutionError(
+                "openai_compatible provider requires a credential - create one from "
+                "a provider preset (GET /credentials/providers) and select it")
+        from ...services.crypto import decrypt_credential
+        from ...services import llm_routing
+
+        cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
+        if not llm_routing.credential_type_matches(cred.get("type", "")):
+            raise NodeExecutionError(
+                f"Selected credential type {cred.get('type')!r} is not an LLM credential "
+                "(openai_compatible or anthropic)")
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=payload, headers=headers)
-        except httpx.HTTPError as exc:
-            raise NodeExecutionError(f"LLM request failed: {exc}") from exc
-
-        if resp.status_code >= 400:
-            raise NodeExecutionError(f"LLM API returned HTTP {resp.status_code}: {resp.text[:300]}")
-
-        data = resp.json()
-        # OpenAI-compatible shape
-        content = ""
-        usage: dict = {}
-        try:
-            choice = data["choices"][0]
-            content = choice["message"]["content"]
-        except (KeyError, IndexError):
-            content = data.get("content") or str(data)[:500]
-        usage = data.get("usage") or {}
-
-        return self._single({"text": content, "model": data.get("model", p.model or "bridge"), "usage": usage})
+            result = await llm_routing.chat_completion(
+                cred, model=p.model, messages=messages,
+                temperature=p.temperature, max_tokens=p.max_tokens)
+        except llm_routing.LLMRoutingError as exc:
+            raise NodeExecutionError(f"LLM routing failed: {exc}") from exc
+        return self._single({
+            "text": result["text"], "model": result["model"],
+            "provider": result["provider"], "usage": result["usage"],
+        })

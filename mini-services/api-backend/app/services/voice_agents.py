@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import VoiceAgent, Workflow
 from . import voice as voice_svc
+from .llm_routing import CREDENTIAL_TYPES
 from .interactions import _handler_name as _wf_name
 
 
@@ -120,12 +121,14 @@ def _agent_ctx(agent: VoiceAgent, dataset_name: str | None = None) -> dict:
         "system_prompt": agent.system_prompt,
         "knowledge": _knowledge_ctx(agent, dataset_name),  # v72: dataset-backed answers
         "brain": {"kind": agent.brain, "provider": agent.brain_provider,  # v73
-                  "model": agent.brain_model or None},
+                  "model": agent.brain_model or None,
+                  "credential_id": agent.llm_credential_id or None},  # v74 real routing
     }
 
 
 def agent_out(row: VoiceAgent, handler_name: str | None = None,
-              dataset_name: str | None = None) -> dict:
+              dataset_name: str | None = None,
+              credential_name: str | None = None) -> dict:
     """The API shape: config + derived wiring guidance (nothing stored)."""
     from . import voice_transport as transport
     wiring = {
@@ -146,14 +149,23 @@ def agent_out(row: VoiceAgent, handler_name: str | None = None,
             f"(matches ride the handler envelope's metadata.knowledge); "
             "preview with POST /voice/agents/{id}/knowledge/search")
     brain = {"kind": row.brain, "provider": row.brain_provider,
-             "model": row.brain_model or None}
+             "model": row.brain_model or None,
+             "credential_id": row.llm_credential_id or None,
+             "credential_name": credential_name}
     if row.brain == "ai_agent":
-        wiring["brain_note"] = (
-            "the scaffolded handler runs an ai_agent (LLM) node grounded on the SAME "
-            "knowledge binding - its user message is a template over the envelope "
-            "(caller words + metadata.knowledge); the sandbox_bridge provider uses "
-            "settings.llm_bridge_url, or edit the workflow for openai_compatible + "
-            "a credential")
+        if row.brain_provider == "sandbox_bridge":
+            wiring["brain_note"] = (
+                "the scaffolded handler runs an ai_agent (LLM) node grounded on the SAME "
+                "knowledge binding - its user message is a template over the envelope "
+                "(caller words + metadata.knowledge); the sandbox_bridge provider uses "
+                "settings.llm_bridge_url - bind llm_credential_id for REAL provider "
+                "routing (openai, claude, deepseek, kimi, qwen, openrouter, ...)")
+        else:
+            wiring["brain_note"] = (
+                f"the scaffolded handler routes through the REAL credential "
+                f"{credential_name or row.llm_credential_id!r} via services/llm_routing "
+                "(OpenAI wire or Claude's native Messages wire) - the phone's answers "
+                "are composed by the provider's model over the SAME knowledge binding")
     return {
         "id": row.id,
         "name": row.name,
@@ -187,6 +199,36 @@ async def _dataset_name(db: AsyncSession, dataset_id: str | None) -> str | None:
 
     row = await db.get(Dataset, dataset_id)
     return row.name if row is not None else None
+
+
+async def _credential_name(db: AsyncSession, credential_id: str | None) -> str | None:
+    if not credential_id:
+        return None
+    from ..models import Credential
+
+    row = await db.get(Credential, credential_id)
+    return row.name if row is not None else None
+
+
+async def _validate_llm_credential(db: AsyncSession, owner_id: str | None,
+                                   credential_id: str | None) -> str | None:
+    """v74: an LLM brain credential must exist, be owner-readable and be
+    an LLM credential type (openai_compatible | anthropic). '' clears.
+    Returns the validated id (or None)."""
+    if not credential_id:
+        return None
+    from ..models import Credential
+
+    row = await db.get(Credential, credential_id)
+    if row is None or (owner_id is not None and row.owner_id is not None
+                       and row.owner_id != owner_id):
+        raise VoiceAgentError(f"credential {credential_id!r} not found")
+    if row.type not in CREDENTIAL_TYPES:
+        raise VoiceAgentError(
+            f"credential {row.name!r} is of type {row.type!r} - the brain routes "
+            "through an openai_compatible or anthropic credential (create one from "
+            "the provider presets at GET /credentials/providers)")
+    return row.id
 
 
 async def _validate_knowledge(db: AsyncSession, owner_id: str | None, *,
@@ -248,33 +290,50 @@ def _validate_speech(*, asr_provider: str, tts_provider: str, tts_format: str,
 async def _scaffold_handler(db: AsyncSession, owner_id: str | None,
                             agent_name: str, *, brain: str = "scaffold",
                             brain_provider: str = "sandbox_bridge",
-                            brain_model: str = "") -> Workflow:
+                            brain_model: str = "",
+                            llm_credential_id: str | None = None) -> Workflow:
     """A REAL, runnable handler workflow, in either brain flavor.
 
     * ``scaffold`` - trigger -> code node (the v71 offline echo).
     * ``ai_agent`` - trigger -> ai_agent node whose prompt is grounded on
       metadata.knowledge (v73): the LLM answers from the SAME binding the
       deterministic knowledge handler reads.
+
+    v74: with ``brain_provider=openai_compatible`` a REAL LLM credential is
+    REQUIRED - the scaffold freezes ``credential_id`` (and the model) into
+    the node's params, so every phone turn routes through the provider via
+    services/llm_routing. Fail loud before anything is created.
     """
     if brain == "ai_agent":
+        params: dict = {
+            "provider": brain_provider or "sandbox_bridge",
+            "model": brain_model or "",
+            "system_prompt": _AI_BRAIN_SYSTEM_TMPL,
+            "user_message": _AI_BRAIN_USER_TMPL,
+            "max_iterations": 3, "temperature": 0.3,
+            "memory": "none", "tools": [],
+        }
+        if (brain_provider or "sandbox_bridge") == "openai_compatible":
+            if not llm_credential_id:
+                raise VoiceAgentError(
+                    "an openai_compatible brain routes through a REAL LLM credential - "
+                    "bind llm_credential_id (create one from the provider presets at "
+                    "GET /credentials/providers), or use the sandbox_bridge provider")
+            params["credential_id"] = llm_credential_id
         nodes = [
             {"id": "t", "type": "manual_trigger", "name": "Trigger",
              "position": {"x": 0, "y": 0}, "parameters": {}},
             {"id": "brain", "type": "ai_agent", "name": "LLM brain (grounded)",
-             "position": {"x": 200, "y": 0},
-             "parameters": {
-                 "provider": brain_provider or "sandbox_bridge",
-                 "model": brain_model or "",
-                 "system_prompt": _AI_BRAIN_SYSTEM_TMPL,
-                 "user_message": _AI_BRAIN_USER_TMPL,
-                 "max_iterations": 3, "temperature": 0.3,
-                 "memory": "none", "tools": [],
-             }},
+             "position": {"x": 200, "y": 0}, "parameters": params},
         ]
         desc = (f"Scaffolded by the voice agent builder for {agent_name!r} - "
                 "an ai_agent brain grounded on the agent's knowledge binding "
-                "(metadata.knowledge); edit the node to point the LLM at your "
-                "own provider + credential")
+                "(metadata.knowledge)")
+        if params.get("credential_id"):
+            desc += (" - routed through the agent's LLM credential "
+                     "(services/llm_routing)")
+        else:
+            desc += " - edit the node to point the LLM at your own provider + credential"
         tags = ["voice-agent", "scaffold", "ai-brain"]
     else:
         nodes = [
@@ -316,7 +375,8 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
                        knowledge_top_k: int = 1,
                        brain: str = "scaffold",
                        brain_provider: str = "sandbox_bridge",
-                       brain_model: str = "") -> dict:
+                       brain_model: str = "",
+                       llm_credential_id: str | None = None) -> dict:
     """Create an agent; scaffold a runnable handler when none is bound."""
     if not name or not name.strip():
         raise VoiceAgentError("an agent name is required")
@@ -327,6 +387,7 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
         db, owner_id, dataset_id=knowledge_dataset_id or None,
         text_column=knowledge_text_column, answer_column=knowledge_answer_column,
         top_k=knowledge_top_k)
+    llm_cred = await _validate_llm_credential(db, owner_id, llm_credential_id or None)
     if handler_workflow_id:
         wf = await db.get(Workflow, handler_workflow_id)
         if wf is None or (owner_id is not None and wf.owner_id is not None
@@ -336,7 +397,8 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
     elif scaffold_handler:
         wf = await _scaffold_handler(db, owner_id, name.strip()[:100], brain=brain,
                                      brain_provider=brain_provider,
-                                     brain_model=brain_model.strip()[:120])
+                                     brain_model=brain_model.strip()[:120],
+                                     llm_credential_id=llm_cred)
         handler_workflow_id = wf.id
         scaffolded = True
     else:
@@ -352,6 +414,7 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
         knowledge_answer_column=kb_answer, knowledge_top_k=kb_topk,
         brain=brain, brain_provider=brain_provider,
         brain_model=brain_model.strip()[:120],
+        llm_credential_id=llm_cred,
         context={"scaffolded_handler": scaffolded},
     )
     row.owner_id = owner_id
@@ -359,7 +422,8 @@ async def create_agent(db: AsyncSession, *, owner_id: str | None, name: str,
     await db.flush()
     await db.refresh(row)
     return agent_out(row, await _wf_name(db, row.handler_workflow_id),
-                     await _dataset_name(db, row.knowledge_dataset_id))
+                     await _dataset_name(db, row.knowledge_dataset_id),
+                     await _credential_name(db, row.llm_credential_id))
 
 
 async def list_agents(db: AsyncSession, owner_id: str | None) -> list[dict]:
@@ -368,13 +432,15 @@ async def list_agents(db: AsyncSession, owner_id: str | None) -> list[dict]:
     if owner_id is not None:
         rows = [r for r in rows if r.owner_id is None or r.owner_id == owner_id]
     return [agent_out(r, await _wf_name(db, r.handler_workflow_id),
-                      await _dataset_name(db, r.knowledge_dataset_id)) for r in rows]
+                      await _dataset_name(db, r.knowledge_dataset_id),
+                      await _credential_name(db, r.llm_credential_id)) for r in rows]
 
 
 async def get_agent(db: AsyncSession, agent_id: str, owner_id: str | None) -> dict:
     row = await _load(db, agent_id, owner_id)
     return agent_out(row, await _wf_name(db, row.handler_workflow_id),
-                     await _dataset_name(db, row.knowledge_dataset_id))
+                     await _dataset_name(db, row.knowledge_dataset_id),
+                     await _credential_name(db, row.llm_credential_id))
 
 
 async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **fields) -> dict:
@@ -439,31 +505,49 @@ async def update_agent(db: AsyncSession, agent_id: str, owner_id: str | None, **
     provider_requested = fields.get("brain_provider") or row.brain_provider
     model_requested = (fields.get("brain_model") if fields.get("brain_model") is not None
                        else row.brain_model) or ""
+    # v74: credential binding - '' clears, a non-empty id is validated
+    if "llm_credential_id" in fields:
+        cred_requested = await _validate_llm_credential(
+            db, owner_id, fields.get("llm_credential_id") or None)
+    else:
+        cred_requested = row.llm_credential_id
     _validate_brain(brain=brain_requested, brain_provider=provider_requested)
     brain_changed = (brain_requested != row.brain
                      or provider_requested != row.brain_provider
-                     or model_requested != (row.brain_model or ""))
+                     or model_requested != (row.brain_model or "")
+                     or (cred_requested or None) != (row.llm_credential_id or None))
     if brain_changed:
         if not (row.context or {}).get("scaffolded_handler"):
             raise VoiceAgentError(
                 "this agent runs a custom handler workflow - py8n will not replace it; "
                 "bind your own ai_agent workflow, or clear handler_workflow_id first")
+        if (brain_requested == "ai_agent"
+                and provider_requested == "openai_compatible"
+                and not cred_requested):
+            raise VoiceAgentError(
+                "an openai_compatible brain routes through a REAL LLM credential - "
+                "bind llm_credential_id (create one from the provider presets at "
+                "GET /credentials/providers), or flip brain_provider to "
+                "sandbox_bridge in the same update")
         wf = await _scaffold_handler(db, owner_id, row.name.strip()[:100],
                                      brain=brain_requested,
                                      brain_provider=provider_requested,
-                                     brain_model=model_requested.strip()[:120])
+                                     brain_model=model_requested.strip()[:120],
+                                     llm_credential_id=cred_requested)
         row.handler_workflow_id = wf.id
         ctx = dict(row.context or {})
-        ctx["handler_regenerated"] = "v73 brain change"
+        ctx["handler_regenerated"] = "v74 brain change"
         row.context = ctx
     row.brain = brain_requested
     row.brain_provider = provider_requested
     row.brain_model = model_requested.strip()[:120]
+    row.llm_credential_id = cred_requested
     db.add(row)
     await db.flush()
     await db.refresh(row)
     return agent_out(row, await _wf_name(db, row.handler_workflow_id),
-                     await _dataset_name(db, row.knowledge_dataset_id))
+                     await _dataset_name(db, row.knowledge_dataset_id),
+                     await _credential_name(db, row.llm_credential_id))
 
 
 async def delete_agent(db: AsyncSession, agent_id: str, owner_id: str | None) -> dict:

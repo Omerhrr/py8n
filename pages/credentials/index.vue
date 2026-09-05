@@ -34,10 +34,22 @@ const CRED_TYPES: Record<string, CredTypeDef> = {
   },
   openai_compatible: {
     label: 'OpenAI-compatible', icon: Sparkles, color: 'text-violet-400 bg-violet-500/10 border-violet-500/30',
-    blurb: 'Base URL + API key for LLM nodes (OpenAI, GLM, local gateways…)',
+    blurb: 'Base URL + API key for LLM nodes (OpenAI, DeepSeek, Kimi, Qwen, OpenRouter, Groq, local runtimes…)',
     fields: [
+      { key: 'provider', label: 'Provider preset', placeholder: 'openai | deepseek | kimi | qwen | openrouter | groq | ...' },
       { key: 'base_url', label: 'Base URL', placeholder: 'https://api.openai.com/v1' },
       { key: 'api_key', label: 'API key', secret: true },
+      { key: 'suggested_model', label: 'Suggested model (optional)', placeholder: 'gpt-4o-mini' },
+    ],
+  },
+  anthropic: {
+    label: 'Anthropic (Claude)', icon: Sparkles, color: 'text-orange-400 bg-orange-500/10 border-orange-500/30',
+    blurb: 'Claude\'s native Messages API - routed natively by py8n (x-api-key + anthropic-version)',
+    fields: [
+      { key: 'provider', label: 'Provider preset', placeholder: 'anthropic' },
+      { key: 'base_url', label: 'Base URL', placeholder: 'https://api.anthropic.com/v1' },
+      { key: 'api_key', label: 'API key', secret: true, placeholder: 'sk-ant-…' },
+      { key: 'suggested_model', label: 'Suggested model (optional)', placeholder: 'claude-sonnet-4-5' },
     ],
   },
   smtp: {
@@ -103,6 +115,19 @@ const formType = ref('header_auth')
 const formData = ref<Record<string, any>>({})
 const formSaving = ref(false)
 const formError = ref('')
+
+// v74: LLM provider presets (GET /credentials/providers) - one click fills
+// provider + base_url + suggested model, so a credential is a preset + a key
+const llmProviders = ref<any[]>([])
+const llmPresets = computed(() => llmProviders.value.filter(p => !formType.value || p.credential_type === formType.value))
+
+function applyPreset(p: any) {
+  formType.value = p.credential_type
+  formData.value = blankData(p.credential_type)
+  formData.value.provider = p.provider
+  formData.value.base_url = p.base_url
+  if (p.default_model) formData.value.suggested_model = p.default_model
+}
 
 function openCreate() {
   editing.value = null
@@ -320,6 +345,7 @@ onMounted(async () => {
   try {
     await store.loadCredentials()
     await refreshUsage()
+    llmProviders.value = (await api.get<{ providers: any[] }>('/credentials/providers')).providers || []
   } catch {
     loading.value = false
   } finally {
@@ -561,6 +587,20 @@ onMounted(async () => {
                 <option v-for="(meta, t) in CRED_TYPES" :key="t" :value="t">{{ meta.label }}</option>
               </select>
             </label>
+
+            <div v-if="!editing && llmPresets.length" class="block">
+              <span class="mb-1 block text-xs font-medium text-zinc-400">Provider presets (one click fills the endpoint)</span>
+              <div class="flex flex-wrap gap-1.5">
+                <button
+                  v-for="p in llmPresets"
+                  :key="p.provider"
+                  type="button"
+                  class="rounded-full border px-2.5 py-1 text-[11px] transition"
+                  :class="formData.provider === p.provider ? 'border-orange-500/60 bg-orange-500/10 text-orange-300' : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'"
+                  @click="applyPreset(p)"
+                >{{ p.label }}</button>
+              </div>
+            </div>
 
             <div class="space-y-2.5">
               <label v-for="f in typeMeta(formType).fields" :key="f.key" class="block">

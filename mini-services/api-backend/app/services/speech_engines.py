@@ -505,3 +505,169 @@ def bind_local_engines() -> dict:
             bound["tts"] = {"name": LOCAL_TTS_NAME, "backend": "piper",
                             "error": f"{type(exc).__name__}: {exc}"}
     return bound
+
+
+# ---------------------------------------------------------------------------
+# v74: the bridge VERIFICATION round trip - piper speaks, the ASR hears
+# ---------------------------------------------------------------------------
+
+VERIFY_PHRASE = "What are your opening hours on saturday"
+
+
+def pcm_from_wav(data: bytes) -> tuple[bytes, int]:
+    """Unwrap a RIFF/wav produced by a TTS engine into (linear16 pcm, rate).
+
+    The same chunk-walk ``wav_duration_ms`` uses - the verifier feeds REAL
+    audio into the ASR bridges, so the container must be parsed honestly
+    (fmt: rate/bits/channels; data: the payload). Anything but mono 16-bit
+    fails loud - transcoding is the caller's business, not a silent guess.
+    """
+    if len(data) < 44 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+        raise voice_svc.VoiceError("verify needs a RIFF/wav - this TTS output is not one")
+    pos = 12
+    rate = 0
+    bits = 0
+    channels = 0
+    payload = b""
+    while pos + 8 <= len(data):
+        cid = data[pos:pos + 4]
+        size = struct.unpack("<I", data[pos + 4:pos + 8])[0]
+        body = data[pos + 8:pos + 8 + size]
+        if cid == b"fmt ":
+            channels = struct.unpack("<H", body[2:4])[0]
+            rate = struct.unpack("<I", body[4:8])[0]
+            bits = struct.unpack("<H", body[14:16])[0]
+        elif cid == b"data":
+            payload = body
+            break
+        pos += 8 + size + (size & 1)
+    if not rate or bits != 16 or channels != 1 or not payload:
+        raise voice_svc.VoiceError(
+            f"verify needs mono 16-bit wav (got rate={rate}, bits={bits}, "
+            f"channels={channels}, {len(payload)} data bytes)")
+    return payload, rate
+
+
+def _tokens(text: str) -> list[str]:
+    """Normalized word tokens: lowercase, punctuation stripped."""
+    import re as _re
+
+    return _re.sub(r"[^a-z0-9\s]", " ", (text or "").lower()).split()
+
+
+def _resolve_verify_tts(name: str):
+    """The verifier's TTS: a registered engine by name, or 'piper' built
+    straight from the machine probe (bypassing the registry, like the
+    explicit ASR backends do)."""
+    if name and name != "piper":
+        engine = get_tts_engine(name)
+        if engine is None:
+            raise voice_svc.VoiceError(
+                f"no TTS engine is registered for {name!r} - registered: "
+                f"{', '.join(registered_tts_engines()) or '(none)'}")
+        return name, engine, "registry"
+    probe = probe_piper()
+    if not probe.get("available"):
+        raise voice_svc.VoiceError(
+            "piper is not available on this machine - " + probe.get("note", ""))
+    engine = make_piper_engine(probe["binary"], probe["voices"],
+                               default_voice=next(iter(probe["voices"]), ""))
+    return ("piper" if not name else name), engine, "probe"
+
+
+def _resolve_verify_asr(name: str):
+    """The verifier's ASR: a registered engine by name, or a BACKEND key
+    ('whisper.cpp' / 'vosk') built straight from the machine probe.
+
+    The backend keys are the point of the verifier: the registry binds ONE
+    py8n_local engine (vosk preferred when both are present), but verifying
+    THE WHISPER BRIDGE means running whisper.cpp even when vosk would win
+    the registry slot."""
+    from . import voice_transport
+
+    if name in ("", "py8n_local"):
+        engine = voice_transport.get_asr_engine(LOCAL_ASR_NAME)
+        if engine is None:
+            raise voice_svc.VoiceError(
+                "no local ASR engine is registered in this process - install a model "
+                "through POST /voice/speech/models/install and rebind, or pass "
+                "asr='whisper.cpp' / 'vosk' to verify a specific backend")
+        return LOCAL_ASR_NAME, engine, _last_asr_backend()
+    if name == "whisper.cpp":
+        probe = probe_whispercpp()
+        if not probe.get("available"):
+            raise voice_svc.VoiceError(
+                "the whisper.cpp bridge cannot run on this machine - "
+                + probe.get("note", ""))
+        return name, make_whispercpp_engine(probe["binary"], probe["model"]), "probe"
+    if name == "vosk":
+        probe = probe_vosk()
+        if not probe.get("available"):
+            raise voice_svc.VoiceError(
+                "the vosk bridge cannot run on this machine - " + probe.get("note", ""))
+        return name, make_vosk_engine(probe["model"]), "probe"
+    engine = voice_transport.get_asr_engine(name) if \
+        hasattr(voice_transport, "get_asr_engine") else None
+    if engine is None:
+        registered = voice_transport.registered_asr_engines()
+        raise voice_svc.VoiceError(
+            f"no ASR engine is registered for {name!r} - registered: "
+            f"{', '.join(registered) or '(none)'}; backends 'whisper.cpp' and 'vosk' "
+            "resolve straight from the machine probe")
+    return name, engine, "registry"
+
+
+def _last_asr_backend() -> str:
+    """Which backend the bound py8n_local engine uses (from the inventory)."""
+    inv = speech_inventory()
+    pref = (inv.get("asr") or {}).get("preferred_backend") or ""
+    return str(pref)
+
+
+def verify_bridge(*, asr: str = "", tts: str = "", phrase: str = VERIFY_PHRASE) -> dict:
+    """Verify the SPEECH LOOP for real: synthesize the phrase through a TTS
+    engine, feed the produced wav to an ASR engine, and score what came
+    back against what was spoken.
+
+    This is the bridge proof the model installer's ``after`` notes point
+    at: install whisper-tiny-en on a machine with whisper-cli, then
+    ``verify_bridge(asr='whisper.cpp')`` runs the REAL binary over REAL
+    audio (piper-synthesized) and reports the transcript, the engine's
+    confidence and a token-level match ratio. No simulation anywhere -
+    when an engine cannot run, the error says exactly why.
+    """
+    tts_name, tts_engine, tts_source = _resolve_verify_tts(str(tts or "").strip())
+    audio = tts_engine(phrase, "", "wav")
+    duration_ms = wav_duration_ms(audio)
+    pcm, rate = pcm_from_wav(audio)
+    if not pcm:
+        raise voice_svc.VoiceError("the TTS engine produced an empty wav - nothing to hear")
+
+    asr_name, asr_engine, asr_source = _resolve_verify_asr(str(asr or "").strip())
+    result = asr_engine(pcm, rate)
+    heard = str(result.get("transcript") or "")
+    confidence = float(result.get("confidence") or 0.0)
+
+    spoken_tokens = _tokens(phrase)
+    heard_tokens = _tokens(heard)
+    if spoken_tokens:
+        overlap = set(spoken_tokens) & set(heard_tokens)
+        ratio = round(len(overlap) / len(set(spoken_tokens)), 3)
+    else:
+        ratio = 0.0
+    return {
+        "ok": bool(heard) and ratio >= 0.5,
+        "spoken": phrase,
+        "heard": heard,
+        "exact": spoken_tokens == heard_tokens and bool(spoken_tokens),
+        "match_ratio": ratio,
+        "confidence": confidence,
+        "tts": {"engine": tts_name, "source": tts_source,
+                "audio_ms": duration_ms, "sample_rate": rate, "pcm_bytes": len(pcm)},
+        "asr": {"engine": asr_name, "source": asr_source,
+                "backend": asr_name if asr_name in ASR_BACKENDS else _last_asr_backend(),
+                "language": result.get("language") or ""},
+        "note": ("real round trip: TTS synthesized the phrase, ASR transcribed the "
+                 "audio it produced, nothing was faked" if heard else
+                 "the ASR engine returned no transcript - the loop is NOT verified"),
+    }

@@ -1171,6 +1171,112 @@ class VoiceSession(Base):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class VoiceMeeting(Base):
+    """A multi-party voice meeting (v74) - the room that owns legs.
+
+    A meeting is not an audio mixer (mixing is the provider's job - a
+    conference bridge, a SIP fork, a room in the provider's media plane);
+    py8n is the SYSTEM layer: it owns the participant list, dials legs
+    through the provider adapters, binds the SAME VoiceAgent persona to
+    every leg, and derives the merged, speaker-attributed transcript from
+    the legs' event timelines. Storage is real traffic state (like campaign
+    targets and limit counters) - participants are calls that exist.
+    """
+
+    __tablename__ = "voice_meetings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # active | ended
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
+    context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VoiceMeetingParticipant(Base):
+    """One leg of a meeting (v74) - a participant and its session.
+
+    ``channel`` is web (a browser/stream attaches to the leg's session
+    media websocket), telnyx/sip (py8n dials the participant through the
+    provider), or any channel adapter key later. ``session_id`` links the
+    leg to a REAL VoiceSession - the full v69..v73 machinery (state
+    machine, ASR engine, handler, analytics) runs per leg unchanged.
+    """
+
+    __tablename__ = "voice_meeting_participants"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    label: Mapped[str] = mapped_column(String(140), nullable=False, default="")
+    channel: Mapped[str] = mapped_column(String(30), nullable=False, default="web")
+    address: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    call_control_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    # joining | dialing | joined | left | skipped | failed
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="joining")
+    last_error: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VoiceCampaign(Base):
+    """An outbound voice campaign (v74) - dial a list through an agent.
+
+    The campaign is CONFIGURATION (agent + targets + the provider endpoint
+    to dial through); the targets are TRAFFIC STATE - real dials that
+    happened (the same deliberate exception to derived-never-stored as the
+    deployment-token hit rows: you cannot derive that a call was placed).
+    Progress is derived from the target rows; the answered conversations
+    are real VoiceSessions bound to the campaign's agent.
+    """
+
+    __tablename__ = "voice_campaigns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    # draft | running | stopped | completed
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft", index=True)
+    endpoint_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class VoiceCampaignTarget(Base):
+    """One dial attempt slot in a campaign (v74).
+
+    status: pending -> dialing -> answered -> completed, or
+    no_answer / failed / skipped with last_error. call_control_id links
+    the carrier's call to this row; session_id links the conversation
+    the campaign opened when the call was answered.
+    """
+
+    __tablename__ = "voice_campaign_targets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    campaign_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    address: Mapped[str] = mapped_column(String(180), nullable=False)
+    name: Mapped[str] = mapped_column(String(140), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    call_control_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    last_error: Mapped[str] = mapped_column(String(400), nullable=False, default="")
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    dialed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class VoiceEvent(Base):
     """One event on a voice session (v69) - the append-only call timeline.
 
@@ -1302,5 +1408,10 @@ class VoiceAgent(Base):
     brain_provider: Mapped[str] = mapped_column(String(40), nullable=False,
                                                 default="sandbox_bridge")
     brain_model: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    # v74: the REAL LLM credential behind an openai_compatible brain - a
+    # vault credential (openai_compatible | anthropic) the scaffolded
+    # ai_agent node routes through (services/llm_routing). Frozen into the
+    # scaffolded workflow at scaffold time; sessions keep what they copied.
+    llm_credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

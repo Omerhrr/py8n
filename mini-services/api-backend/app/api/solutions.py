@@ -62,6 +62,7 @@ class SolutionInstallRequest(BaseModel):
     as_model_system: bool = Field(default=False, description="v64: also create a Model System (datasets + training/serving workflows as one operating unit)")
     as_voice_agent: bool = Field(default=False, description="v72: also create a Voice Agent bound to the installed handler + knowledge dataset (one-click phone agent)")
     brain: str = Field(default="scaffold", description="v73: voice-agent brain - 'scaffold' (deterministic knowledge handler) or 'ai_agent' (LLM brain scaffolded over the SAME installed knowledge dataset)")
+    llm_credential_id: str | None = Field(default=None, max_length=36, description="v74: with brain='ai_agent' - the REAL LLM credential the scaffolded brain routes through (services/llm_routing)")
 
 
 class SolutionAuthorRequest(BaseModel):
@@ -227,7 +228,10 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
                 tts_format=speech.get("tts_format") or "wav",
                 language=speech.get("language") or "en-US",
                 barge_in=bool(speech.get("barge_in", True)),
-                brain=brain)
+                brain=brain,
+                brain_provider=("openai_compatible" if (brain == "ai_agent" and body.llm_credential_id)
+                                else "sandbox_bridge"),
+                llm_credential_id=body.llm_credential_id)
         except va_svc.VoiceAgentError as exc:
             raise HTTPException(status_code=400, detail=f"voice agent install failed: {exc}") from exc
         voice_agent_ref = {"id": va["id"], "name": va["name"],

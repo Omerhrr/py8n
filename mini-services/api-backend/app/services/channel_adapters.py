@@ -684,6 +684,9 @@ def telnyx_build_command(config: dict, call_control_id: str, command: str,
     if not str(call_control_id or "").strip():
         raise ValueError("a call_control_id is required")
     api_key = str(config.get("api_key") or "")
+    # v74: api_base overrides the Telnyx API host - Telnyx-COMPATIBLE call
+    # control (a private gateway, a simulator) rides the same wire
+    api_base = str(config.get("api_base") or TELNYX_API_BASE).rstrip("/")
     json_body: dict = {}
     if command == "speak":
         text = str((params or {}).get("payload") or (params or {}).get("text") or "")
@@ -709,7 +712,51 @@ def telnyx_build_command(config: dict, call_control_id: str, command: str,
         json_body = {"to": target}
     return {
         "method": "POST",
-        "url": f"{TELNYX_API_BASE}/calls/{call_control_id}/actions/{command}",
+        "url": f"{api_base}/calls/{call_control_id}/actions/{command}",
+        "headers": {"Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"},
+        "json": json_body,
+    }
+
+
+def telnyx_build_dial(config: dict, *, to: str, from_ref: str,
+                      connection_id: str, webhook_url: str,
+                      client_state: str = "",
+                      timeout_secs: int = 45) -> dict:
+    """v74: OUTBOUND DIAL - ``POST {api}/v2/calls``.
+
+    Call Control's commands act on calls that already exist; a campaign or
+    a meeting dial-out needs the originating call: create it with the
+    connection id, the destination and the webhook URL the call's events
+    should arrive at. ``client_state`` (opaque base64 to Telnyx, we encode
+    json {cmp, tgt} / {mtg, prt}) rides EVERY event back so the receiver
+    can bind the call to the row that placed it - the same trick the
+    provider docs recommend. The api_key rides the Authorization header
+    only at delivery, like every other command."""
+    to = str(to or "").strip()
+    from_ref = str(from_ref or "").strip()
+    connection_id = str(connection_id or "").strip()
+    webhook_url = str(webhook_url or "").strip()
+    if not to:
+        raise ValueError("dial requires 'to' (E.164 number or sip: URI)")
+    if not from_ref:
+        raise ValueError("dial requires 'from' (the caller id to present)")
+    if not connection_id:
+        raise ValueError("dial requires connection_id (the Telnyx Call Control "
+                         "application id the call is placed through)")
+    if not webhook_url.startswith(("http://", "https://")):
+        raise ValueError("dial requires webhook_url (absolute http(s) URL the call "
+                         "events will be posted to)")
+    api_key = str(config.get("api_key") or "")
+    api_base = str(config.get("api_base") or TELNYX_API_BASE).rstrip("/")
+    json_body: dict = {"connection_id": connection_id, "to": to,
+                       "from": from_ref, "webhook_url": webhook_url,
+                       "timeout_secs": int(timeout_secs)}
+    if client_state:
+        json_body["client_state"] = client_state
+    return {
+        "method": "POST",
+        "url": f"{api_base}/calls",
         "headers": {"Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"},
         "json": json_body,

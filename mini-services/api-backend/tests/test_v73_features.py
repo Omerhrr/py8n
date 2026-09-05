@@ -159,7 +159,7 @@ class _ScriptedChat:
 # ---------------------------------------------------------------------------
 
 def test_v73_pins():
-    assert settings.version == "1.73.0"
+    assert settings.version >= "1.73.0"  # v74+ carries the batch forward
     from app.services.voice_agents import BRAINS, BRAIN_PROVIDERS
     assert BRAINS == ("scaffold", "ai_agent")
     assert BRAIN_PROVIDERS == ("sandbox_bridge", "openai_compatible")
@@ -271,9 +271,10 @@ def test_v73_brain_flip_rules():
                                          "brain_model": "qwen2.5-7b"})
             assert res.status_code == 200, res.text
             flipped = res.json()
-            assert flipped["brain"] == {"kind": "ai_agent",
-                                        "provider": "sandbox_bridge",
-                                        "model": "qwen2.5-7b"}
+            # v74: the brain dict grew credential_id/credential_name (None here);
+            # the pin checks the v73 contract subset
+            assert {k: flipped["brain"][k] for k in ("kind", "provider", "model")} == {
+                "kind": "ai_agent", "provider": "sandbox_bridge", "model": "qwen2.5-7b"}
             assert flipped["handler_workflow_id"] != old_handler
             res = await client.get(f"/workflows/{old_handler}", headers=h)
             assert res.status_code == 200, "the old scaffold survives in the estate"
@@ -587,7 +588,8 @@ def _piper_tarball_bytes() -> bytes:
 def _fixtures() -> dict[str, bytes]:
     return {
         VOSK_URL: _vosk_zip_bytes(),
-        WHISPER_URL: b"ggml" + b"\x00" * 64,
+        # the REAL whisper.cpp container magic: uint32 0x67676d6c little-endian
+        WHISPER_URL: b"lmgg" + b"\x00" * 64,
         VOICE_ONNX_URL: b"x" * 2048,
         VOICE_JSON_URL: json.dumps({"num_symbols": 102,
                                     "phoneme_id_map": {"_": [0]}}).encode(),
@@ -610,7 +612,7 @@ def test_v73_model_installer_installs_real_layouts(tmp_path):
     assert models_svc.slug_installed("vosk-small-en-us", root)
 
     r2 = models_svc.install_model("whisper-tiny-en", fetch=fetch, root=root)
-    assert (root / "ggml-tiny.en.bin").read_bytes()[:4] == b"ggml"
+    assert (root / "ggml-tiny.en.bin").read_bytes()[:4] == b"lmgg"
     assert models_svc.slug_installed("whisper-tiny-en", root)
 
     r3 = models_svc.install_model("piper-lessac-medium", fetch=fetch, root=root)

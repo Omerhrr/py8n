@@ -46,6 +46,7 @@ router = APIRouter(prefix="/credentials", tags=["credentials"])
 # Fields never echoed back to any client (blanked in the edit-time view).
 SECRET_FIELDS: dict[str, set[str]] = {
     "openai_compatible": {"api_key"},
+    "anthropic": {"api_key"},
     "header_auth": {"value"},
     "basic_auth": {"password"},
     "smtp": {"password"},
@@ -108,6 +109,18 @@ async def create_credential(body: CredentialCreate, user=Depends(get_optional_us
 async def list_credentials(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Credential).order_by(Credential.created_at.desc()))).scalars().all()
     return [_out(c, decrypt_payload(c.data_encrypted)) for c in scope_rows(rows, user)]  # v37
+
+
+@router.get("/providers")
+async def llm_providers(user=Depends(get_optional_user)):
+    """v74: the LLM provider catalog - the presets a credential can be
+    created FROM. One credential shape (provider + base_url + api_key)
+    covers openai, claude (native Messages wire), deepseek, kimi, qwen,
+    openrouter, groq, together, mistral, xai and the local runtimes;
+    the routing layer (services/llm_routing) speaks each wire."""
+    from ..services.llm_routing import providers_out
+
+    return {"providers": providers_out()}
 
 
 @router.get("/{credential_id}", response_model=CredentialDetail)

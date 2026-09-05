@@ -74,6 +74,7 @@ class AgentCreate(BaseModel):
     brain: str = Field(default="scaffold", max_length=20, description="v73: scaffold (echo code node) | ai_agent (LLM brain grounded on the SAME knowledge binding)")
     brain_provider: str = Field(default="sandbox_bridge", max_length=40, description="v73: sandbox_bridge | openai_compatible")
     brain_model: str = Field(default="", max_length=120, description="v73: optional model name for the brain provider")
+    llm_credential_id: str | None = Field(default=None, max_length=36, description="v74: the REAL LLM credential behind an openai_compatible brain (openai_compatible | anthropic) - the scaffolded ai_agent routes through it via services/llm_routing")
 
 
 @router.post("/agents", status_code=201)
@@ -94,7 +95,8 @@ async def create_agent(body: AgentCreate, user=Depends(get_optional_user),
             knowledge_answer_column=body.knowledge_answer_column,
             knowledge_top_k=body.knowledge_top_k,
             brain=body.brain, brain_provider=body.brain_provider,
-            brain_model=body.brain_model)
+            brain_model=body.brain_model,
+            llm_credential_id=body.llm_credential_id)
     except agent_svc.VoiceAgentError as exc:
         raise _http(exc) from exc
 
@@ -133,6 +135,7 @@ class AgentUpdate(BaseModel):
     brain: str | None = Field(default=None, max_length=20, description="v73: flip the brain (scaffold <-> ai_agent); re-scaffolds a scaffolded handler, refuses on a custom one")
     brain_provider: str | None = Field(default=None, max_length=40)
     brain_model: str | None = Field(default=None, max_length=120)
+    llm_credential_id: str | None = Field(default=None, max_length=36, description="v74: non-empty binds/rewires the brain's LLM credential, empty string clears")
 
 
 @router.put("/agents/{agent_id}")
@@ -152,7 +155,8 @@ async def update_agent(agent_id: str, body: AgentUpdate,
             knowledge_answer_column=body.knowledge_answer_column,
             knowledge_top_k=body.knowledge_top_k,
             brain=body.brain, brain_provider=body.brain_provider,
-            brain_model=body.brain_model)
+            brain_model=body.brain_model,
+            llm_credential_id=body.llm_credential_id)
     except agent_svc.VoiceAgentError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -500,6 +504,207 @@ async def contracts():
                   "sample_rate": transport.MEDIA_SAMPLE_RATE,
                   "asr_engines_registered": transport.registered_asr_engines()},
     }
+
+
+# ---------------------------------------------------------------------------
+# v74: the bridge VERIFIER - piper speaks, the ASR hears, the loop is scored
+# ---------------------------------------------------------------------------
+
+
+class VerifyBody(BaseModel):
+    asr: str = Field(default="", max_length=40,
+                     description="an ASR engine name or a backend key: 'whisper.cpp' | 'vosk' "
+                                 "resolve straight from the machine probe (verifying THE whisper "
+                                 "bridge even when vosk would win the registry slot)")
+    tts: str = Field(default="", max_length=40, description="a TTS engine name; '' = piper via probe")
+    phrase: str = Field(default="", max_length=300, description="what the TTS should say")
+
+
+@router.post("/speech/verify")
+async def speech_verify(body: VerifyBody, user=Depends(get_optional_user)):
+    """Verify the SPEECH LOOP for real: synthesize the phrase through a TTS
+    engine, feed the produced wav to an ASR engine, score the transcript
+    against what was spoken. Install whisper-tiny-en on a machine with
+    whisper-cli, then asr='whisper.cpp' proves the Whisper bridge - the
+    real binary over real audio, nothing faked."""
+    import asyncio as _asyncio
+
+    from ..services import speech_engines as speech_svc
+
+    try:
+        return await _asyncio.to_thread(
+            speech_svc.verify_bridge, asr=body.asr, tts=body.tts,
+            phrase=body.phrase or speech_svc.VERIFY_PHRASE)
+    except voice_svc.VoiceError as exc:
+        raise _http(exc, 409) from exc
+
+
+# ---------------------------------------------------------------------------
+# v74: multi-party meetings - the room that owns legs
+# ---------------------------------------------------------------------------
+
+
+class MeetingCreate(BaseModel):
+    title: str = Field(default="", max_length=200)
+    agent_id: str | None = Field(default=None, max_length=36,
+                                 description="the VoiceAgent persona every leg binds")
+
+
+@router.post("/meetings", status_code=201)
+async def create_meeting(body: MeetingCreate, user=Depends(get_optional_user),
+                         db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.create_meeting(
+            db, owner_id=getattr(user, "id", None), agent_id=body.agent_id,
+            title=body.title)
+    except (meetings_svc.VoiceMeetingError, agent_svc.VoiceAgentError) as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/meetings")
+async def list_meetings(limit: int = 50, user=Depends(get_optional_user),
+                        db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    return {"meetings": await meetings_svc.list_meetings(db, getattr(user, "id", None), limit)}
+
+
+@router.get("/meetings/{meeting_id}")
+async def get_meeting(meeting_id: str, user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.get_meeting(db, meeting_id, getattr(user, "id", None))
+    except meetings_svc.VoiceMeetingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class JoinBody(BaseModel):
+    label: str = Field(..., min_length=1, max_length=140)
+    channel: str = Field(default="web", max_length=30,
+                         description="web (a session media websocket) | telnyx | sip (py8n dials)")
+    address: str = Field(default="", max_length=180,
+                         description="E.164 number or sip: URI for phone legs")
+    endpoint_id: str | None = Field(default=None, max_length=36,
+                                    description="the telnyx receiver that places phone-leg dials")
+
+
+@router.post("/meetings/{meeting_id}/join")
+async def join_meeting(meeting_id: str, body: JoinBody, user=Depends(get_optional_user),
+                       db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.join_participant(
+            db, getattr(user, "id", None), meeting_id, label=body.label,
+            channel=body.channel, address=body.address, endpoint_id=body.endpoint_id)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/meetings/{meeting_id}/end")
+async def end_meeting(meeting_id: str, user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.end_meeting(db, getattr(user, "id", None), meeting_id)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# v74: outbound campaigns - dial a list through an agent
+# ---------------------------------------------------------------------------
+
+
+class CampaignCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=140)
+    agent_id: str = Field(..., max_length=36)
+    endpoint_id: str | None = Field(default=None, max_length=36,
+                                    description="the telnyx voice receiver that places the dials")
+    targets: list[dict] = Field(..., min_length=1, max_length=500,
+                                description="[{address: 'E.164 | sip:', name?: 'who'}]")
+
+
+@router.post("/campaigns", status_code=201)
+async def create_campaign(body: CampaignCreate, user=Depends(get_optional_user),
+                          db: AsyncSession = Depends(get_db)):
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.create_campaign(
+            db, owner_id=getattr(user, "id", None), agent_id=body.agent_id,
+            name=body.name, targets=body.targets, endpoint_id=body.endpoint_id)
+    except (campaigns_svc.VoiceCampaignError, agent_svc.VoiceAgentError) as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/campaigns")
+async def list_campaigns(limit: int = 50, user=Depends(get_optional_user),
+                         db: AsyncSession = Depends(get_db)):
+    from ..services import voice_campaigns as campaigns_svc
+
+    return {"campaigns": await campaigns_svc.list_campaigns(db, getattr(user, "id", None), limit)}
+
+
+@router.get("/campaigns/{campaign_id}")
+async def get_campaign(campaign_id: str, user=Depends(get_optional_user),
+                       db: AsyncSession = Depends(get_db)):
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.get_campaign(db, campaign_id, getattr(user, "id", None))
+    except campaigns_svc.VoiceCampaignError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class CampaignStart(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=500,
+                              description="dial at most N pending targets this call")
+
+
+@router.post("/campaigns/{campaign_id}/start")
+async def start_campaign(campaign_id: str, body: CampaignStart | None = None,
+                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.start_campaign(
+            db, getattr(user, "id", None), campaign_id,
+            limit=(body.limit if body else None))
+    except campaigns_svc.VoiceCampaignError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/campaigns/{campaign_id}/stop")
+async def stop_campaign(campaign_id: str, user=Depends(get_optional_user),
+                        db: AsyncSession = Depends(get_db)):
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.stop_campaign(db, getattr(user, "id", None), campaign_id)
+    except campaigns_svc.VoiceCampaignError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/campaigns/{campaign_id}/targets/{target_id}/simulate-answer")
+async def simulate_campaign_answer(campaign_id: str, target_id: str,
+                                   user=Depends(get_optional_user),
+                                   db: AsyncSession = Depends(get_db)):
+    """Walk ONE target through the answered path WITHOUT a carrier - the
+    session is created through the same path a real answer takes, and the
+    session's context records it as simulated. Honest demo/test door."""
+    from ..services import voice_campaigns as campaigns_svc
+
+    try:
+        return await campaigns_svc.simulate_answer(
+            db, getattr(user, "id", None), campaign_id, target_id)
+    except campaigns_svc.VoiceCampaignError as exc:
+        raise _http(exc) from exc
 
 
 # ---------------------------------------------------------------------------

@@ -373,6 +373,38 @@ async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
         actions: list[str] = []
         delivery: dict | None = None
         try:
+            if ev.kind in ("call.ringing", "call.answered"):
+                # v74: the call may belong to a MEETING leg or a CAMPAIGN
+                # target - client_state (or the call_control_id) binds it
+                # back; the binding opens/binds the agent on the session
+                # BEFORE the state machine answers, so greetings and turns
+                # come from the meeting's/campaign's agent. Best-effort:
+                # a plain inbound call binds nothing.
+                try:
+                    from . import voice_meetings as meetings_svc
+                    from . import voice_campaigns as campaigns_svc
+
+                    bound = await meetings_svc.link_call(
+                        db, call_control_id=ev.call_control_id,
+                        client_state=ev.client_state, session=session)
+                    if bound:
+                        await db.refresh(session)
+                        actions.append(f"meeting_bound:{bound['meeting_id'][:8]}")
+                except Exception:  # noqa: BLE001 - the room linkage must not break the call
+                    pass
+                if ev.kind == "call.answered":
+                    try:
+                        from . import voice_campaigns as campaigns_svc
+
+                        clink = await campaigns_svc.on_call_event(
+                            db, call_control_id=ev.call_control_id,
+                            client_state=ev.client_state,
+                            event_kind="call.answered", session=session)
+                        if clink:
+                            await db.refresh(session)
+                            actions.append(f"campaign_bound:{clink['campaign_id'][:8]}")
+                    except Exception:  # noqa: BLE001 - the campaign linkage must not break the call
+                        pass
             if ev.kind == "call.ringing":
                 await apply_event(db, session, "call.ringing",
                                   {"direction": ev.direction, "call_session_id": ev.call_session_id})
