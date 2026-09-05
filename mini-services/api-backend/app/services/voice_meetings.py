@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import VoiceEvent, VoiceMeeting, VoiceMeetingParticipant, VoiceSession
+from ..models import VoiceEvent, VoiceMeeting, VoiceMeetingMessage, VoiceMeetingParticipant, VoiceSession
 from . import voice as voice_svc
 from .interactions import _handler_name as _wf_name
 from .voice_agents import VoiceAgentError, _dataset_name, _credential_name, _load as _load_agent
@@ -161,6 +161,7 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
         "agent_id": row.agent_id,
         "agent_name": agent_name,
         "floor": floor,
+        "hand_queue": hand_queue_out(row, legs),
         "participants": [participant_out(p, sessions.get(p.session_id or ""))
                          for p in legs],
         "counts": {
@@ -183,6 +184,15 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
     }
     if include_transcript:
         out["transcript"] = await merged_transcript(db, legs, sessions)
+        # v76: the room's TEXT side channel size (the log itself rides
+        # GET /meetings/{id}/chat - one query keeps the list view cheap)
+        from sqlalchemy import func
+
+        total = (await db.execute(
+            select(func.count())
+            .select_from(VoiceMeetingMessage)
+            .where(VoiceMeetingMessage.meeting_id == row.id))).scalar()
+        out["counts"]["chat_messages"] = int(total or 0)
     return out
 
 
@@ -309,6 +319,309 @@ async def set_floor(db: AsyncSession, owner_id: str | None, meeting_id: str, *,
     db.add(meeting)
     await db.flush()
     return {"meeting": await meeting_out(db, meeting)}
+
+
+# ---------------------------------------------------------------------------
+# v76: attach a LIVE call as a leg (the queue's seat path)
+# ---------------------------------------------------------------------------
+
+
+async def attach_session(db: AsyncSession, owner_id: str | None, meeting_id: str,
+                         session_id: str, *, label: str = "",
+                         channel: str | None = None) -> dict:
+    """Bind an EXISTING live call to the room as a participant leg (v76).
+
+    This is how a caller walks from the channel queue's waiting room into
+    the meeting WITHOUT a second call: the session stays the same
+    VoiceSession, a participant row is created for it, and the room's
+    agent binds when the session carries none yet. join_participant dials
+    NEW legs; attach_session seats one that is already on the line.
+    """
+    meeting = await _load(db, meeting_id, owner_id)
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - legs join active rooms only")
+    session = await db.get(VoiceSession, session_id)
+    if session is None or (owner_id is not None and session.owner_id is not None
+                           and session.owner_id != owner_id):
+        raise VoiceMeetingError(f"voice session {session_id!r} not found")
+    if session.state == "ended":
+        raise VoiceMeetingError("that call already ended - a room seats live calls only")
+    dup = (select(VoiceMeetingParticipant)
+           .where(VoiceMeetingParticipant.session_id == session.id,
+                  VoiceMeetingParticipant.meeting_id == meeting.id)
+           .order_by(VoiceMeetingParticipant.created_at.desc()))
+    if (await db.execute(dup)).scalars().first() is not None:
+        raise VoiceMeetingError("that call is already a leg of this meeting")
+    legs = await _participants(db, meeting_id)
+    if len(legs) >= MAX_PARTICIPANTS:
+        raise VoiceMeetingError(f"the meeting is full ({MAX_PARTICIPANTS} legs)")
+    derived_channel = session.provider if session.provider in ("web", "telnyx", "sip") else "web"
+    use_channel = (channel or derived_channel).strip().lower()
+    if use_channel not in PARTICIPANT_CHANNELS:
+        use_channel = "web"
+    p = VoiceMeetingParticipant(meeting_id=meeting_id, owner_id=owner_id,
+                                label=(label or "").strip()[:140]
+                                      or session.from_ref or session.to_ref or "caller",
+                                channel=use_channel,
+                                address=(session.from_ref if session.direction == "inbound"
+                                         else session.to_ref) or "",
+                                session_id=session.id, state="joined", meta={})
+    db.add(p)
+    await db.flush()
+    bound = None
+    if meeting.agent_id and not ((session.context or {}).get("voice_agent")):
+        try:
+            from .voice_agents import bind_to_session
+
+            await bind_to_session(db, session, meeting.agent_id, session.owner_id)
+            bound = meeting.agent_id
+        except VoiceAgentError:
+            bound = None
+    await db.flush()
+    return {"meeting_id": meeting.id,
+            "participant": participant_out(p, session),
+            "agent_bound": bound}
+
+
+# ---------------------------------------------------------------------------
+# v76: the room's group chat - the TEXT side channel
+# ---------------------------------------------------------------------------
+
+
+CHAT_ROLES = ("member", "moderator", "agent")
+
+
+def _message_out(m: VoiceMeetingMessage) -> dict:
+    return {"id": m.id, "meeting_id": m.meeting_id,
+            "participant_id": m.participant_id or None,
+            "session_id": m.session_id or None,
+            "author": m.author, "role": m.role, "text": m.text,
+            "meta": dict(m.meta or {}),
+            "created_at": m.created_at.isoformat() if m.created_at else None}
+
+
+async def post_chat_message(db: AsyncSession, owner_id: str | None, meeting_id: str, *,
+                            participant_id: str | None = None, author: str = "",
+                            text: str, ask_agent: bool = False) -> dict:
+    """Post to the room's chat (v76).
+
+    * with ``participant_id``  - a MEMBER speaks (the author is the leg's
+      label; muted members type - chat is the one channel muting never
+      gates, that is what it is FOR);
+    * without                  - the MODERATOR speaks;
+    * with ``ask_agent``       - the room's agent answers ON the asking
+      member's leg: the question and the reply land on that leg's linked
+      conversation (channel=meeting_chat) so the transcript stays ONE
+      customer ONE context, and the reply is recorded in the room chat.
+    """
+    meeting = await _load(db, meeting_id, owner_id)
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - chat belongs to active rooms")
+    text = (text or "").strip()[:4000]
+    if not text:
+        raise VoiceMeetingError("a chat message needs text")
+
+    participant: VoiceMeetingParticipant | None = None
+    role = "moderator"
+    author_name = (author or "").strip()[:140] or "moderator"
+    if participant_id:
+        participant = await db.get(VoiceMeetingParticipant, participant_id)
+        if participant is None or participant.meeting_id != meeting.id:
+            raise VoiceMeetingError(
+                f"participant {participant_id!r} not found in meeting {meeting_id!r}")
+        role = "member"
+        author_name = participant.label or participant.address or "member"
+
+    row = VoiceMeetingMessage(meeting_id=meeting.id, owner_id=owner_id,
+                              participant_id=participant.id if participant else None,
+                              session_id=participant.session_id if participant else None,
+                              author=author_name, role=role, text=text, meta={})
+    db.add(row)
+    await db.flush()
+
+    agent_reply: VoiceMeetingMessage | None = None
+    if ask_agent:
+        if not meeting.agent_id:
+            raise VoiceMeetingError(
+                "the room has no agent to ask - bind agent_id to the meeting first")
+        if participant is None or not participant.session_id:
+            raise VoiceMeetingError(
+                "ask_agent needs a MEMBER's live leg to run the room agent over - "
+                "moderator posts have no conversation to answer on")
+        session = await db.get(VoiceSession, participant.session_id)
+        if session is None or session.state == "ended":
+            raise VoiceMeetingError("the asking member's call is not live anymore")
+        if not session.conversation_id:
+            raise VoiceMeetingError("the asking member's session has no linked conversation")
+        # the SAME knowledge grounding voice_turn runs (the binding rides
+        # the session's copied agent config)
+        knowledge: list[dict] = []
+        knowledge_note = ""
+        kb = ((session.context or {}).get("voice_agent") or {}).get("knowledge") or {}
+        if kb.get("dataset_id"):
+            from . import knowledge as knowledge_svc
+
+            try:
+                kb_res = await knowledge_svc.knowledge_search(
+                    db, dataset_id=kb["dataset_id"], query=text,
+                    text_column=kb.get("text_column") or "",
+                    answer_column=kb.get("answer_column") or None,
+                    top_k=int(kb.get("top_k") or 1), owner_id=session.owner_id)
+                knowledge = kb_res["matches"]
+            except knowledge_svc.KnowledgeError as exc:
+                knowledge_note = str(exc)
+        from ..models import InteractionMessage
+
+        db.add(InteractionMessage(conversation_id=session.conversation_id, role="user",
+                                  channel="meeting_chat", text=text[:20000],
+                                  payload={"meeting_id": meeting.id,
+                                           "participant_id": participant.id,
+                                           "chat_message_id": row.id}))
+        await db.flush()
+        # COMMIT before the handler runs - execute_workflow writes on its
+        # own sessions (the SQLite single-writer discipline voice_turn
+        # learned in v75)
+        await db.commit()
+        reply = await voice_svc._run_handler(db, session, text,
+                                             knowledge=knowledge,
+                                             knowledge_note=knowledge_note)
+        if reply:
+            db.add(InteractionMessage(conversation_id=session.conversation_id, role="agent",
+                                      channel="meeting_chat", text=reply[:20000],
+                                      payload={"via": "meeting_chat",
+                                               "chat_message_id": row.id}))
+            agent_reply = VoiceMeetingMessage(
+                meeting_id=meeting.id, owner_id=owner_id, participant_id=None,
+                session_id=participant.session_id, author="agent", role="agent",
+                text=reply[:4000], meta={"in_reply_to": row.id,
+                                         "asked_by": participant.id})
+            db.add(agent_reply)
+            await db.flush()
+    out = {"message": _message_out(row), "meeting": await meeting_out(db, meeting)}
+    if agent_reply is not None:
+        out["agent_reply"] = _message_out(agent_reply)
+    return out
+
+
+async def get_chat(db: AsyncSession, meeting_id: str, owner_id: str | None,
+                   limit: int = 100) -> list[dict]:
+    """The room's chat log, chronological (the last ``limit`` messages)."""
+    await _load(db, meeting_id, owner_id)
+    q = (select(VoiceMeetingMessage)
+         .where(VoiceMeetingMessage.meeting_id == meeting_id)
+         .order_by(VoiceMeetingMessage.created_at.desc(), VoiceMeetingMessage.id.desc())
+         .limit(max(1, min(limit, 500))))
+    rows = list((await db.execute(q)).scalars().all())
+    return [_message_out(m) for m in reversed(rows)]
+
+
+# ---------------------------------------------------------------------------
+# v76: the moderator's hand queue - speaking order as room state
+# ---------------------------------------------------------------------------
+
+
+def _hand_entries(meeting: VoiceMeeting) -> list[dict]:
+    raw = (meeting.context or {}).get("hand_queue") or {}
+    entries = raw.get("entries") or []
+    return [e for e in entries if isinstance(e, dict) and e.get("participant_id")]
+
+
+def hand_queue_out(meeting: VoiceMeeting,
+                   legs: list[VoiceMeetingParticipant]) -> dict:
+    """The speaking queue with derived positions + wait times (nothing
+    but the raised hands themselves is stored - in meeting.context, the
+    same place the floor lives)."""
+    label_of = {p.id: (p.label or p.address or "participant") for p in legs}
+    now = _now()
+    entries = []
+    for i, e in enumerate(_hand_entries(meeting)):
+        raised = None
+        try:
+            raised = datetime.fromisoformat(str(e.get("raised_at")))
+        except ValueError:
+            raised = None
+        waited = round(max(0.0, (now - raised).total_seconds()), 3) if raised else None
+        entries.append({"position": i + 1, "participant_id": e["participant_id"],
+                        "label": label_of.get(e["participant_id"], "participant"),
+                        "raised_at": e.get("raised_at"),
+                        "waited_seconds": waited,
+                        "note": str(e.get("note") or "")[:200]})
+    return {"count": len(entries), "entries": entries}
+
+
+async def raise_hand(db: AsyncSession, owner_id: str | None, meeting_id: str,
+                     participant_id: str, *, note: str = "") -> dict:
+    """A member asks for the floor (or the moderator queues them)."""
+    meeting = await _load(db, meeting_id, owner_id)
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - hands raise in active rooms")
+    p = await db.get(VoiceMeetingParticipant, participant_id)
+    if p is None or p.meeting_id != meeting.id:
+        raise VoiceMeetingError(
+            f"participant {participant_id!r} not found in meeting {meeting_id!r}")
+    if p.state != "joined":
+        raise VoiceMeetingError(f"only joined legs raise hands, got {p.state!r}")
+    entries = _hand_entries(meeting)
+    if any(e["participant_id"] == p.id for e in entries):
+        raise VoiceMeetingError(
+            f"{p.label or p.address!r} is already in the speaking queue")
+    if len(entries) >= MAX_PARTICIPANTS:
+        raise VoiceMeetingError(f"the speaking queue is full ({MAX_PARTICIPANTS})")
+    ctx = dict(meeting.context or {})
+    ctx["hand_queue"] = {"entries": entries + [{
+        "participant_id": p.id, "raised_at": _now().isoformat(),
+        "note": (note or "").strip()[:200]}]}
+    meeting.context = ctx
+    db.add(meeting)
+    await db.flush()
+    legs = await _participants(db, meeting_id)
+    return {"hand_queue": hand_queue_out(meeting, legs),
+            "participant": participant_out(p, None)}
+
+
+async def lower_hand(db: AsyncSession, owner_id: str | None, meeting_id: str,
+                     participant_id: str) -> dict:
+    """Remove one raised hand (the member lowered it or the moderator
+    declined the request)."""
+    meeting = await _load(db, meeting_id, owner_id)
+    entries = _hand_entries(meeting)
+    remaining = [e for e in entries if e["participant_id"] != participant_id]
+    if len(remaining) == len(entries):
+        raise VoiceMeetingError(
+            f"participant {participant_id!r} is not in the speaking queue")
+    ctx = dict(meeting.context or {})
+    ctx["hand_queue"] = {"entries": remaining}
+    meeting.context = ctx
+    db.add(meeting)
+    await db.flush()
+    legs = await _participants(db, meeting_id)
+    return {"hand_queue": hand_queue_out(meeting, legs)}
+
+
+async def call_next_hand(db: AsyncSession, owner_id: str | None,
+                         meeting_id: str) -> dict:
+    """Call the NEXT hand in line: the head is popped and GRANTED THE
+    FLOOR (directed floor - the same primitive the moderator points with,
+    now fed by the queue's order)."""
+    meeting = await _load(db, meeting_id, owner_id)
+    if meeting.state != "active":
+        raise VoiceMeetingError("the meeting already ended - queues belong to active rooms")
+    entries = _hand_entries(meeting)
+    if not entries:
+        raise VoiceMeetingError("nobody is waiting to speak")
+    head, rest = entries[0], entries[1:]
+    ctx = dict(meeting.context or {})
+    ctx["hand_queue"] = {"entries": rest}
+    meeting.context = ctx
+    db.add(meeting)
+    await db.flush()
+    floor = await set_floor(db, owner_id, meeting_id, mode="directed",
+                            participant_id=head["participant_id"])
+    legs = await _participants(db, meeting_id)
+    return {"called": head["participant_id"],
+            "hand_queue": hand_queue_out(meeting, legs),
+            "floor": (floor.get("meeting") or {}).get("floor"),
+            "meeting": floor.get("meeting")}
 
 
 async def meeting_gate_for_session(db: AsyncSession, session_id: str) -> dict | None:

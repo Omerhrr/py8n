@@ -477,6 +477,52 @@ async def receive_voice_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
                     actions.append("amd_hangup_built")
                 elif clink:
                     actions.append("amd_continue")
+            elif ev.kind == "greeting_end":
+                # v76: the machine's greeting FINISHED (greeting_end AMD
+                # mode) - the voicemail-drop trigger. The campaign's policy
+                # decides: hangup on the beep, keep going, or DROP the
+                # configured message (speak command first, then hangup -
+                # the wire order a real drop needs).
+                await apply_event(db, session, "greeting_end",
+                                  {"source": "telnyx_amd"})
+                try:
+                    from . import voice_campaigns as campaigns_svc
+
+                    clink = await campaigns_svc.on_call_event(
+                        db, call_control_id=ev.call_control_id,
+                        client_state=ev.client_state,
+                        event_kind="greeting_end", session=session)
+                except Exception:  # noqa: BLE001 - the campaign linkage must not break the call
+                    clink = None
+                decision = (clink or {}).get("amd") or {}
+                if decision.get("drop"):
+                    from ..models import VoiceCampaign, VoiceCampaignTarget
+                    from . import voice_campaigns as campaigns_svc
+
+                    campaign = await db.get(VoiceCampaign, clink["campaign_id"])
+                    target = await db.get(VoiceCampaignTarget, clink["target_id"])
+                    drop = await campaigns_svc.record_voicemail_drop(
+                        db, campaign, target, session, hangup_session=False)
+                    cmd = adapters.telnyx_build_command(
+                        config, ev.call_control_id, "speak",
+                        {"payload": drop["message"],
+                         "voice": drop["tts"]["voice"],
+                         "language": (session.context or {}).get("voice_agent", {}).get("language", "en-US")})
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("vm_drop_speak_built")
+                    if session.state != "ended":
+                        await _voice_hangup(db, session, reason="voicemail_drop")
+                    cmd = adapters.telnyx_build_command(config, ev.call_control_id, "hangup")
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("vm_drop_hangup_built")
+                elif decision.get("hangup"):
+                    if session.state != "ended":
+                        await _voice_hangup(db, session, reason="answering_machine")
+                    cmd = adapters.telnyx_build_command(config, ev.call_control_id, "hangup")
+                    delivery = await _attempt_command(config, cmd)
+                    actions.append("amd_hangup_built")
+                elif clink:
+                    actions.append("amd_continue")
             elif ev.end_kind:
                 await apply_event(db, session, ev.kind, {"hangup_cause": ev.hangup_cause})
                 # v75: an ending carrier event closes the CAMPAIGN target

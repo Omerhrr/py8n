@@ -210,7 +210,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.75 · 61 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.76 · 61 node types</span>
       </div>
     </div>
   </aside>

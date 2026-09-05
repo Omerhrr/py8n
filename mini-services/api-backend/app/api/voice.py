@@ -11,6 +11,9 @@
   handler workflow -> TTS contract (interruptible tts.started)
 * ``POST /voice/sessions/{id}/barge-in``   - the caller interrupts the
   agent; the active utterance is cancelled and counted
+* ``POST /voice/sessions/{id}/greeting-end`` - v76: the machine's greeting
+  finished (greeting_end AMD mode); with a message the DROP primitive
+  runs (tts.started source=voicemail_drop + an honest hangup)
 * ``POST /voice/sessions/{id}/tts/complete`` - the utterance played out
 * ``POST /voice/webhooks/twilio/{id}``     - Twilio call-status callback
   translated into session events (the first real voice provider adapter)
@@ -466,6 +469,33 @@ async def complete_tts(session_id: str, user=Depends(get_optional_user),
         raise _http(exc) from exc
 
 
+class GreetingEndBody(BaseModel):
+    message: str = Field(default="", max_length=600,
+                         description="when given, the machine gets this message DROPPED onto it "
+                                     "(a tts.started source=voicemail_drop + an honest hangup); "
+                                     "empty = record the greeting_end signal only")
+
+
+@router.post("/sessions/{session_id}/greeting-end")
+async def greeting_end(session_id: str, body: GreetingEndBody | None = None,
+                       user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The session-level greeting_end door (v76): the machine's greeting
+    finished. With a message, the drop primitive runs right here - the
+    same primitive a campaign's voicemail_drop policy drives - so any
+    session (web leg, gateway call) can leave a message without a
+    carrier's AMD to trigger it."""
+    row = await _own_session(db, session_id, user)
+    try:
+        out = await voice_svc.apply_event(db, row, "greeting_end",
+                                          {"source": "api"})
+        message = (body.message if body else "") or ""
+        if message.strip():
+            out["drop"] = await voice_svc.voicemail_drop(db, row, message=message)
+        return out
+    except VoiceError as exc:
+        raise _http(exc) from exc
+
+
 @router.post("/webhooks/twilio/{session_id}")
 async def twilio_status(session_id: str, request: Request,
                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
@@ -670,6 +700,106 @@ async def set_meeting_floor(meeting_id: str, body: MeetingFloorBody,
 
 
 # ---------------------------------------------------------------------------
+# v76: the room's group chat + the moderator's hand queue
+# ---------------------------------------------------------------------------
+
+
+class MeetingChatBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=4000)
+    participant_id: str | None = Field(default=None, max_length=36,
+                                       description="a member speaks; omitted = the moderator speaks")
+    author: str = Field(default="", max_length=140,
+                        description="display name for moderator posts")
+    ask_agent: bool = Field(default=False,
+                            description="the room's agent answers on the asking member's leg "
+                                        "(reply lands in the chat AND on the leg's conversation)")
+
+
+@router.post("/meetings/{meeting_id}/chat")
+async def post_meeting_chat(meeting_id: str, body: MeetingChatBody,
+                            user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.post_chat_message(
+            db, getattr(user, "id", None), meeting_id,
+            participant_id=body.participant_id, author=body.author,
+            text=body.text, ask_agent=body.ask_agent)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/meetings/{meeting_id}/chat")
+async def get_meeting_chat(meeting_id: str, limit: int = 100,
+                           user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return {"messages": await meetings_svc.get_chat(
+            db, meeting_id, getattr(user, "id", None), limit)}
+    except meetings_svc.VoiceMeetingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class HandRaiseBody(BaseModel):
+    participant_id: str = Field(..., max_length=36)
+    note: str = Field(default="", max_length=200,
+                      description="why they want the floor (shown to the moderator)")
+
+
+@router.post("/meetings/{meeting_id}/hand")
+async def raise_meeting_hand(meeting_id: str, body: HandRaiseBody,
+                             user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """A member asks for the floor - the moderator's speaking queue."""
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.raise_hand(
+            db, getattr(user, "id", None), meeting_id, body.participant_id,
+            note=body.note)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/meetings/{meeting_id}/hand")
+async def get_meeting_hand(meeting_id: str, user=Depends(get_optional_user),
+                           db: AsyncSession = Depends(get_db)):
+    """The moderator's speaking queue (positions + wait times derived)."""
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        meeting = await meetings_svc.get_meeting(db, meeting_id, getattr(user, "id", None))
+        return {"meeting_id": meeting_id, "hand_queue": meeting["hand_queue"]}
+    except meetings_svc.VoiceMeetingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/meetings/{meeting_id}/hand/next")
+async def call_next_meeting_hand(meeting_id: str, user=Depends(get_optional_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Call the next hand in line: the head is popped and granted the
+    FLOOR (directed floor fed by the queue's order)."""
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.call_next_hand(db, getattr(user, "id", None), meeting_id)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+@router.delete("/meetings/{meeting_id}/hand/{participant_id}")
+async def lower_meeting_hand(meeting_id: str, participant_id: str,
+                             user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    from ..services import voice_meetings as meetings_svc
+
+    try:
+        return await meetings_svc.lower_hand(
+            db, getattr(user, "id", None), meeting_id, participant_id)
+    except meetings_svc.VoiceMeetingError as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
 # v74: outbound campaigns - dial a list through an agent
 # ---------------------------------------------------------------------------
 
@@ -774,9 +904,11 @@ async def retry_campaign(campaign_id: str, body: CampaignRetryBody | None = None
 
 
 class SimulateAnswerBody(BaseModel):
-    as_machine: bool = Field(default=False,
-                             description="also walk the answering-machine sequence: the AMD "
-                                         "verdict lands and the campaign's on_machine policy applies")
+    as_machine: bool | str = Field(
+        default=False,
+        description="also walk the answering-machine sequence: true = the AMD verdict lands "
+                    "and the on_machine policy applies; 'greeting_end' (v76) = the greeting-end "
+                    "walk where a voicemail_drop policy performs its real drop")
 
 
 @router.post("/campaigns/{campaign_id}/targets/{target_id}/simulate-answer")
@@ -791,10 +923,135 @@ async def simulate_campaign_answer(campaign_id: str, target_id: str,
     from ..services import voice_campaigns as campaigns_svc
 
     try:
+        as_machine = body.as_machine if body else False
+        if as_machine not in (True, False, "greeting_end"):
+            raise campaigns_svc.VoiceCampaignError(
+                "as_machine must be true | false | 'greeting_end'")
         return await campaigns_svc.simulate_answer(
             db, getattr(user, "id", None), campaign_id, target_id,
-            as_machine=bool(body.as_machine) if body else False)
+            as_machine=as_machine)
     except campaigns_svc.VoiceCampaignError as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# v76: channel queues - queueing and waiting on the channel side
+# ---------------------------------------------------------------------------
+
+
+class QueueCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=140)
+    meeting_id: str | None = Field(default=None, max_length=36,
+                                   description="destination room: a seated caller is attached "
+                                               "to this meeting as a leg (the SAME live call)")
+    agent_id: str | None = Field(default=None, max_length=36,
+                                 description="the agent whose line this queue feeds (informational)")
+    config: dict | None = Field(default=None,
+                                description="{max_size: waiting capacity (default 20), "
+                                            "max_wait_seconds: the SLA (default 300)}")
+
+
+@router.post("/queues", status_code=201)
+async def create_queue(body: QueueCreate, user=Depends(get_optional_user),
+                       db: AsyncSession = Depends(get_db)):
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.create_queue(
+            db, owner_id=getattr(user, "id", None), name=body.name,
+            meeting_id=body.meeting_id, agent_id=body.agent_id, config=body.config)
+    except (queue_svc.VoiceQueueError, agent_svc.VoiceAgentError) as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/queues")
+async def list_queues(limit: int = 50, user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    from ..services import voice_queue as queue_svc
+
+    return {"queues": await queue_svc.list_queues(db, getattr(user, "id", None), limit)}
+
+
+@router.get("/queues/{queue_id}")
+async def get_queue(queue_id: str, user=Depends(get_optional_user),
+                    db: AsyncSession = Depends(get_db)):
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.get_queue(db, queue_id, getattr(user, "id", None))
+    except queue_svc.VoiceQueueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+class QueueStateBody(BaseModel):
+    state: str = Field(..., max_length=10, description="open | closed")
+
+
+@router.post("/queues/{queue_id}/state")
+async def set_queue_state(queue_id: str, body: QueueStateBody,
+                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.set_queue_state(
+            db, getattr(user, "id", None), queue_id, body.state)
+    except queue_svc.VoiceQueueError as exc:
+        raise _http(exc) from exc
+
+
+class QueueEntryBody(BaseModel):
+    session_id: str = Field(..., max_length=36,
+                            description="the LIVE call to hold in line (state in_progress)")
+    label: str = Field(default="", max_length=140)
+
+
+@router.post("/queues/{queue_id}/entries", status_code=201)
+async def enqueue_call(queue_id: str, body: QueueEntryBody,
+                       user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Put a live call in the waiting room: the session is HELD (on_hold)
+    and books its FIFO place. Positions and wait times derive at read."""
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.enqueue(
+            db, getattr(user, "id", None), queue_id, body.session_id, label=body.label)
+    except queue_svc.VoiceQueueError as exc:
+        raise _http(exc) from exc
+
+
+@router.post("/queues/{queue_id}/entries/{entry_id}/leave")
+async def leave_queue(queue_id: str, entry_id: str, user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    """Take one caller out of the line - the call is RELEASED from hold
+    back to in_progress (the conversation continues, nobody is dropped)."""
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.leave_queue(
+            db, getattr(user, "id", None), queue_id, entry_id)
+    except queue_svc.VoiceQueueError as exc:
+        raise _http(exc) from exc
+
+
+class QueueSeatBody(BaseModel):
+    meeting_id: str | None = Field(default=None, max_length=36,
+                                   description="override the destination room for this seat")
+
+
+@router.post("/queues/{queue_id}/next")
+async def seat_queue_next(queue_id: str, body: QueueSeatBody | None = None,
+                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Seat the head of the line: the oldest LIVE waiting call is released
+    from hold and - when a destination meeting exists - attached to the
+    room as a leg (the same call, now in the meeting). Abandoned heads
+    (caller hung up) are skipped honestly."""
+    from ..services import voice_queue as queue_svc
+
+    try:
+        return await queue_svc.seat_next(
+            db, getattr(user, "id", None), queue_id,
+            meeting_id=(body.meeting_id if body else None))
+    except queue_svc.VoiceQueueError as exc:
         raise _http(exc) from exc
 
 

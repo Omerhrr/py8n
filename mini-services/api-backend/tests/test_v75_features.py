@@ -521,7 +521,10 @@ def test_v75_campaign_amd():
                 "config": {"amd": {"mode": "detect", "on_machine": "hangup"}}})
             assert res.status_code == 201, res.text
             camp = res.json()
-            assert camp["config"]["amd"] == {"mode": "detect", "on_machine": "hangup"}
+            # v76: the normalized amd block grew voicemail_message (the drop
+            # policy's payload); the v75 keys keep their values
+            assert camp["config"]["amd"] == {"mode": "detect", "on_machine": "hangup",
+                                             "voicemail_message": ""}
 
             dials: list[dict] = []
 

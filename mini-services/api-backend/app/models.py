@@ -1297,6 +1297,87 @@ class VoiceEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class VoiceMeetingMessage(Base):
+    """One in-meeting group-chat message (v76).
+
+    The room's TEXT side channel: while the audio mix is the provider's
+    media plane, the chat is py8n's own room surface - members who are
+    muted (the room does not hear them) can still TYPE. A message is real
+    traffic state (you cannot derive that someone said it): rows live in
+    their own table, never stuffed into meeting.context. ``role`` is
+    member | moderator | agent (agent rows are the room agent's replies
+    when a member's post asks the agent - the reply ALSO lands on the
+    asking leg's linked conversation, one customer one transcript).
+    """
+
+    __tablename__ = "voice_meeting_messages"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    participant_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    author: Mapped[str] = mapped_column(String(140), nullable=False, default="")
+    # member | moderator | agent
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelQueue(Base):
+    """A channel-side waiting room (v76) - queueing and waiting as a
+    first-class primitive.
+
+    When every agent is busy and the room is full, a live call does not
+    get dropped into the void: it WAITS. The queue holds the caller in
+    the session state machine's own on_hold state (the primitive that
+    already existed - no new call states invented), keeps FIFO order with
+    derived positions and wait times, and seats the head into a
+    destination meeting (or just releases it back to the line for a
+    human to take). Configuration only; the entries are the traffic.
+    """
+
+    __tablename__ = "channel_queues"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(140), nullable=False)
+    # open | closed (a closed queue refuses new entries honestly)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="open", index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # the meeting a seated caller is attached to (optional destination)
+    meeting_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChannelQueueEntry(Base):
+    """One call waiting in a channel queue (v76).
+
+    status: waiting -> seated (the head got released/attached), or left
+    (the caller or an operator took them out). ``session_id`` is the held
+    VoiceSession (state on_hold while it waits); a session that ENDED
+    while waiting (the caller hung up) is derived abandoned at read time
+    - the row keeps its history honestly. Position and waited-seconds are
+    derived from joined_at order, never stored.
+    """
+
+    __tablename__ = "channel_queue_entries"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    queue_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    label: Mapped[str] = mapped_column(String(140), nullable=False, default="")
+    address: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    # waiting | seated | left
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="waiting", index=True)
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    left_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class DeploymentTokenPolicy(Base):
     """Rate-shaping/quotas on a serving token (v69, cross-process in v70).
 

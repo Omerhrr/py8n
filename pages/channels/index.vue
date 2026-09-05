@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear, Bot, Wand2, Users, Megaphone, Volume2 } from 'lucide-vue-next'
+import { Loader2, Phone, Webhook, Copy, Plus, Send, Ban, PlayCircle, Mic, Ear, Bot, Wand2, Users, Megaphone, Volume2, MessageSquare, Hand, Hourglass } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
 // v69: the REAL adapter surface. A channel endpoint registers a provider
@@ -17,6 +17,11 @@ import { useApi } from '~/composables/useApi'
 // deepseek, kimi, qwen, openrouter, ...), the speech loop is VERIFIABLE
 // (piper speaks, whisper.cpp hears), and the voice stack grows multi-party
 // MEETINGS (legs + merged transcript) and OUTBOUND CAMPAIGNS.
+// v76: the room grows a TEXT side channel (group chat + the agent answers
+// on the asking leg) and a MODERATOR speaking queue (raise hand -> call
+// next grants the floor); the dialer grows voicemail DROPS (greeting_end
+// triggers the message + hangup); and channel-side QUEUEING waits callers
+// in line (held sessions, FIFO, seat into a meeting on the same call).
 
 interface Endpoint {
   id: string; name: string; provider: string; channel: string; enabled: boolean
@@ -98,9 +103,19 @@ const meetingBusy = ref(false)
 const campaigns = ref<any[]>([])
 const selectedCampaign = ref<any>(null)
 const campaignForm = ref({ name: '', agent_id: '', endpoint_id: '', targets: '',
-  max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup' })
+  max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup', amd_message: '' })
 const campaignBusy = ref(false)
 const voiceEndpoints = computed(() => endpoints.value.filter(e => e.provider === 'telnyx_call_control'))
+
+// v76: room chat + hand queue + channel queues
+const meetingChat = ref<any[]>([])
+const chatForm = ref({ text: '', participant_id: '', author: '', ask_agent: false })
+const chatBusy = ref(false)
+const queues = ref<any[]>([])
+const selectedQueue = ref<any>(null)
+const queueForm = ref({ name: '', meeting_id: '' })
+const queueEntryForm = ref({ session_id: '' })
+const queueBusy = ref(false)
 
 const credTypeLabel: Record<string, string> = { openai_compatible: 'openai-compatible', anthropic: 'claude' }
 
@@ -122,7 +137,7 @@ async function load() {
   loading.value = true
   pageError.value = ''
   try {
-    const [eps, ads, vss, wfs, ags, dss, se, sm, crs, mts, cmps] = await Promise.all([
+    const [eps, ads, vss, wfs, ags, dss, se, sm, crs, mts, cmps, qss] = await Promise.all([
       api('/channels/endpoints'), api('/channels/adapters'),
       api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
       api('/datasets?limit=200'), api('/voice/speech/engines').catch(() => null),
@@ -130,6 +145,7 @@ async function load() {
       api('/credentials').catch(() => []),
       api('/voice/meetings').catch(() => ({ meetings: [] })),
       api('/voice/campaigns').catch(() => ({ campaigns: [] })),
+      api('/voice/queues').catch(() => ({ queues: [] })),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
@@ -142,6 +158,7 @@ async function load() {
     allCredentials.value = Array.isArray(crs) ? crs : (crs.credentials || [])
     meetings.value = mts.meetings || []
     campaigns.value = cmps.campaigns || []
+    queues.value = qss.queues || []
   } catch (e: any) {
     pageError.value = e?.message || 'failed to load channels'
   } finally {
@@ -299,6 +316,129 @@ async function runVerify() {
 
 async function loadMeetingDetail(m: any) {
   selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+  try {
+    meetingChat.value = (await api(`/voice/meetings/${m.id}/chat?limit=50`)).messages || []
+  } catch { meetingChat.value = [] }
+}
+
+// v76: the room's TEXT side channel
+async function postChat(m: any) {
+  if (!chatForm.value.text.trim()) return
+  chatBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({
+        text: chatForm.value.text,
+        participant_id: chatForm.value.participant_id || null,
+        author: chatForm.value.author || undefined,
+        ask_agent: chatForm.value.ask_agent,
+      }),
+    })
+    chatForm.value = { text: '', participant_id: chatForm.value.participant_id, author: '', ask_agent: false }
+    await loadMeetingDetail(m)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'chat failed'
+  } finally { chatBusy.value = false }
+}
+
+// v76: the moderator's speaking queue
+async function raiseHand(m: any, p: any, note = '') {
+  meetingBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/hand`, {
+      method: 'POST', body: JSON.stringify({ participant_id: p.id, note }) })
+    await loadMeetingDetail(m)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'raise hand failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function lowerHand(m: any, p: any) {
+  meetingBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/hand/${p.id}`, { method: 'DELETE' })
+    await loadMeetingDetail(m)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'lower hand failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function callNextHand(m: any) {
+  meetingBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/hand/next`, { method: 'POST' })
+    await loadMeetingDetail(m)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'call next failed'
+  } finally { meetingBusy.value = false }
+}
+
+// v76: channel queues - the waiting room on the channel side
+async function createQueue() {
+  queueBusy.value = true
+  try {
+    const created = await api('/voice/queues', {
+      method: 'POST',
+      body: JSON.stringify({ name: queueForm.value.name,
+                              meeting_id: queueForm.value.meeting_id || null }) })
+    queueForm.value = { name: '', meeting_id: '' }
+    await load()
+    await openQueue(created)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'queue create failed'
+  } finally { queueBusy.value = false }
+}
+
+async function openQueue(q: any) {
+  selectedQueue.value = await api(`/voice/queues/${q.id}`)
+}
+
+async function enqueueSession(q: any) {
+  if (!queueEntryForm.value.session_id) return
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/entries`, {
+      method: 'POST', body: JSON.stringify({ session_id: queueEntryForm.value.session_id }) })
+    queueEntryForm.value = { session_id: '' }
+    selectedQueue.value = res
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'enqueue failed'
+  } finally { queueBusy.value = false }
+}
+
+async function seatQueueNext(q: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/next`, { method: 'POST', body: JSON.stringify({}) })
+    note.value = res.note || 'seated'
+    await load()
+    await openQueue(res)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'seat failed'
+  } finally { queueBusy.value = false }
+}
+
+async function queueLeave(q: any, entry: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/entries/${entry.id}/leave`, { method: 'POST' })
+    selectedQueue.value = res
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'leave failed'
+  } finally { queueBusy.value = false }
+}
+
+async function toggleQueueState(q: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/state`, {
+      method: 'POST', body: JSON.stringify({ state: q.state === 'open' ? 'closed' : 'open' }) })
+    selectedQueue.value = res
+    await load()
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'state change failed'
+  } finally { queueBusy.value = false }
 }
 
 async function createMeeting() {
@@ -368,12 +508,13 @@ async function createCampaign() {
                    delays_minutes: delays.length ? delays : [15, 60, 1440],
                    retry_on: ['no_answer'] },
           amd: { mode: campaignForm.value.amd_mode,
-                 on_machine: campaignForm.value.amd_on_machine },
+                 on_machine: campaignForm.value.amd_on_machine,
+                 ...(campaignForm.value.amd_message ? { voicemail_message: campaignForm.value.amd_message } : {}) },
         },
       }),
     })
     campaignForm.value = { name: '', agent_id: '', endpoint_id: '', targets: '',
-      max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup' }
+      max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup', amd_message: '' }
     await load()
     await loadCampaignDetail(created)
   } catch (e: any) {
@@ -439,10 +580,10 @@ async function retryCampaign(c: any, force = false) {
   } finally { campaignBusy.value = false }
 }
 
-async function simulateMachine(c: any, t: any) {
+async function simulateMachine(c: any, t: any, mode: boolean | string = true) {
   try {
     await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, {
-      method: 'POST', body: JSON.stringify({ as_machine: true }) })
+      method: 'POST', body: JSON.stringify({ as_machine: mode }) })
     await load()
     await loadCampaignDetail(c)
   } catch (e: any) {
@@ -665,7 +806,7 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Users class="w-4 h-4 text-emerald-400" /> Voice meetings ({{ meetings.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">multi-party legs · mix controls (mute/deafen/solo) · floor control · merged transcript</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">multi-party legs · mix controls (mute/deafen/solo) · floor control · room chat · moderator speaking queue · merged transcript</span>
         </h2>
         <div class="flex flex-wrap items-end gap-2">
           <label class="text-xs text-zinc-500">title <input v-model="meetingForm.title" class="input input-xs w-48" placeholder="Monday standup room" /></label>
@@ -726,6 +867,7 @@ onMounted(load)
               <span v-if="p.session_state">session: {{ p.session_state }}</span>
               <span v-if="p.last_error" class="text-amber-300">{{ p.last_error }}</span>
               <span v-if="selectedMeeting.floor?.participant_id === p.id" class="px-1.5 py-0.5 rounded-full border border-sky-500/25 bg-sky-500/10 text-sky-300">floor</span>
+              <span v-if="(selectedMeeting.hand_queue?.entries || []).some((h: any) => h.participant_id === p.id)" class="px-1.5 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300"><Hand class="w-3 h-3 inline" /> hand</span>
               <template v-if="selectedMeeting.state === 'active' && p.state === 'joined'">
                 <button class="btn btn-ghost text-[11px] px-1.5"
                         :class="p.mix?.muted ? 'text-rose-300' : 'text-zinc-400'"
@@ -737,8 +879,42 @@ onMounted(load)
                         :class="p.mix?.solo ? 'text-emerald-300' : 'text-zinc-400'"
                         :disabled="meetingBusy" @click="setMix(selectedMeeting, p, 'solo', !p.mix?.solo)">{{ p.mix?.solo ? 'unsolo' : 'solo' }}</button>
                 <button v-if="selectedMeeting.floor?.participant_id !== p.id" class="btn btn-ghost text-[11px] px-1.5 text-sky-300" :disabled="meetingBusy" @click="setFloor(selectedMeeting, 'directed', p.id)">give floor</button>
+                <button class="btn btn-ghost text-[11px] px-1.5 text-amber-300" :disabled="meetingBusy" @click="raiseHand(selectedMeeting, p)">raise hand</button>
               </template>
             </div>
+          </div>
+          <div v-if="selectedMeeting.state === 'active'" class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-zinc-500">speaking queue:</span>
+            <span v-if="!selectedMeeting.hand_queue?.count" class="text-zinc-600">nobody waiting</span>
+            <template v-for="h in selectedMeeting.hand_queue?.entries || []" :key="h.participant_id">
+              <span class="px-2 py-0.5 rounded-full border border-amber-500/25 bg-amber-500/10 text-amber-300">
+                #{{ h.position }} {{ h.label }}<span v-if="h.note"> · {{ h.note }}</span>
+              </span>
+              <button class="btn btn-ghost text-[11px] px-1.5 text-zinc-500" :disabled="meetingBusy" @click="lowerHand(selectedMeeting, { id: h.participant_id })">lower</button>
+            </template>
+            <button v-if="selectedMeeting.hand_queue?.count" class="btn btn-ghost text-xs text-sky-300" :disabled="meetingBusy" @click="callNextHand(selectedMeeting)"><Hand class="w-3.5 h-3.5" /> Call next (grants floor)</button>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2 text-xs text-zinc-500"><MessageSquare class="w-3.5 h-3.5" /> room chat <span v-if="selectedMeeting.counts?.chat_messages" class="text-zinc-600">{{ selectedMeeting.counts.chat_messages }} message(s)</span></div>
+            <ol class="space-y-1 text-xs max-h-48 overflow-y-auto">
+              <li v-for="m in meetingChat" :key="m.id" class="flex gap-2">
+                <span class="w-28 shrink-0 truncate" :class="m.role === 'agent' ? 'text-fuchsia-300' : m.role === 'moderator' ? 'text-emerald-300' : 'text-sky-300'">{{ m.author }}</span>
+                <span class="text-zinc-300">{{ m.text }}</span>
+              </li>
+            </ol>
+            <div v-if="selectedMeeting.state === 'active'" class="flex flex-wrap items-center gap-2 text-xs">
+              <label class="text-zinc-500">as
+                <select v-model="chatForm.participant_id" class="input input-xs w-40">
+                  <option value="">moderator</option>
+                  <option v-for="p in (selectedMeeting.participants || []).filter((p: any) => p.state === 'joined')" :key="p.id" :value="p.id">{{ p.label }}</option>
+                </select>
+              </label>
+              <label v-if="!chatForm.participant_id" class="text-zinc-500">name <input v-model="chatForm.author" class="input input-xs w-24" placeholder="moderator" /></label>
+              <input v-model="chatForm.text" class="input input-xs w-64" placeholder="say something to the room…" @keyup.enter="postChat(selectedMeeting)" />
+              <label class="text-zinc-500 flex items-center gap-1"><input type="checkbox" v-model="chatForm.ask_agent" class="checkbox checkbox-xs" /> ask the agent</label>
+              <button class="btn btn-ghost text-xs" :disabled="chatBusy || !chatForm.text" @click="postChat(selectedMeeting)"><Send class="w-3.5 h-3.5" /> Send</button>
+            </div>
+            <p class="text-zinc-600">chat is the one channel muting never gates - a muted member can still type. ask_agent answers ON the member's leg (chat + the leg's transcript).</p>
           </div>
           <ol class="space-y-1.5 text-xs">
             <li v-for="(l, i) in selectedMeeting.transcript || []" :key="i" class="flex gap-3">
@@ -786,12 +962,15 @@ onMounted(load)
               <option value="greeting_end">greeting_end</option>
             </select>
           </label>
-          <label v-if="campaignForm.amd_mode !== 'disabled'" class="text-xs text-zinc-500">on machine
-            <select v-model="campaignForm.amd_on_machine" class="input input-xs w-28">
+          <label class="text-xs text-zinc-500">on machine
+            <select v-model="campaignForm.amd_on_machine" class="input input-xs w-32">
               <option value="hangup">hangup</option>
               <option value="continue">continue</option>
+              <option value="voicemail_drop">voicemail_drop</option>
             </select>
           </label>
+          <label v-if="campaignForm.amd_on_machine === 'voicemail_drop'" class="text-xs text-zinc-500">drop message
+            <input v-model="campaignForm.amd_message" class="input input-xs w-64" placeholder="Hi, calling about your renewal - we'll try again tomorrow." /></label>
           <button class="btn btn-ghost text-xs" :disabled="meetingBusy || !campaignForm.name || !campaignForm.agent_id || !campaignForm.targets" @click="createCampaign"><Plus class="w-3.5 h-3.5" /> New campaign</button>
         </div>
         <p v-if="!campaigns.length" class="text-sm text-zinc-500">No campaigns yet - create one, start it (real dials through the endpoint's credentials, or honest skips), and watch answered calls open sessions bound to the agent.</p>
@@ -837,7 +1016,64 @@ onMounted(load)
             <span v-if="t.last_error" class="text-amber-300 truncate max-w-64">{{ t.last_error }}</span>
             <button v-if="t.status === 'pending'" class="btn btn-ghost text-xs" @click="simulateAnswer(selectedCampaign, t)">Simulate answer</button>
             <button v-if="t.status === 'pending' && selectedCampaign.config?.amd?.mode !== 'disabled'" class="btn btn-ghost text-xs text-purple-300" @click="simulateMachine(selectedCampaign, t)">Simulate machine</button>
+            <button v-if="t.status === 'pending' && selectedCampaign.config?.amd?.mode === 'greeting_end'" class="btn btn-ghost text-xs text-fuchsia-300" @click="simulateMachine(selectedCampaign, t, 'greeting_end')">Simulate greeting_end</button>
+            <span v-if="t.voicemail_drop" class="text-fuchsia-300 truncate max-w-72">dropped: "{{ t.voicemail_drop.message }}"</span>
           </div>
+        </div>
+      </section>
+
+      <section class="space-y-3">
+        <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
+          <Hourglass class="w-4 h-4 text-cyan-400" /> Channel queues ({{ queues.length }})
+          <span class="text-xs text-zinc-500 normal-case font-normal">queueing &amp; waiting on the channel side · held calls · FIFO · seat into a meeting on the SAME call</span>
+        </h2>
+        <div class="flex flex-wrap items-end gap-2">
+          <label class="text-xs text-zinc-500">name <input v-model="queueForm.name" class="input input-xs w-40" placeholder="Support line" /></label>
+          <label class="text-xs text-zinc-500">destination room
+            <select v-model="queueForm.meeting_id" class="input input-xs w-48">
+              <option value="">- none (seat releases the call) -</option>
+              <option v-for="m in meetings.filter((m: any) => m.state === 'active')" :key="m.id" :value="m.id">{{ m.title || 'room' }}</option>
+            </select>
+          </label>
+          <button class="btn btn-ghost text-xs" :disabled="queueBusy || !queueForm.name" @click="createQueue"><Plus class="w-3.5 h-3.5" /> New queue</button>
+        </div>
+        <p v-if="!queues.length" class="text-sm text-zinc-500">No queues yet - a queue holds live calls in the line (session state on_hold), derives positions and wait times, and seats the head into a destination room.</p>
+        <div v-for="q in queues" :key="q.id" class="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4 space-y-2">
+          <div class="flex items-center justify-between gap-3 flex-wrap">
+            <div class="flex items-center gap-2 text-sm">
+              <span class="text-zinc-100">{{ q.name }}</span>
+              <span class="text-xs px-2 py-0.5 rounded-full border" :class="q.state === 'open' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/25 bg-rose-500/10 text-rose-300'">{{ q.state }}</span>
+              <span class="text-xs text-cyan-300">{{ q.depth?.waiting }} waiting</span>
+              <span v-if="q.depth?.longest_wait_seconds !== null" class="text-xs text-zinc-500">longest {{ q.depth?.longest_wait_seconds }}s / {{ q.config?.max_wait_seconds }}s SLA</span>
+              <span v-if="q.meeting_name" class="text-xs text-sky-300">→ {{ q.meeting_name }}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="seatQueueNext(q)">Seat next</button>
+              <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="toggleQueueState(q)">{{ q.state === 'open' ? 'Close' : 'Open' }}</button>
+              <button class="btn btn-ghost text-xs" @click="openQueue(q)">Open</button>
+            </div>
+          </div>
+        </div>
+        <div v-if="selectedQueue" class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 space-y-2">
+          <div class="flex items-center justify-between">
+            <h3 class="text-sm text-zinc-200">{{ selectedQueue.name }} · the line</h3>
+            <button class="btn btn-ghost" @click="selectedQueue = null">Close</button>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <input v-model="queueEntryForm.session_id" class="input input-xs w-72 font-mono" placeholder="live session id to enqueue (state in_progress)" />
+            <button class="btn btn-ghost text-xs" :disabled="queueBusy || !queueEntryForm.session_id" @click="enqueueSession(selectedQueue)">Enqueue</button>
+          </div>
+          <div v-for="e in selectedQueue.entries || []" :key="e.id" class="flex items-center gap-2 text-xs text-zinc-400 flex-wrap">
+            <span class="px-2 py-0.5 rounded-full border" :class="e.status === 'waiting' ? 'border-cyan-500/25 bg-cyan-500/10 text-cyan-300' : e.status === 'seated' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300'">{{ e.status }}</span>
+            <span v-if="e.position" class="text-cyan-300">#{{ e.position }}</span>
+            <span class="text-zinc-200">{{ e.label }}</span>
+            <span v-if="e.session_id" class="font-mono text-zinc-500">{{ e.session_id.slice(0, 8) }}</span>
+            <span v-if="e.waited_seconds !== null">{{ e.waited_seconds }}s</span>
+            <span v-if="e.expired" class="text-amber-300">SLA breached</span>
+            <span v-if="e.abandoned" class="text-rose-300">abandoned (caller hung up)</span>
+            <button v-if="e.status === 'waiting'" class="btn btn-ghost text-[11px] px-1.5" :disabled="queueBusy" @click="queueLeave(selectedQueue, e)">Release</button>
+          </div>
+          <p v-for="n in selectedQueue.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
         </div>
       </section>
 

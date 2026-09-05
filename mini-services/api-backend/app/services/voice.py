@@ -57,6 +57,10 @@ EVENT_KINDS = (
     "dtmf", "asr.final", "tts.started", "tts.ended", "barge_in",
     "hold", "unhold", "transfer", "no_answer", "busy",
     "voicemail_detected", "hangup", "failed",
+    # v76: the greeting_end signal - the carrier (machine_detection:
+    # "greeting_end") waited out the machine's greeting and reports it
+    # DONE; this is the trigger for a voicemail drop, not just a verdict
+    "greeting_end",
     # v70: media transport (websocket audio streams) bookkeeping
     "media.stream_started", "media.stream_stopped",
     # v75: meeting mix/floor gates - the turn pipeline refused audio honestly
@@ -378,10 +382,21 @@ async def apply_event(db: AsyncSession, session: VoiceSession, kind: str,
             raise VoiceError(f"illegal transition {session.state} -> in_progress (call not ringing)")
         session.state = "in_progress"
         session.answered_at = datetime.now(timezone.utc)
-    elif kind in ("speech.started", "speech.ended", "dtmf", "voicemail_detected"):
+    elif kind in ("speech.started", "speech.ended", "dtmf", "voicemail_detected",
+                  "greeting_end"):
         if kind == "voicemail_detected" and session.state not in ("ringing", "in_progress"):
             raise VoiceError(f"voicemail detection needs an active or ringing call, got {session.state}")
         if kind == "voicemail_detected":
+            session.state = "voicemail"
+        if kind == "greeting_end":
+            # the machine's greeting is DONE (greeting_end AMD mode). Legal
+            # from in_progress (the only report a greeting_end dial gives)
+            # or from voicemail (a machine verdict arrived first). The
+            # state lands (or stays) on voicemail - we KNOW it is a machine
+            # now, and whatever the policy wants to say to it comes next.
+            if session.state not in ("in_progress", "voicemail"):
+                raise VoiceError(
+                    f"greeting_end needs an in_progress or voicemail call, got {session.state}")
             session.state = "voicemail"
     elif kind == "hold":
         if "on_hold" not in _TRANSITIONS[session.state]:
@@ -653,3 +668,45 @@ async def hangup(db: AsyncSession, session: VoiceSession, *, reason: str = "hang
     if (session.context or {}).get("active_tts"):
         await complete_tts(db, session, cancelled=True)
     return result
+
+
+async def voicemail_drop(db: AsyncSession, session: VoiceSession, *, message: str,
+                         tts_provider: str | None = None, voice: str | None = None,
+                         fmt: str | None = None) -> dict:
+    """The DROP primitive (v76): speak one message into a machine.
+
+    Requires the voicemail state (the greeting_end signal landed - we
+    KNOW it is a machine and its greeting is done; py8n never talks over
+    a human with a recording). Records the utterance as an INTERRUPTIBLE-
+    no (barge_in_ok=False - a machine does not barge in) tts.started with
+    source=voicemail_drop, then HANGS UP: the message is on the machine,
+    staying on the line wastes the agent's minutes. The TTS config
+    defaults to the session's VoiceAgent exactly like a turn reply.
+    """
+    if session.state != "voicemail":
+        raise VoiceError(
+            f"voicemail drops are said to MACHINES only - the session must sit in the "
+            f"voicemail state (the greeting_end / AMD signal landed), got {session.state}")
+    message = (message or "").strip()
+    if not message:
+        raise VoiceError("a voicemail drop needs a message to leave")
+    from .voice_agents import resolve_turn_tts
+
+    eff_provider, eff_voice, eff_fmt = resolve_turn_tts(
+        session, tts_provider=tts_provider, voice=voice, tts_format=fmt)
+    tts_request = build_tts_request(message, provider=eff_provider, voice=eff_voice,
+                                    fmt=eff_fmt, barge_in_ok=False)
+    tts_event = await _add_event(db, session, "tts.started",
+                                 {"text": message[:500], "provider": eff_provider,
+                                  "voice": eff_voice, "barge_in_ok": False,
+                                  "source": "voicemail_drop"})
+    ctx = dict(session.context or {})
+    ctx["active_tts"] = tts_event.id
+    session.context = ctx
+    db.add(session)
+    await db.flush()
+    end = await hangup(db, session, reason="voicemail_drop")
+    return {"tts": {**tts_request, "tts_id": tts_event.id},
+            "message": message,
+            "dropped_at": datetime.now(timezone.utc).isoformat(),
+            "state": end["state"], "end_reason": end["end_reason"]}

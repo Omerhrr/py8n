@@ -559,8 +559,15 @@ def telnyx_parse_webhook(payload: dict) -> TelnyxParseResult:
         ev.kind = "tts.started" if event_type == "call.speak.started" else "tts.ended"
     elif event_type == "call.machine.detection.ended":
         result_amd = str(p.get("result") or "").lower()
-        if "machine" in result_amd or "greeting" in result_amd:
+        if "machine" in result_amd:
+            # a plain machine verdict (detect mode) - v70 behavior kept:
+            # "machine", "machine_greeting", "human_machine" all land here
             ev.kind = "voicemail_detected"
+        elif "greeting" in result_amd:
+            # v76: greeting_end mode - the carrier waited OUT the machine's
+            # greeting and reports it finished; this is the voicemail-drop
+            # trigger, a different event than the bare verdict
+            ev.kind = "greeting_end"
         else:
             result.skipped.append({"reason": "amd_human",
                                    "detail": f"answering-machine detection says {result_amd or 'unknown'} "

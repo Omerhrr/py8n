@@ -64,10 +64,13 @@ TARGET_STATUSES = ("pending", "dialing", "answered", "completed",
 # v75: retry schedules + answering machine detection - the validated shapes
 RETRY_ON_CHOICES = ("no_answer", "failed", "voicemail")
 AMD_MODES = ("disabled", "detect", "greeting_end")
-AMD_ON_MACHINE = ("hangup", "continue")
+# v76: "voicemail_drop" joins the policy list - when the greeting ends the
+# campaign LEAVES A MESSAGE (amd.voicemail_message) instead of hanging up
+# on the beep or spending the agent on a machine
+AMD_ON_MACHINE = ("hangup", "continue", "voicemail_drop")
 DEFAULT_RETRY = {"max_attempts": 3, "delays_minutes": [15, 60, 1440],
                  "retry_on": ["no_answer"]}
-DEFAULT_AMD = {"mode": "disabled", "on_machine": "hangup"}
+DEFAULT_AMD = {"mode": "disabled", "on_machine": "hangup", "voicemail_message": ""}
 
 
 def _now():
@@ -120,6 +123,26 @@ def validate_config(config: dict | None) -> dict:
             raise VoiceCampaignError(
                 f"amd.on_machine must be {'|'.join(AMD_ON_MACHINE)}, got {on_machine!r}")
         amd["on_machine"] = on_machine
+        # v76: the drop policy has two honest prerequisites - a message to
+        # leave, and greeting_end detection (the drop is TRIGGERED by the
+        # greeting ending; detect-mode verdicts give no such signal)
+        message = str(amd_in.get("voicemail_message") or "").strip()
+        if on_machine == "voicemail_drop":
+            if amd["mode"] != "greeting_end":
+                raise VoiceCampaignError(
+                    "amd.on_machine='voicemail_drop' needs amd.mode='greeting_end' - "
+                    "the drop is triggered by the greeting ENDING, which only "
+                    "greeting_end detection reports")
+            if not message:
+                raise VoiceCampaignError(
+                    "amd.on_machine='voicemail_drop' needs amd.voicemail_message - "
+                    "a drop with nothing to say is not a drop")
+        if message:
+            if len(message) > 600:
+                raise VoiceCampaignError(
+                    "amd.voicemail_message must be 600 characters or fewer - "
+                    "nobody listens to a minute of recorded menu")
+            amd["voicemail_message"] = message
     config["retry"] = retry
     config["amd"] = amd
     return config
@@ -137,7 +160,8 @@ def retry_plan(campaign: VoiceCampaign) -> dict:
 def amd_plan(campaign: VoiceCampaign) -> dict:
     raw = (campaign.config or {}).get("amd") or {}
     return {"mode": str(raw.get("mode") or DEFAULT_AMD["mode"]),
-            "on_machine": str(raw.get("on_machine") or DEFAULT_AMD["on_machine"])}
+            "on_machine": str(raw.get("on_machine") or DEFAULT_AMD["on_machine"]),
+            "voicemail_message": str(raw.get("voicemail_message") or "")}
 
 
 def schedule_retry(campaign: VoiceCampaign, target: VoiceCampaignTarget) -> dict:
@@ -215,6 +239,7 @@ def target_out(t: VoiceCampaignTarget) -> dict:
         "retry_at": meta.get("retry_at"),
         "retry_delay_minutes": meta.get("retry_delay_minutes"),
         "amd": meta.get("amd"),
+        "voicemail_drop": meta.get("voicemail_drop"),
         "dialed_at": t.dialed_at.isoformat() if t.dialed_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }
@@ -662,6 +687,24 @@ async def on_call_event(db: AsyncSession, *, call_control_id: str = "",
             target.status = "voicemail"
             target.last_error = ""
         # on_machine=continue: the conversation proceeds, target stays answered
+    elif event_kind == "greeting_end":
+        # v76: the machine's greeting FINISHED (greeting_end AMD mode) -
+        # the voicemail-drop trigger. The target is a machine; the policy
+        # decides what the campaign says to it: hang up, keep talking, or
+        # DROP the configured message. The receiver + record_voicemail_drop
+        # own the session-side mechanics; this books the verdict + decision.
+        amd = amd_plan(campaign)
+        meta = dict(target.meta or {})
+        meta["amd"] = {"result": "greeting_ended", "at": _now().isoformat(),
+                       "mode": amd["mode"]}
+        target.meta = meta
+        target.status = "voicemail"
+        target.last_error = ""
+        amd_decision = {"on_machine": amd["on_machine"],
+                        "hangup": amd["on_machine"] == "hangup"}
+        if amd["on_machine"] == "voicemail_drop":
+            amd_decision["drop"] = True
+            amd_decision["message"] = amd["voicemail_message"]
     elif event_kind in ("hangup", "no_answer", "busy", "failed") and target.status == "dialing":
         target.status = ("completed" if event_kind == "hangup"
                          else "no_answer" if event_kind == "no_answer" else "failed")
@@ -680,6 +723,39 @@ async def on_call_event(db: AsyncSession, *, call_control_id: str = "",
     if amd_decision is not None:
         out["amd"] = amd_decision
     return out
+
+
+async def record_voicemail_drop(db: AsyncSession, campaign: VoiceCampaign,
+                                target: VoiceCampaignTarget, session: VoiceSession, *,
+                                hangup_session: bool = True) -> dict:
+    """The campaign's side of the DROP (v76): run the drop primitive on the
+    answered session with the campaign's configured message, book the drop
+    on the target row (meta.voicemail_drop - traffic state about traffic
+    that happened), and mark the target voicemail.
+
+    ``hangup_session=False`` lets the RECEIVER order the wire properly
+    (speak command first, hangup command second) while py8n's own state
+    machine still ends honestly right after; the default closes the call
+    inside the primitive (the simulate path)."""
+    from . import voice as voice_svc
+
+    amd = amd_plan(campaign)
+    drop = await voice_svc.voicemail_drop(db, session, message=amd["voicemail_message"])
+    if hangup_session is False:
+        # the receiver still owes the wire its hangup command; py8n's state
+        # machine already ended (reason voicemail_drop) inside the primitive
+        pass
+    meta = dict(target.meta or {})
+    meta["voicemail_drop"] = {"message": drop["message"], "dropped_at": drop["dropped_at"],
+                              "tts_provider": drop["tts"]["provider"],
+                              "tts_id": drop["tts"]["tts_id"], "session_id": session.id}
+    target.meta = meta
+    target.status = "voicemail"
+    target.last_error = ""
+    target.updated_at = _now()
+    db.add(target)
+    await db.flush()
+    return drop
 
 
 async def voice_create_outbound(db: AsyncSession, campaign: VoiceCampaign,
@@ -711,13 +787,16 @@ async def voice_create_outbound(db: AsyncSession, campaign: VoiceCampaign,
 
 
 async def simulate_answer(db: AsyncSession, owner_id: str | None, campaign_id: str,
-                          target_id: str, *, as_machine: bool = False) -> dict:
+                          target_id: str, *, as_machine: bool | str = False) -> dict:
     """Walk ONE target through the answered path without a carrier.
 
     ``as_machine: true`` compresses the carrier's AMD sequence into the
     same walk: the call is answered, then the machine verdict lands and
     the campaign's ``on_machine`` policy is applied exactly as a real
     ``call.machine.detection.ended`` would drive it.
+    ``as_machine: "greeting_end"`` (v76) walks the greeting_end sequence
+    instead - the verdict AND the greeting-finished signal - so a drop
+    policy performs its real drop (message + hangup) inside the walk.
 
     Named simulate, honest in the session's context (campaign_simulated)
     and in the response - a demo/test path, not a claimed real call."""
@@ -739,7 +818,24 @@ async def simulate_answer(db: AsyncSession, owner_id: str | None, campaign_id: s
     target.last_error = ""
     db.add(target)
     amd_result: dict | None = None
-    if as_machine:
+    if as_machine == "greeting_end":
+        # v76: the greeting_end walk - verdict + greeting-finished signal,
+        # then the policy: a drop policy DROPS the message right here
+        from . import voice as voice_svc
+
+        await voice_svc.apply_event(db, session, "greeting_end",
+                                    {"source": "campaign_simulate"})
+        link = await on_call_event(db, call_control_id=call_control_id,
+                                   event_kind="greeting_end", session=session)
+        amd_result = link.get("amd") if link else None
+        await db.refresh(target)
+        if amd_result and amd_result.get("drop"):
+            drop = await record_voicemail_drop(db, row, target, session)
+            amd_result["drop_record"] = {"message": drop["message"],
+                                         "tts_id": drop["tts"]["tts_id"]}
+        elif amd_result and amd_result.get("hangup") and session.state != "ended":
+            await voice_svc.hangup(db, session, reason="answering_machine")
+    elif as_machine:
         from . import voice as voice_svc
 
         # the AMD verdict lands on the ANSWERED session, exactly the order
@@ -766,6 +862,8 @@ async def simulate_answer(db: AsyncSession, owner_id: str | None, campaign_id: s
         out["amd"] = {"simulated": True, **(amd_result or {}),
                       "target_status": target.status,
                       "session_state": session.state}
+        if session.state == "ended":
+            out["amd"]["session_end_reason"] = session.end_reason
     return out
 
 
