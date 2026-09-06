@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ChannelQueue, ChannelQueueEntry, VoiceMeeting, VoiceSession
 from . import voice as voice_svc
+from .voice_waiting import waiting_config
 
 
 class VoiceQueueError(ValueError):
@@ -65,8 +66,16 @@ def queue_config(raw: dict | None) -> dict:
         max_wait = int(raw.get("max_wait_seconds") or DEFAULT_CONFIG["max_wait_seconds"])
     except (TypeError, ValueError):
         max_wait = DEFAULT_CONFIG["max_wait_seconds"]
-    return {"max_size": max(1, min(max_size, 200)),
-            "max_wait_seconds": max(10, min(max_wait, 86400))}
+    # v77: the waiting-experience blocks (announcements + SMS backchannel)
+    # validate at config write - an unknown template placeholder refuses
+    # here, never mid-announcement
+    cfg = {"max_size": max(1, min(max_size, 200)),
+           "max_wait_seconds": max(10, min(max_wait, 86400))}
+    try:
+        cfg.update(waiting_config(raw))
+    except ValueError as exc:
+        raise VoiceQueueError(str(exc)) from exc
+    return cfg
 
 
 async def _load(db: AsyncSession, queue_id: str, owner_id: str | None) -> ChannelQueue:
@@ -156,6 +165,10 @@ async def queue_out(db: AsyncSession, row: ChannelQueue, *,
             "seating (POST /next) releases the head from hold and attaches it to "
             "the destination meeting when one is bound (the SAME live call, now "
             "a meeting leg)",
+            "v77 waiting experience: config.announce speaks the caller's position "
+            "on the held leg (TTS - media websocket for web legs, provider speak "
+            "for carrier legs) on join, when the line moves, and via POST /announce; "
+            "config.sms texts position updates through a bound SMS channel",
         ],
     }
     if include_entries:
@@ -196,6 +209,13 @@ async def create_queue(db: AsyncSession, *, owner_id: str | None, name: str,
     return await queue_out(db, row)
 
 
+async def load_queue(db: AsyncSession, owner_id: str | None,
+                     queue_id: str) -> ChannelQueue:
+    """The queue ROW for callers that compose queue primitives with the
+    waiting-experience passes (voice_waiting works on rows)."""
+    return await _load(db, queue_id, owner_id)
+
+
 async def get_queue(db: AsyncSession, queue_id: str, owner_id: str | None) -> dict:
     row = await _load(db, queue_id, owner_id)
     return await queue_out(db, row)
@@ -220,6 +240,44 @@ async def set_queue_state(db: AsyncSession, owner_id: str | None, queue_id: str,
     db.add(row)
     await db.flush()
     return await queue_out(db, row)
+
+
+async def _waiting_hooks(db: AsyncSession, row: ChannelQueue, *,
+                         entry_ids: list[str] | None = None,
+                         moved: bool = False,
+                         joined: bool = False) -> dict:
+    """The waiting-experience hooks (v77) that ride the queue's own
+    mutations: position announcements + SMS backchannel updates. They
+    never break the queue operation - a misconfigured backchannel is an
+    honest record, not an exception."""
+    from . import voice_waiting as waiting_svc
+
+    cfg = queue_config(row.config)
+    out: dict = {}
+    if cfg["announce"]["enabled"]:
+        try:
+            res = await waiting_svc.announce_pass(db, row, entry_ids=entry_ids,
+                                                  force=joined)
+            out["announcement"] = {"considered": res["considered"],
+                                   "announced": [a for a in res["announced"]
+                                                 if a.get("announced")],
+                                   "missed": [a for a in res["announced"]
+                                              if not a.get("announced")
+                                              and a.get("reason") != "not_due"],
+                                   "not_due": [a["entry_id"] for a in res["announced"]
+                                               if a.get("reason") == "not_due"]}
+        except waiting_svc.WaitingError as exc:
+            out["announcement"] = {"skipped_all": str(exc)}
+    if cfg["sms"]["enabled"]:
+        try:
+            res = await waiting_svc.sms_update_pass(
+                db, row, entry_ids=entry_ids,
+                event="joined" if joined else "position")
+            out["sms"] = {"considered": res["considered"], "event": res["event"],
+                          "sent": res["sent"]}
+        except waiting_svc.WaitingError as exc:
+            out["sms"] = {"skipped_all": str(exc)}
+    return out
 
 
 async def enqueue(db: AsyncSession, owner_id: str | None, queue_id: str,
@@ -274,8 +332,10 @@ async def enqueue(db: AsyncSession, owner_id: str | None, queue_id: str,
                               meta={"held_at": _now().isoformat()})
     db.add(entry)
     await db.flush()
+    hooks = await _waiting_hooks(db, row, entry_ids=[entry.id], joined=True)
     out = await queue_out(db, row)
     out["entry_id"] = entry.id
+    out.update(hooks)
     out["note"] = ("the call is on hold and holds its place in line - seating "
                    "releases it (and attaches it to the destination meeting when "
                    "one is bound)")
@@ -325,7 +385,9 @@ async def seat_next(db: AsyncSession, owner_id: str | None, queue_id: str, *,
     head.meta = {**(head.meta or {}), **seat_meta}
     db.add(head)
     await db.flush()
+    hooks = await _waiting_hooks(db, row, moved=True)
     out = await queue_out(db, row)
+    out.update(hooks)
     out["seated"] = _entry_out(head, head_session, position=None)
     out["seated"]["released_state"] = released["state"]
     out["attached"] = attached
@@ -359,6 +421,8 @@ async def leave_queue(db: AsyncSession, owner_id: str | None, queue_id: str,
     entry.meta = {**(entry.meta or {}), "left_at_reason": "queue_leave"}
     db.add(entry)
     await db.flush()
+    hooks = await _waiting_hooks(db, row, moved=True)
     out = await queue_out(db, row)
+    out.update(hooks)
     out["left"] = entry.id
     return out

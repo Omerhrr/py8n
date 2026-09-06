@@ -65,6 +65,10 @@ EVENT_KINDS = (
     "media.stream_started", "media.stream_stopped",
     # v75: meeting mix/floor gates - the turn pipeline refused audio honestly
     "mix.gated",
+    # v77: the waiting experience - the queue told the caller where they
+    # stand (position announcement on the held leg) and texted them (the
+    # SMS backchannel); records on the session timeline, no state change
+    "queue.announced", "queue.sms",
 )
 
 END_KINDS = {  # event kind -> end_reason recorded on the session

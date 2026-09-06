@@ -133,7 +133,12 @@ def test_v76_channel_queue():
             assert res.status_code == 201, res.text
             queue = res.json()
             assert queue["state"] == "open"
-            assert queue["config"] == {"max_size": 2, "max_wait_seconds": 600}
+            # v77: the waiting-experience blocks join the config (announce on,
+            # sms opt-in off) - the core capacity/SLA keys are unchanged
+            assert queue["config"]["max_size"] == 2
+            assert queue["config"]["max_wait_seconds"] == 600
+            assert queue["config"]["announce"]["enabled"] is True
+            assert queue["config"]["sms"]["enabled"] is False
             assert queue["depth"]["waiting"] == 0
 
             # validation: name required, unknown meeting refused
@@ -693,4 +698,4 @@ def test_v76_moderator_hand_queue():
 def test_v76_version_pin():
     from app.config import settings
 
-    assert settings.version == "1.76.0"
+    assert settings.version == "1.77.0"

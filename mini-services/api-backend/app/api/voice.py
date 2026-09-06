@@ -42,6 +42,7 @@ from ..db import get_db
 from ..models import VoiceSession
 from ..services import voice as voice_svc
 from ..services import voice_agents as agent_svc
+from ..services import voice_push
 from ..services import voice_transport as transport
 from ..services.voice import VoiceError
 
@@ -948,7 +949,10 @@ class QueueCreate(BaseModel):
                                  description="the agent whose line this queue feeds (informational)")
     config: dict | None = Field(default=None,
                                 description="{max_size: waiting capacity (default 20), "
-                                            "max_wait_seconds: the SLA (default 300)}")
+                                            "max_wait_seconds: the SLA (default 300), "
+                                            "announce: {enabled, interval_seconds, template}, "
+                                            "sms: {enabled, channel_id, template} - v77 waiting "
+                                            "experience: spoken positions + the SMS backchannel}")
 
 
 @router.post("/queues", status_code=201)
@@ -1056,6 +1060,70 @@ async def seat_queue_next(queue_id: str, body: QueueSeatBody | None = None,
 
 
 # ---------------------------------------------------------------------------
+# v77: the waiting experience - announcements on the held leg + SMS backchannel
+# ---------------------------------------------------------------------------
+
+
+class QueueAnnounceBody(BaseModel):
+    entry_id: str | None = Field(default=None, max_length=36,
+                                 description="announce to ONE entry (default: every live waiter)")
+    force: bool = Field(default=True,
+                        description="true = announce NOW even when nothing changed "
+                                    "(the button); false = only entries due by "
+                                    "interval/position-change (the scheduled pass)")
+
+
+@router.post("/queues/{queue_id}/announce")
+async def announce_queue_positions(queue_id: str, body: QueueAnnounceBody | None = None,
+                                   user=Depends(get_optional_user),
+                                   db: AsyncSession = Depends(get_db)):
+    """Queue-position announcements over hold: the held legs are SPOKEN
+    to (TTS through the registered engines - web legs receive the audio
+    on their media websocket, carrier legs a provider speak command) with
+    their current position, depth and waited seconds. The pass also runs
+    on join and whenever the line moves."""
+    from ..services import voice_queue as queue_svc
+    from ..services import voice_waiting as waiting_svc
+
+    body = body or QueueAnnounceBody()
+    try:
+        row = await queue_svc.load_queue(db, getattr(user, "id", None), queue_id)
+        return await waiting_svc.announce_pass(
+            db, row, entry_ids=[body.entry_id] if body.entry_id else None,
+            force=body.force)
+    except (queue_svc.VoiceQueueError, waiting_svc.WaitingError) as exc:
+        raise _http(exc) from exc
+
+
+class QueueSmsBody(BaseModel):
+    entry_id: str | None = Field(default=None, max_length=36,
+                                 description="text ONE waiter (default: every live waiter)")
+    event: str = Field(default="position", max_length=20,
+                       description="position | joined | seated | expired")
+
+
+@router.post("/queues/{queue_id}/sms-update")
+async def sms_queue_update(queue_id: str, body: QueueSmsBody | None = None,
+                           user=Depends(get_optional_user),
+                           db: AsyncSession = Depends(get_db)):
+    """The SMS backchannel: waiting callers get the line on their PHONE -
+    position updates through the queue's bound SMS channel (telnyx_sms or
+    the any-gateway generic_sms contract). Every send - delivered,
+    skipped, failed - is recorded on the entry and the session timeline."""
+    from ..services import voice_queue as queue_svc
+    from ..services import voice_waiting as waiting_svc
+
+    body = body or QueueSmsBody()
+    try:
+        row = await queue_svc.load_queue(db, getattr(user, "id", None), queue_id)
+        return await waiting_svc.sms_update_pass(
+            db, row, entry_ids=[body.entry_id] if body.entry_id else None,
+            event=body.event)
+    except (queue_svc.VoiceQueueError, waiting_svc.WaitingError) as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
 # v70: the media transport - providers push call audio over a websocket
 # ---------------------------------------------------------------------------
 
@@ -1084,6 +1152,12 @@ async def media_stream(websocket: WebSocket, session_id: str):
     (honest - the transport never invents words); ``turn`` with the TTS
     contract result of the handler run; ``barge_in`` when speech starts
     over an active utterance; ``stream_stopped`` with the final counters.
+    v77 PUSHES: the platform also speaks FIRST on this socket while the
+    stream runs - ``chat`` (a meeting chat message for this leg),
+    ``queue_position`` (the held caller's place in line changed) and
+    ``audio`` (spoken audio, e.g. the queue announcement's TTS) - pushed
+    through voice_push whenever the platform, not the caller, has
+    something to say.
 
     The voice session owns all the semantics: media events run through the
     SAME state machine, turns run the SAME handler workflow, barge-in is
@@ -1127,6 +1201,9 @@ async def media_stream(websocket: WebSocket, session_id: str):
 
     stats = transport.MediaStreamStats()
     segmenter = transport.UtteranceSegmenter()
+    # v77: register the socket with the push hub - chat frames, queue
+    # positions and announcement audio reach this leg while the stream runs
+    push_sock = voice_push.register(session_id, websocket)
     stream_open = False
     chunks_since_flush = 0
     # the start frame's customParameters (encoding, sample_rate, asr_engine...)
@@ -1313,6 +1390,7 @@ async def media_stream(websocket: WebSocket, session_id: str):
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        voice_push.unregister(session_id, push_sock)
         if stream_open:
             try:
                 await _record("media.stream_stopped", {**stats.snapshot(), "aborted": True})

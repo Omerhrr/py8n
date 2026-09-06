@@ -500,6 +500,25 @@ async def post_chat_message(db: AsyncSession, owner_id: str | None, meeting_id: 
     out = {"message": _message_out(row), "meeting": await meeting_out(db, meeting)}
     if agent_reply is not None:
         out["agent_reply"] = _message_out(agent_reply)
+    # v77: the room's web legs hear the chat NOW - the message rides their
+    # live media websocket as a push frame (best-effort transport; the chat
+    # log above is the source of truth either way)
+    from . import voice_push
+
+    leg_ids = [p.session_id for p in await _participants(db, meeting.id)
+               if p.session_id]
+    push = await voice_push.push_to_session_legs(
+        leg_ids, {"event": "chat", "meeting_id": meeting.id,
+                  "message": _message_out(row)})
+    delivered = push["delivered"]
+    if agent_reply is not None:
+        reply_push = await voice_push.push_to_session_legs(
+            leg_ids, {"event": "chat", "meeting_id": meeting.id,
+                      "message": _message_out(agent_reply)})
+        delivered += reply_push["delivered"]
+    out["push"] = {"legs": push["legs"], "delivered": delivered,
+                   "note": "frames accepted by live media websockets in this "
+                           "process - the chat log is the source of truth"}
     return out
 
 

@@ -113,7 +113,7 @@ const chatForm = ref({ text: '', participant_id: '', author: '', ask_agent: fals
 const chatBusy = ref(false)
 const queues = ref<any[]>([])
 const selectedQueue = ref<any>(null)
-const queueForm = ref({ name: '', meeting_id: '' })
+const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '' })
 const queueEntryForm = ref({ session_id: '' })
 const queueBusy = ref(false)
 
@@ -375,18 +375,56 @@ async function callNextHand(m: any) {
 }
 
 // v76: channel queues - the waiting room on the channel side
+// v77: the waiting experience rides the queue config (spoken positions + SMS backchannel)
 async function createQueue() {
   queueBusy.value = true
   try {
     const created = await api('/voice/queues', {
       method: 'POST',
       body: JSON.stringify({ name: queueForm.value.name,
-                              meeting_id: queueForm.value.meeting_id || null }) })
-    queueForm.value = { name: '', meeting_id: '' }
+                              meeting_id: queueForm.value.meeting_id || null,
+                              config: {
+                                announce: { enabled: true,
+                                            interval_seconds: Number(queueForm.value.announce_interval) || 60 },
+                                sms: { enabled: queueForm.value.sms_enabled,
+                                       channel_id: queueForm.value.sms_channel_id || '' } } }) })
+    queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '' }
     await load()
     await openQueue(created)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'queue create failed'
+  } finally { queueBusy.value = false }
+}
+
+// v77: the held legs are SPOKEN to (TTS through the registered engines -
+// media websocket for web legs, provider speak for carrier legs)
+async function announceQueue(q: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/announce`, {
+      method: 'POST', body: JSON.stringify({ force: true }) })
+    const hit = (res.announced || []).find((a: any) => a.announced)
+    const skip = (res.announced || [])[0]
+    note.value = hit ? `announced #${hit.position} of ${hit.depth} (${hit.delivery?.path})`
+      : skip ? `not spoken: ${skip.delivery?.detail || skip.reason || 'not due'}` : 'nobody waiting'
+    await openQueue(q)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'announce failed'
+  } finally { queueBusy.value = false }
+}
+
+// v77: the SMS backchannel - waiting callers get the line on their phone
+async function textQueueWaiters(q: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/sms-update`, {
+      method: 'POST', body: JSON.stringify({ event: 'position' }) })
+    const first = (res.sent || [])[0]
+    note.value = first ? `texted #${first.position}: ${first.delivery} - ${first.detail || first.text}`
+      : 'nobody waiting to text'
+    await openQueue(q)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'sms update failed'
   } finally { queueBusy.value = false }
 }
 
@@ -1025,7 +1063,7 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Hourglass class="w-4 h-4 text-cyan-400" /> Channel queues ({{ queues.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">queueing &amp; waiting on the channel side · held calls · FIFO · seat into a meeting on the SAME call</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">queueing &amp; waiting · spoken positions on the held leg · SMS backchannel · chat pushed to web legs</span>
         </h2>
         <div class="flex flex-wrap items-end gap-2">
           <label class="text-xs text-zinc-500">name <input v-model="queueForm.name" class="input input-xs w-40" placeholder="Support line" /></label>
@@ -1035,6 +1073,12 @@ onMounted(load)
               <option v-for="m in meetings.filter((m: any) => m.state === 'active')" :key="m.id" :value="m.id">{{ m.title || 'room' }}</option>
             </select>
           </label>
+          <label class="text-xs text-zinc-500">announce every <input v-model.number="queueForm.announce_interval" type="number" min="10" max="3600" class="input input-xs w-16" />s</label>
+          <label class="text-xs text-zinc-500 flex items-center gap-1"><input v-model="queueForm.sms_enabled" type="checkbox" class="checkbox checkbox-xs" /> SMS backchannel</label>
+          <select v-if="queueForm.sms_enabled" v-model="queueForm.sms_channel_id" class="input input-xs w-44">
+            <option value="">- sms channel -</option>
+            <option v-for="ep in endpoints.filter((e: any) => e.channel === 'sms')" :key="ep.id" :value="ep.id">{{ ep.name }} ({{ ep.provider }})</option>
+          </select>
           <button class="btn btn-ghost text-xs" :disabled="queueBusy || !queueForm.name" @click="createQueue"><Plus class="w-3.5 h-3.5" /> New queue</button>
         </div>
         <p v-if="!queues.length" class="text-sm text-zinc-500">No queues yet - a queue holds live calls in the line (session state on_hold), derives positions and wait times, and seats the head into a destination room.</p>
@@ -1048,6 +1092,8 @@ onMounted(load)
               <span v-if="q.meeting_name" class="text-xs text-sky-300">→ {{ q.meeting_name }}</span>
             </div>
             <div class="flex items-center gap-2">
+              <button class="btn btn-ghost text-xs" :disabled="queueBusy" title="speak the positions on the held legs (TTS)" @click="announceQueue(q)">Announce</button>
+              <button v-if="q.config?.sms?.enabled" class="btn btn-ghost text-xs" :disabled="queueBusy" title="text the positions through the bound SMS channel" @click="textQueueWaiters(q)">Text waiters</button>
               <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="seatQueueNext(q)">Seat next</button>
               <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="toggleQueueState(q)">{{ q.state === 'open' ? 'Close' : 'Open' }}</button>
               <button class="btn btn-ghost text-xs" @click="openQueue(q)">Open</button>
@@ -1071,6 +1117,8 @@ onMounted(load)
             <span v-if="e.waited_seconds !== null">{{ e.waited_seconds }}s</span>
             <span v-if="e.expired" class="text-amber-300">SLA breached</span>
             <span v-if="e.abandoned" class="text-rose-300">abandoned (caller hung up)</span>
+            <span v-if="e.meta?.announcements" class="text-emerald-300" title="queue-position announcements spoken on the held leg">🔊 {{ e.meta.announcements }}</span>
+            <span v-for="(sm, i) in (e.meta?.sms || []).slice(-2)" :key="i" class="text-sky-300" :title="sm.text">✉ {{ sm.delivery }}</span>
             <button v-if="e.status === 'waiting'" class="btn btn-ghost text-[11px] px-1.5" :disabled="queueBusy" @click="queueLeave(selectedQueue, e)">Release</button>
           </div>
           <p v-for="n in selectedQueue.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
