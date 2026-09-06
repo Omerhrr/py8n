@@ -109,6 +109,11 @@ async def event_contracts():
             "media": ["media.session_started", "media.session_ended",
                       "media.participant_added"],
             "campaign": ["callback.scheduled"],
+            # v81: the system runtime's own operations ride the same door -
+            # a workflow can subscribe to system.* and react to the platform
+            "system": ["system.installed", "system.started", "system.stopped",
+                       "system.paused", "system.resumed", "system.upgraded",
+                       "system.component_added", "system.component_removed"],
         },
         "trigger_node": {
             "type": "event_trigger",

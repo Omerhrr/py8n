@@ -123,5 +123,16 @@ async def init_db() -> None:
             # v74: the real LLM credential behind an openai_compatible brain
             if "llm_credential_id" not in va_cols:
                 sync_conn.execute(text("ALTER TABLE voice_agents ADD COLUMN llm_credential_id VARCHAR(36)"))
+            # v81: the system runtime - lifecycle + solution provenance on
+            # py8n_systems (pre-v81 systems have been operating since
+            # creation, so the honest default is 'running')
+            sys_cols = {c["name"] for c in insp.get_columns("py8n_systems")}
+            if "lifecycle" not in sys_cols:
+                sync_conn.execute(text("ALTER TABLE py8n_systems ADD COLUMN lifecycle VARCHAR(20) DEFAULT 'running'"))
+                sync_conn.execute(text("UPDATE py8n_systems SET lifecycle = 'running' WHERE lifecycle IS NULL"))
+            if "source_solution_slug" not in sys_cols:
+                sync_conn.execute(text("ALTER TABLE py8n_systems ADD COLUMN source_solution_slug VARCHAR(140)"))
+            if "upgraded_at" not in sys_cols:
+                sync_conn.execute(text("ALTER TABLE py8n_systems ADD COLUMN upgraded_at TIMESTAMP"))
 
         await conn.run_sync(_add_missing_columns)

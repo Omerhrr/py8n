@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
     App,
+    ChannelQueue,
     Dashboard,
     Dataset,
     ExecutionLog,
@@ -33,11 +34,16 @@ from ..models import (
     ScheduledReport,
     SystemComponent,
     TrainedModel,
+    VoiceAgent,
+    VoiceMeeting,
     Workflow,
 )
 from .health import compute_health
 
-COMPONENT_KINDS = ("workflow", "dataset", "app", "dashboard", "model", "report", "model_system")
+# v81: the interaction layer joins the estate - a system covers
+# Interactions (agents, waiting rooms, rooms), not just data plumbing.
+COMPONENT_KINDS = ("workflow", "dataset", "app", "dashboard", "model", "report", "model_system",
+                   "voice_agent", "queue", "meeting")
 KIND_TABLES = {
     "workflow": Workflow,
     "dataset": Dataset,
@@ -46,6 +52,9 @@ KIND_TABLES = {
     "model": TrainedModel,
     "report": ScheduledReport,
     "model_system": ModelSystem,  # v63: the model-building operating unit
+    "voice_agent": VoiceAgent,    # v81: the phone agent
+    "queue": ChannelQueue,        # v81: the channel-side waiting room
+    "meeting": VoiceMeeting,      # v81: the (persistent) room
 }
 HEALTH_BUDGET = 10  # datasets fully health-scored per system-health call
 
@@ -251,5 +260,9 @@ def system_summary(db_rows: Py8nSystem) -> dict:
         "color": db_rows.color,
         "components": _slug_counts(comps),
         "total_components": len(comps),
+        # v81: the runtime identity rides every summary and card
+        "lifecycle": db_rows.lifecycle or "running",
+        "source_solution_slug": db_rows.source_solution_slug,
+        "upgraded_at": db_rows.upgraded_at.isoformat() if db_rows.upgraded_at else None,
         "created_at": db_rows.created_at.isoformat() if db_rows.created_at else None,
     }

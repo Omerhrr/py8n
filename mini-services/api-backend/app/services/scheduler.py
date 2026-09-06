@@ -45,12 +45,18 @@ async def shutdown_scheduler() -> None:
 async def _fire_scheduled_workflow(workflow_id: str, node_id: str) -> None:
     """Job callback: dispatch an execution for a schedule trigger node."""
     from .dispatcher import dispatch_execution
+    from . import system_runtime
 
     async with AsyncSessionLocal() as session:
         wf = (
             await session.execute(select(Workflow).where(Workflow.id == workflow_id))
         ).scalar_one_or_none()
     if wf is None or not wf.is_active:
+        return
+    # v81: the system lifecycle gate - a tick on a workflow whose system is
+    # paused/stopped returns honestly instead of firing
+    if await system_runtime.workflow_gated(session, workflow_id):
+        logger.info("Schedule tick held: workflow %s's system is not running", workflow_id)
         return
     nodes = wf.schedule_nodes()
     if not any(n["id"] == node_id for n in nodes):
@@ -85,6 +91,7 @@ async def _poll_dataset_trigger(workflow_id: str, node_id: str) -> None:
     from sqlalchemy import select as _select
 
     from ..models import Dataset, DatasetVersion, IngestionState
+    from . import system_runtime
     from .dispatcher import dispatch_execution
     from .ingestion import state_key, watermark_gt
 
@@ -93,6 +100,10 @@ async def _poll_dataset_trigger(workflow_id: str, node_id: str) -> None:
             await session.execute(select(Workflow).where(Workflow.id == workflow_id))
         ).scalar_one_or_none()
         if wf is None or not wf.is_active:
+            return
+        # v81: the system lifecycle gate holds the poll too
+        if await system_runtime.workflow_gated(session, workflow_id):
+            logger.info("Dataset-trigger poll held: workflow %s's system is not running", workflow_id)
             return
         node = next((n for n in wf.dataset_trigger_nodes() if n["id"] == node_id), None)
         if node is None:

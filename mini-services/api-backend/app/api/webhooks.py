@@ -180,6 +180,16 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
     node = wf.webhook_nodes()[0]
     params = node.get("parameters") or {}
     _enforce_webhook_auth(request, params)  # v23: 401 before the flow runs
+    # v81: the system lifecycle gate - a webhook hit is the system reacting,
+    # so a workflow whose system is paused/stopped is refused loudly (409):
+    # the caller learns the system is not operating instead of the hit
+    # vanishing into a silent hole.
+    from ..services import system_runtime
+    if await system_runtime.workflow_gated(db, workflow_id):
+        raise HTTPException(
+            status_code=409,
+            detail="this workflow's system is not running (paused or stopped) - "
+                   "start the system to serve its webhooks")
     # v68: serving tokens - a deployment-backed workflow with >=1 active
     # token demands it (Bearer / X-Deployment-Token) before the flow runs.
     try:

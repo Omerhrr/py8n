@@ -148,7 +148,7 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         for ds in result.get("datasets", []):
             db.add(SystemComponent(system_id=sys_row.id, kind="dataset", ref_id=ds["id"]))
         await db.flush()
-        system_ref = {"id": sys_row.id, "name": sys_row.name}
+        system_ref = {"id": sys_row.id, "name": sys_row.name, "row": sys_row}
 
     model_system_ref = None
     if body and body.as_model_system:
@@ -291,6 +291,50 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
                                 "bind config.callback.endpoint_id on the queue (a telnyx voice endpoint) "
                                 "- dial_callbacks refuses until the dialer has somewhere to dial through",
                             ]}
+
+    # v81: the system runtime - the installed system is a RUNNING entity with
+    # solution provenance and the interaction layer bound as components. The
+    # workflows keep the pack pipeline's inactive honesty; the lifecycle gate
+    # is open (running) and start's activate_workflows door boots them loudly.
+    if system_ref:
+        from sqlalchemy import select as _select
+
+        from ..models import SystemComponent
+        from ..services import system_runtime
+
+        sys_row = system_ref["row"]
+        _bound = {(c.kind, c.ref_id) for c in
+                  (await db.execute(
+                      _select(SystemComponent).where(SystemComponent.system_id == sys_row.id)
+                  )).scalars().all()}
+
+        def _bind(kind: str, ref_id: str) -> None:
+            if ref_id and (kind, ref_id) not in _bound:
+                db.add(SystemComponent(system_id=sys_row.id, kind=kind, ref_id=ref_id))
+                _bound.add((kind, ref_id))
+
+        if voice_agent_ref:
+            _bind("voice_agent", voice_agent_ref["id"])
+            # the agent's handler is a system workflow too (the pack handler
+            # itself when bound directly, the scaffold otherwise) - the gate
+            # and the metrics must see it
+            _bind("workflow", voice_agent_ref.get("handler_workflow_id"))
+        if support_line_ref:
+            _bind("meeting", support_line_ref["meeting"]["id"])
+            _bind("queue", support_line_ref["queue"]["id"])
+        await db.flush()
+        comp_rows = (await db.execute(
+            _select(SystemComponent).where(SystemComponent.system_id == sys_row.id)
+        )).scalars().all()
+        counts: dict[str, int] = {}
+        for c in comp_rows:
+            counts[c.kind] = counts.get(c.kind, 0) + 1
+        await system_runtime.install_mark(
+            db, sys_row, solution_slug=s.slug, actor=owner or "system",
+            component_counts=counts)
+        system_ref = {"id": sys_row.id, "name": sys_row.name,
+                      "lifecycle": sys_row.lifecycle,
+                      "components": counts}
 
     await db.commit()
     return {

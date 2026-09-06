@@ -1,4 +1,4 @@
-"""Py8n Systems API (v61 + v62 governance) - the operating unit above workflows.
+"""Py8n Systems API (v61 + v62 governance + v81 runtime) - the operating unit above workflows.
 
 * ``POST   /systems``                        - create a system
 * ``GET    /systems``                        - cards with component counts + verdict
@@ -7,18 +7,32 @@
 * ``GET    /systems/dependencies``           - cross-system dependency graph (v62)
 * ``GET    /systems/{id}``                   - detail: grouped components + health
 * ``PUT    /systems/{id}``                   - rename / redescribe / restyle
-* ``POST   /systems/{id}/components``        - bind workflow|dataset|app|dashboard|model|report|model_system
+* ``POST   /systems/{id}/components``        - bind workflow|dataset|app|dashboard|model|report|model_system|voice_agent|queue|meeting
 * ``DELETE /systems/{id}/components/{cid}``  - unbind
 * ``DELETE /systems/{id}``                   - dissolve (member objects are untouched)
 * ``GET/POST /systems/{id}/members``         - v62 role management
 * ``PUT/DELETE /systems/{id}/members/{uid}`` - v62 change / remove a member
 
+v81 SYSTEM RUNTIME - the operating environment verbs:
+
+* ``POST /systems/{id}/start|stop|pause|resume`` - the lifecycle. The gate
+  holds the system's workflows on every reactive path (event triggers,
+  schedule ticks, webhooks) without touching their own ``is_active``;
+  ``start`` may carry ``activate_workflows: true`` to turn pack-installed
+  inactive workflows on, loudly and on the record.
+* ``GET /systems/{id}/state``      - the runtime snapshot (gate, live interactions)
+* ``GET /systems/{id}/metrics``    - derived counters over a window
+* ``GET /systems/{id}/operations`` - the durable operations log
+* ``GET /systems/{id}/events``     - the system's event thread + component events
+* ``POST /systems/{id}/upgrade``   - re-apply the source solution's pack
+
 Every attach is resolved against the live table with owner scoping, so a
 system can never reference a foreign or nonexistent object. The health
-verdict is derived from the members at read time (nothing stored).
+verdict is derived from the members at read time (nothing stored); the
+operations log is the deliberate exception - it IS traffic state.
 
 v62 ROLES: the creator is the single owner (``owner_id``); invited members
-hold ``editor`` (bind/unbind/edit) or ``viewer`` (read-only) roles. A
+hold ``editor`` (bind/unbind/edit/operate) or ``viewer`` (read-only) roles. A
 system you are not part of looks nonexistent (404); an action above your
 role is 403. Auth-off installs (user None) keep full control.
 """
@@ -44,6 +58,7 @@ from ..services.py8n_systems import (
     system_summary,
 )
 from ..services.solutions import finalize_pack_dataset_names
+from ..services import system_runtime
 from ..services.system_governance import (
     RoleDenied,
     get_template,
@@ -88,6 +103,13 @@ class MemberInvite(BaseModel):
 
 class MemberRoleChange(BaseModel):
     role: str = Field(..., description="editor | viewer")
+
+
+class LifecycleAction(BaseModel):
+    """Body for start/stop/pause/resume. ``activate_workflows`` only means
+    something on start: turn every bound workflow's is_active ON (the loud,
+    on-the-record door for pack installs that land inactive)."""
+    activate_workflows: bool = Field(default=False)
 
 
 async def _get_system(db: AsyncSession, system_id: str, user, min_role: str = "viewer") -> tuple[Py8nSystem, str]:
@@ -276,6 +298,14 @@ async def attach_component(system_id: str, body: ComponentAttach, user=Depends(g
         raise HTTPException(status_code=409, detail="that object is already bound to this system")
     comp = SystemComponent(system_id=s.id, kind=body.kind, ref_id=body.ref_id)
     db.add(comp)
+    await db.flush()
+    # v81: the runtime sees the membership change - on the record, on the wire
+    op = await system_runtime.record_operation(
+        db, s, "component_added", getattr(user, "id", None) or "system",
+        {"kind": body.kind, "ref_id": body.ref_id, "component_id": comp.id})
+    await system_runtime._emit_system_event(
+        db, s, "system.component_added",
+        {"operation_id": op.id, "kind": body.kind, "ref_id": body.ref_id})
     await db.commit()
     await db.refresh(comp)
     fresh = await _reload_summary(db, s.id)
@@ -289,7 +319,12 @@ async def detach_component(system_id: str, component_id: str, user=Depends(get_o
     comp = await db.get(SystemComponent, component_id)
     if comp is None or comp.system_id != s.id:
         raise HTTPException(status_code=404, detail="Component not found")
+    detail = {"kind": comp.kind, "ref_id": comp.ref_id, "component_id": comp.id}
     await db.delete(comp)
+    op = await system_runtime.record_operation(
+        db, s, "component_removed", getattr(user, "id", None) or "system", detail)
+    await system_runtime._emit_system_event(
+        db, s, "system.component_removed", {"operation_id": op.id, **detail})
     await db.commit()
 
 
@@ -298,6 +333,102 @@ async def delete_system(system_id: str, user=Depends(get_optional_user), db: Asy
     s, _role = await _get_system(db, system_id, user, min_role="owner")
     await db.delete(s)  # components cascade; member objects are untouched
     await db.commit()
+
+
+# ------------------------------------------------------------------ v81
+# the system runtime - lifecycle verbs, runtime reads
+
+
+async def _apply_verb(system_id: str, verb: str, body: LifecycleAction | None,
+                      user, db: AsyncSession) -> dict:
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        result = await system_runtime.apply_lifecycle(
+            db, s, verb, actor=getattr(user, "id", None) or "system",
+            activate_workflows=bool(body.activate_workflows) if body else False)
+    except system_runtime.SystemRuntimeError as exc:
+        msg = str(exc)
+        raise HTTPException(status_code=409 if "cannot" in msg or "corrupted" in msg else 400,
+                            detail=msg) from exc
+    await db.commit()
+    fresh = await _reload_summary(db, s.id)
+    return {**result, "lifecycle": fresh["lifecycle"]}
+
+
+@router.post("/{system_id}/start")
+async def start_system(system_id: str, body: LifecycleAction | None = None,
+                       user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Open the gate: the system's workflows react again (events, schedules,
+    webhooks). activate_workflows=true also flips their is_active ON."""
+    return await _apply_verb(system_id, "start", body, user, db)
+
+
+@router.post("/{system_id}/stop")
+async def stop_system(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Close the gate: every reactive path holds. is_active flags are
+    untouched; live interactions are not killed - they finish honestly."""
+    return await _apply_verb(system_id, "stop", None, user, db)
+
+
+@router.post("/{system_id}/pause")
+async def pause_system(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """A temporary hold - same gate as stop, but resume (not start) reopens."""
+    return await _apply_verb(system_id, "pause", None, user, db)
+
+
+@router.post("/{system_id}/resume")
+async def resume_system(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Reopen a paused system."""
+    return await _apply_verb(system_id, "resume", None, user, db)
+
+
+@router.get("/{system_id}/state")
+async def state(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The runtime snapshot: the gate, the workflows it holds, live
+    interactions, last activity. Derived at read time."""
+    s, my_role = await _get_system(db, system_id, user)
+    return {**(await system_runtime.system_state(db, s)), "my_role": my_role}
+
+
+@router.get("/{system_id}/metrics")
+async def metrics(system_id: str, hours: int = 24,
+                  user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Derived counters over a window (executions by status, lifecycle
+    events, operations)."""
+    s, _role = await _get_system(db, system_id, user)
+    return await system_runtime.system_metrics(db, s, hours=hours)
+
+
+@router.get("/{system_id}/operations")
+async def operations(system_id: str, limit: int = 50,
+                     user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The durable operations log - every verb the runtime accepted."""
+    s, _role = await _get_system(db, system_id, user)
+    return {"operations": await system_runtime.list_operations(db, s, limit=limit)}
+
+
+@router.get("/{system_id}/events")
+async def system_events_view(system_id: str, limit: int = 100,
+                             user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The system's event view: lifecycle events on the system's correlation
+    thread + component events whose target is a bound object."""
+    s, _role = await _get_system(db, system_id, user)
+    return {"events": await system_runtime.system_scoped_events(db, s, limit=limit)}
+
+
+@router.post("/{system_id}/upgrade")
+async def upgrade(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Re-apply the source solution's pack and reconcile components. New
+    workflows/datasets bind; same-name objects are reported and left
+    untouched - a running system is never rewritten under itself."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        result = await system_runtime.upgrade_from_solution(
+            db, s, actor=getattr(user, "id", None) or "system")
+    except system_runtime.SystemRuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return result
 
 
 # ------------------------------------------------------------------ v62

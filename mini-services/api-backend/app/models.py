@@ -848,6 +848,16 @@ class Py8nSystem(Base):
     IS stored - but everything the system REPORTS about itself (health,
     activity, freshness) is derived from the member objects at read
     time and can never drift.
+
+    v81 - the SYSTEM RUNTIME: a system is not just a grouping, it is a
+    RUNNING ENTITY with a lifecycle. ``lifecycle`` gates every reactive
+    path its workflows have (event triggers, schedule ticks, webhooks):
+    a system that is ``paused`` or ``stopped`` holds its workflows still
+    WITHOUT touching their own ``is_active`` (the user's per-workflow
+    intent survives the operation; starting the system restores exactly
+    what was active). ``source_solution_slug`` remembers the marketplace
+    solution the system was installed from, so ``upgrade`` can re-apply
+    that solution's pack and reconcile the components.
     """
 
     __tablename__ = "py8n_systems"
@@ -858,6 +868,12 @@ class Py8nSystem(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     icon: Mapped[str] = mapped_column(String(60), default="boxes")
     color: Mapped[str] = mapped_column(String(20), default="#f97316")
+    # v81 runtime: running | paused | stopped (pre-v81 systems have been
+    # operating since creation, so the honest default is running)
+    lifecycle: Mapped[str] = mapped_column(String(20), nullable=False, default="running", index=True)
+    # v81: the marketplace solution this system was installed from (upgrade door)
+    source_solution_slug: Mapped[str | None] = mapped_column(String(140), nullable=True)
+    upgraded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -868,12 +884,40 @@ class Py8nSystem(Base):
     )
 
 
+class SystemOperation(Base):
+    """One lifecycle/management operation on a system (v81).
+
+    The system's OPERATIONS LOG - the durable audit of the verbs the
+    runtime accepted: installed, started, stopped, paused, resumed,
+    upgraded, component_added, component_removed. Like campaign targets
+    and serving-token hits, this is the deliberate exception to
+    derived-never-stored: an operations log is state about TRAFFIC (who
+    did what, when, with what result), so it is written, never rebuilt.
+
+    ``actor`` is the user id (or ``system`` when the platform itself
+    performed the step, e.g. an install). ``detail`` carries the verb's
+    own facts (lifecycle from/to, activated workflow count, upgrade diff).
+    """
+
+    __tablename__ = "system_operations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    system_id: Mapped[str] = mapped_column(ForeignKey("py8n_systems.id", ondelete="CASCADE"), index=True)
+    verb: Mapped[str] = mapped_column(String(40), nullable=False)
+    actor: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    detail: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
+
+
 class SystemComponent(Base):
     """One object bound to a system (v61).
 
     ``kind`` is one of workflow | dataset | app | dashboard | model |
-    report - resolved and validated against the live table on attach, so
-    a system can never reference an object that does not exist.
+    report | model_system - resolved and validated against the live table
+    on attach, so a system can never reference an object that does not
+    exist. v81 adds the interaction layer: voice_agent | queue | meeting
+    (the support line's phone agent, waiting room and room are components
+    too - the system covers Interactions, not just data).
     """
 
     __tablename__ = "system_components"

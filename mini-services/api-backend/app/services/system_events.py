@@ -276,18 +276,28 @@ async def dispatch_for_event(db: AsyncSession, event: dict) -> list[dict]:
     Fire-and-forget on purpose: the event returns immediately; the runs
     are real executions (trigger_type=event) whose failures land in their
     own logs. One dispatch per workflow even when several triggers match.
+
+    v81: the system lifecycle gate rides here - a workflow bound to a
+    paused/stopped system does not react (at least one RUNNING binding
+    keeps a multi-system workflow alive; unbound workflows are ungated).
     """
     from . import executor
+    from . import system_runtime
 
     owner_id = event.get("owner_id")
     q = select(Workflow).where(Workflow.is_active.is_(True))
     if owner_id is not None:
         q = q.where(Workflow.owner_id == owner_id)
     workflows = (await db.execute(q)).scalars().all()
+    matching = [wf for wf in workflows
+                if any(_event_matches(_params_of(n), event) for n in _trigger_nodes_of(wf))]
+    if not matching:
+        return []
+    gate = await system_runtime.lifecycle_gate_map(db, [wf.id for wf in matching])
     dispatched: list[dict] = []
-    for wf in workflows:
-        if not any(_event_matches(_params_of(n), event) for n in _trigger_nodes_of(wf)):
-            continue
+    for wf in matching:
+        if gate.get(wf.id, False):
+            continue  # the workflow's system is paused/stopped - it holds still
         exec_id = await executor.dispatch_inline(
             wf.id, trigger_type="event",
             trigger_payload={"event": event}, owner_id=wf.owner_id)

@@ -715,4 +715,4 @@ def test_v79_sms_auto_answer_abandon_and_guards():
 def test_v79_version_pin():
     from app.config import settings
 
-    assert settings.version == "1.80.0"
+    assert settings.version == "1.81.0"

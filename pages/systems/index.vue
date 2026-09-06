@@ -4,7 +4,7 @@ import {
   Loader2, Boxes, Plus, CheckCircle2, XCircle, AlertTriangle, X,
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
-  Layers,
+  Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -14,11 +14,16 @@ import { useApi } from '~/composables/useApi'
 // the system REPORTS (health, activity) is derived from the members.
 // v62 governance: role-specific templates, per-system roles (owner /
 // editor / viewer) and the cross-system dependency map.
+// v81 runtime: systems are RUNNING entities - lifecycle (start / pause /
+// resume / stop) gates every reactive path its workflows have, an
+// operations log records every verb, and a solution-installed system can
+// be UPGRADED from its source solution's pack.
 
 interface SystemCard {
   id: string; name: string; description: string; icon: string; color: string
   components: Record<string, number>; total_components: number
   verdict: string; created_at: string | null; my_role?: string
+  lifecycle?: string; source_solution_slug?: string | null
 }
 interface SystemDetail extends SystemCard {
   grouped: Record<string, { component_id: string; kind: string; ref_id: string; name: string; added_at: string | null }[]>
@@ -93,6 +98,9 @@ const KIND_META: Record<string, { label: string; icon: any; ref: (id: string) =>
   model: { label: 'Models', icon: Network, ref: () => `/models`, color: 'text-pink-400' },
   report: { label: 'Reports', icon: FileBarChart, ref: () => `/reports`, color: 'text-cyan-400' },
   model_system: { label: 'Model systems', icon: BrainCircuit, ref: (id) => `/model-systems`, color: 'text-indigo-400' },
+  voice_agent: { label: 'Voice agents', icon: Phone, ref: () => `/channels`, color: 'text-emerald-400' },
+  queue: { label: 'Queues', icon: Hourglass, ref: () => `/channels`, color: 'text-amber-400' },
+  meeting: { label: 'Rooms', icon: Video, ref: () => `/channels`, color: 'text-rose-400' },
 }
 const KINDS = Object.keys(KIND_META)
 
@@ -105,6 +113,68 @@ const verdictMeta: Record<string, { chip: string; label: string }> = {
 
 const canEdit = computed(() => detail.value && ['owner', 'editor'].includes(detail.value.my_role || ''))
 const isOwner = computed(() => detail.value?.my_role === 'owner')
+
+// ---- v81: the runtime - lifecycle, state, operations ----
+interface OperationRow { id: string; verb: string; actor: string; detail: any; created_at: string | null }
+const runtimeState = ref<any>(null)
+const operations = ref<OperationRow[]>([])
+const lifecycleBusy = ref(false)
+const runtimeNote = ref('')
+
+const lifecycleMeta: Record<string, { chip: string; label: string }> = {
+  running: { chip: 'bg-emerald-500/15 text-emerald-300', label: 'running' },
+  paused: { chip: 'bg-amber-500/15 text-amber-300', label: 'paused' },
+  stopped: { chip: 'bg-zinc-500/20 text-zinc-400', label: 'stopped' },
+}
+
+async function loadRuntime(id: string) {
+  try {
+    const [st, ops] = await Promise.all([
+      api.get<any>(`/systems/${id}/state`),
+      api.get<any>(`/systems/${id}/operations?limit=30`),
+    ])
+    runtimeState.value = st
+    operations.value = ops.operations || []
+  } catch { runtimeState.value = null; operations.value = [] }
+}
+
+async function lifecycle(verb: string, activateWorkflows = false) {
+  if (!detail.value) return
+  lifecycleBusy.value = true
+  runtimeNote.value = ''
+  try {
+    const body = verb === 'start' ? { activate_workflows: activateWorkflows } : {}
+    const res = await api.post<any>(`/systems/${detail.value.id}/${verb}`, body)
+    const n = res.workflows_activated
+    runtimeNote.value = n ? `${verb}: ${n} workflow(s) activated` : `${verb} - the gate is ${res.lifecycle}`
+    await openDetail(detail.value.id)
+    await loadSystems()
+  } catch (e: any) {
+    runtimeNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || `${verb} failed`
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
+
+async function upgrade() {
+  if (!detail.value) return
+  lifecycleBusy.value = true
+  runtimeNote.value = ''
+  try {
+    const res = await api.post<any>(`/systems/${detail.value.id}/upgrade`, {})
+    const added = (res.added?.workflow || 0) + (res.added?.dataset || 0)
+    runtimeNote.value = res.imports_skipped
+      ? 'upgrade: everything the solution offers is already bound - nothing changed'
+      : `upgrade: ${added} new component(s) bound${res.same_name_left_untouched?.length ? `, ${res.same_name_left_untouched.length} same-name object(s) left unbound` : ''}`
+    await openDetail(detail.value.id)
+  } catch (e: any) {
+    runtimeNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || 'Upgrade failed'
+  } finally {
+    lifecycleBusy.value = false
+  }
+}
 
 async function loadSystems() {
   try {
@@ -135,6 +205,7 @@ async function openDetail(id: string) {
     detail.value = await api.get<SystemDetail>(`/systems/${id}`)
     const m = await api.get<any>(`/systems/${id}/members`)
     members.value = m.members || []
+    await loadRuntime(id)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load the system'
   } finally {
@@ -181,6 +252,7 @@ async function openAttach(kind: string) {
     workflow: '/workflows', dataset: '/datasets', app: '/apps',
     dashboard: '/dashboards', model: '/models', report: '/reports',
     model_system: '/model-systems',
+    voice_agent: '/voice/agents', queue: '/voice/queues', meeting: '/voice/meetings',
   }
   try {
     const res = await api.get<any>(endpoints[kind])
@@ -304,7 +376,7 @@ onMounted(async () => {
           </div>
           <div class="min-w-0 flex-1">
             <h1 class="text-lg font-bold tracking-tight">Systems</h1>
-            <p class="-mt-0.5 text-[11px] text-zinc-500">Workflows + datasets + apps + agents as one operating unit - health derived, never stored</p>
+            <p class="-mt-0.5 text-[11px] text-zinc-500">Operating units with a lifecycle - start, pause, stop, upgrade; health derived, never stored</p>
           </div>
           <button
             class="flex items-center gap-1.5 rounded-xl bg-orange-500 px-3.5 py-2 text-xs font-bold text-white transition hover:bg-orange-400"
@@ -410,6 +482,9 @@ onMounted(async () => {
               <div class="min-w-0 flex-1">
                 <p class="text-sm font-bold leading-tight">{{ s.name }}</p>
                 <span class="mt-1 inline-block rounded-full px-2 py-0.5 text-[9px] font-bold uppercase" :class="verdictMeta[s.verdict]?.chip">{{ verdictMeta[s.verdict]?.label || s.verdict }}</span>
+                <span v-if="s.lifecycle" class="ml-1 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase" :class="lifecycleMeta[s.lifecycle]?.chip">
+                  <span class="h-1.5 w-1.5 rounded-full" :class="s.lifecycle === 'running' ? 'animate-pulse bg-emerald-400' : s.lifecycle === 'paused' ? 'bg-amber-400' : 'bg-zinc-500'" /> {{ s.lifecycle }}
+                </span>
                 <span v-if="s.my_role && s.my_role !== 'owner'" class="ml-1 inline-block rounded-full bg-zinc-800 px-2 py-0.5 text-[9px] font-bold uppercase text-zinc-400">{{ s.my_role }}</span>
               </div>
             </div>
@@ -515,9 +590,64 @@ onMounted(async () => {
               <ShieldCheck class="h-3 w-3" /> you are {{ detail.my_role }}
             </span>
             <span class="rounded-full px-2.5 py-1 text-[10px] font-bold uppercase" :class="verdictMeta[detail.health.verdict]?.chip">{{ verdictMeta[detail.health.verdict]?.label }}</span>
+            <span v-if="detail.lifecycle" class="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase" :class="lifecycleMeta[detail.lifecycle]?.chip">
+              <span class="h-1.5 w-1.5 rounded-full" :class="detail.lifecycle === 'running' ? 'animate-pulse bg-emerald-400' : detail.lifecycle === 'paused' ? 'bg-amber-400' : 'bg-zinc-500'" /> {{ detail.lifecycle }}
+            </span>
             <button v-if="isOwner" class="rounded-xl border border-rose-500/30 bg-rose-500/5 p-2 text-rose-300 transition hover:bg-rose-500/15" title="Dissolve system (members stay)" @click="dissolve(detail)">
               <Trash2 class="h-3.5 w-3.5" />
             </button>
+          </div>
+
+          <!-- v81: the runtime bar - lifecycle controls + the gate's honest note -->
+          <div class="mb-5 rounded-2xl border border-orange-500/25 bg-orange-500/5 p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <Activity class="h-3.5 w-3.5 text-orange-300" />
+              <h3 class="text-xs font-bold text-orange-200">Runtime</h3>
+              <span class="text-[10px] text-zinc-500">the gate holds this system's workflows on events, schedules and webhooks when it is not running</span>
+              <div class="ml-auto flex flex-wrap items-center gap-1.5">
+                <template v-if="canEdit">
+                  <button v-if="detail.lifecycle === 'stopped'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('start')">
+                    <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Play class="h-3 w-3" /> Start
+                  </button>
+                  <button v-if="detail.lifecycle === 'stopped'" class="flex items-center gap-1 rounded-xl border border-emerald-500/40 px-3 py-1.5 text-[11px] font-bold text-emerald-300 transition hover:bg-emerald-500/10 disabled:opacity-50" :disabled="lifecycleBusy" title="Start AND flip every bound workflow's is_active ON - the loud boot for pack installs" @click="lifecycle('start', true)">
+                    <Rocket class="h-3 w-3" /> Boot (activate workflows)
+                  </button>
+                  <button v-if="detail.lifecycle === 'paused'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('resume')">
+                    <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Play class="h-3 w-3" /> Resume
+                  </button>
+                  <button v-if="detail.lifecycle === 'running'" class="flex items-center gap-1 rounded-xl border border-amber-500/40 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('pause')">
+                    <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Pause class="h-3 w-3" /> Pause
+                  </button>
+                  <button v-if="detail.lifecycle !== 'stopped'" class="flex items-center gap-1 rounded-xl border border-zinc-700 px-3 py-1.5 text-[11px] font-bold text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('stop')">
+                    <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Square class="h-3 w-3" /> Stop
+                  </button>
+                  <button v-if="detail.source_solution_slug" class="flex items-center gap-1 rounded-xl border border-sky-500/40 px-3 py-1.5 text-[11px] font-bold text-sky-300 transition hover:bg-sky-500/10 disabled:opacity-50" :disabled="lifecycleBusy" :title="`Re-apply the '${detail.source_solution_slug}' solution pack`" @click="upgrade">
+                    <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Rocket class="h-3 w-3" /> Upgrade
+                  </button>
+                </template>
+                <span v-if="detail.source_solution_slug" class="rounded-full bg-sky-500/10 px-2 py-0.5 text-[9px] font-bold text-sky-300" title="Installed from a marketplace solution - upgrade re-applies its pack">from {{ detail.source_solution_slug }}</span>
+              </div>
+            </div>
+            <p v-if="runtimeNote" class="mt-2 rounded-xl bg-zinc-900/70 px-3 py-2 text-[11px] text-emerald-300">{{ runtimeNote }}</p>
+            <p v-else-if="runtimeState?.gate?.note" class="mt-2 text-[10px] text-zinc-500">{{ runtimeState.gate.note }}</p>
+            <div v-if="runtimeState" class="mt-3 grid gap-2 text-[10px] sm:grid-cols-4">
+              <div class="rounded-xl bg-zinc-900/60 px-3 py-2">
+                <p class="text-zinc-500">workflows</p>
+                <p class="text-sm font-bold">{{ runtimeState.workflows?.bound ?? 0 }} <span class="text-[10px] font-normal text-zinc-500">bound · {{ runtimeState.workflows?.active ?? 0 }} active</span></p>
+              </div>
+              <div class="rounded-xl bg-zinc-900/60 px-3 py-2">
+                <p class="text-zinc-500">held by the gate</p>
+                <p class="text-sm font-bold" :class="runtimeState.workflows?.gate_blocked ? 'text-amber-300' : 'text-zinc-300'">{{ runtimeState.workflows?.gate_blocked ?? 0 }}</p>
+              </div>
+              <div class="rounded-xl bg-zinc-900/60 px-3 py-2">
+                <p class="text-zinc-500">live now</p>
+                <p class="text-sm font-bold">{{ runtimeState.live?.active_calls ?? 0 }} calls · {{ runtimeState.live?.waiting_in_queues ?? 0 }} waiting · {{ runtimeState.live?.live_meetings ?? 0 }} rooms</p>
+              </div>
+              <div class="rounded-xl bg-zinc-900/60 px-3 py-2">
+                <p class="text-zinc-500">last operation</p>
+                <p class="text-sm font-bold">{{ runtimeState.last_operation_verb || 'none' }} <span v-if="runtimeState.last_operation_at" class="text-[10px] font-normal text-zinc-500">{{ new Date(runtimeState.last_operation_at).toLocaleString() }}</span></p>
+              </div>
+            </div>
           </div>
 
           <!-- health strip -->
@@ -611,12 +741,13 @@ onMounted(async () => {
             </div>
 
             <!-- ============ v62: team roster ============ -->
-            <div class="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
-              <div class="mb-3 flex items-center gap-2">
-                <Users class="h-3.5 w-3.5 text-sky-300" />
-                <h3 class="text-xs font-bold">Team</h3>
-                <span class="text-[10px] text-zinc-600">owner / editor / viewer</span>
-              </div>
+            <div class="space-y-4">
+              <div class="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
+                <div class="mb-3 flex items-center gap-2">
+                  <Users class="h-3.5 w-3.5 text-sky-300" />
+                  <h3 class="text-xs font-bold">Team</h3>
+                  <span class="text-[10px] text-zinc-600">owner / editor / viewer</span>
+                </div>
               <div class="space-y-1.5">
                 <div v-for="m in members" :key="m.user_id" class="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                   <div class="min-w-0 flex-1">
@@ -652,6 +783,28 @@ onMounted(async () => {
                           :disabled="memberBusy || !inviteEmail.trim()" @click="invite">Add</button>
                 </div>
                 <p class="mt-2 text-[9px] leading-relaxed text-zinc-600">Viewers read the system, its health and the dependency map. Editors also bind components and edit metadata. Ownership stays with you.</p>
+              </div>
+            </div>
+
+              <!-- v81: the operations log - every verb the runtime accepted -->
+              <div class="rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
+                <div class="mb-3 flex items-center gap-2">
+                  <Activity class="h-3.5 w-3.5 text-orange-300" />
+                  <h3 class="text-xs font-bold">Operations</h3>
+                  <span class="text-[10px] text-zinc-600">the durable audit</span>
+                </div>
+                <div v-if="operations.length" class="max-h-72 space-y-1.5 overflow-y-auto pr-1">
+                  <div v-for="op in operations" :key="op.id" class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                    <div class="flex items-center gap-2">
+                      <span class="rounded-full bg-orange-500/15 px-2 py-0.5 text-[9px] font-bold uppercase text-orange-300">{{ op.verb }}</span>
+                      <span class="ml-auto text-[9px] text-zinc-600">{{ op.created_at ? new Date(op.created_at).toLocaleString() : '' }}</span>
+                    </div>
+                    <p v-if="op.detail?.note" class="mt-1 text-[10px] leading-relaxed text-zinc-500">{{ op.detail.note }}</p>
+                    <p v-if="op.detail?.solution" class="mt-1 text-[10px] text-zinc-500">solution: <span class="text-zinc-300">{{ op.detail.solution }}</span></p>
+                    <p v-if="op.detail?.kind" class="mt-1 text-[10px] text-zinc-500">{{ op.detail.kind }} <span class="text-zinc-300">{{ op.detail.ref_id?.slice(0, 8) }}</span></p>
+                  </div>
+                </div>
+                <p v-else class="text-[10px] text-zinc-600">No operations yet - start, pause, stop, bind or upgrade and every verb lands here.</p>
               </div>
             </div>
           </div>
