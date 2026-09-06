@@ -113,7 +113,8 @@ async def event_contracts():
             # a workflow can subscribe to system.* and react to the platform
             "system": ["system.installed", "system.started", "system.stopped",
                        "system.paused", "system.resumed", "system.upgraded",
-                       "system.component_added", "system.component_removed"],
+                       "system.component_added", "system.component_removed",
+                       "system.built"],  # v82: the AI composer builds a system
         },
         "trigger_node": {
             "type": "event_trigger",

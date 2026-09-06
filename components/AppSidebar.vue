@@ -4,7 +4,7 @@ import {
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
   FileBarChart, BookOpen, Radio, Wand2, Store, Boxes, Trash2, Unlink, BrainCircuit,
-  Globe, Rocket, MessagesSquare, Webhook, Video, Zap,
+  Globe, Rocket, MessagesSquare, Webhook, Video, Zap, Sparkles as ComposerIcon,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -34,6 +34,7 @@ const nav = [
   { to: '/templates', label: 'Templates', icon: Sparkles, match: ['/templates'] },
   { to: '/marketplace', label: 'Marketplace', icon: Store, match: ['/marketplace'] },  // v60 solution marketplace
   { to: '/systems', label: 'Systems', icon: Boxes, match: ['/systems'] },  // v61 py8n systems
+  { to: '/composer', label: 'AI Composer', icon: ComposerIcon, match: ['/composer'] },  // v82 the AI system composer - describe -> deploy
   { to: '/agents', label: 'Agents', icon: Bot, match: ['/agents'] },
   { to: '/datasets', label: 'Datasets', icon: Database, match: ['/datasets'] },
   { to: '/catalog', label: 'Catalog', icon: BookOpen, match: ['/catalog'] },  // v50 data catalog
@@ -212,7 +213,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.81 · 62 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.82 · 62 node types</span>
       </div>
     </div>
   </aside>

@@ -165,6 +165,9 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
         "state": row.state,
         "agent_id": row.agent_id,
         "agent_name": agent_name,
+        # v82: the room's self-description (modality / media_session_kind set
+        # by the media runtime or the AI composer) rides the detail view
+        "context": dict(row.context or {}),
         "floor": floor,
         "video": video,
         "hand_queue": hand_queue_out(row, legs),
