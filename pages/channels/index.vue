@@ -113,9 +113,12 @@ const chatForm = ref({ text: '', participant_id: '', author: '', ask_agent: fals
 const chatBusy = ref(false)
 const queues = ref<any[]>([])
 const selectedQueue = ref<any>(null)
-const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '' })
+const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '' })
 const queueEntryForm = ref({ session_id: '' })
 const queueBusy = ref(false)
+// v78: the line/room, measured + the video picture
+const queueAnalytics = ref<any>(null)
+const meetingAnalytics = ref<any>(null)
 
 const credTypeLabel: Record<string, string> = { openai_compatible: 'openai-compatible', anthropic: 'claude' }
 
@@ -387,8 +390,10 @@ async function createQueue() {
                                 announce: { enabled: true,
                                             interval_seconds: Number(queueForm.value.announce_interval) || 60 },
                                 sms: { enabled: queueForm.value.sms_enabled,
-                                       channel_id: queueForm.value.sms_channel_id || '' } } }) })
-    queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '' }
+                                       channel_id: queueForm.value.sms_channel_id || '' },
+                                callback: { enabled: queueForm.value.cb_enabled,
+                                            endpoint_id: queueForm.value.cb_endpoint_id || '' } } }) })
+    queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '' }
     await load()
     await openQueue(created)
   } catch (e: any) {
@@ -430,6 +435,81 @@ async function textQueueWaiters(q: any) {
 
 async function openQueue(q: any) {
   selectedQueue.value = await api(`/voice/queues/${q.id}`)
+  queueAnalytics.value = null
+}
+
+// v78: callbacks instead of hold - a waiting caller trades the hold for
+// a campaign callback (the hold ends honestly, the place in line is kept)
+async function requestCallback(q: any, entry: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/callbacks`, {
+      method: 'POST', body: JSON.stringify({ entry_id: entry.id }) })
+    note.value = res.note || 'callback requested - the hold ended'
+    await load()
+    await openQueue(q)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'callback request failed'
+  } finally { queueBusy.value = false }
+}
+
+// v78: place the callback dials - the composed campaign's start pass
+async function dialCallbacks(q: any) {
+  queueBusy.value = true
+  try {
+    const res = await api(`/voice/queues/${q.id}/callbacks/dial`, {
+      method: 'POST', body: JSON.stringify({}) })
+    note.value = res.start_note || res.note || 'callback dial pass ran'
+    await load()
+    await openQueue(q)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'callback dial failed'
+  } finally { queueBusy.value = false }
+}
+
+// v78: the line, measured - derived at read time, nothing stored
+async function loadQueueAnalytics(q: any) {
+  try {
+    queueAnalytics.value = await api(`/voice/queues/${q.id}/analytics`)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'queue analytics failed'
+  }
+}
+
+// v78: the room, measured
+async function loadMeetingAnalytics(m: any) {
+  try {
+    meetingAnalytics.value = await api(`/voice/meetings/${m.id}/analytics`)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'meeting analytics failed'
+  }
+}
+
+// v78: first-class video - the track registry + pushes to the other legs
+// (the pixels travel browser-to-browser over WebRTC; py8n owns the registry)
+async function publishTrack(m: any, p: any, kind: string) {
+  meetingBusy.value = true
+  try {
+    const track_id = `ui-${kind}-${p.id.slice(0, 6)}-${Date.now().toString(36)}`
+    const res = await api(`/voice/meetings/${m.id}/video/publish`, {
+      method: 'POST', body: JSON.stringify({ participant_id: p.id, track_id, kind }) })
+    note.value = `${kind} track published - ${res.push?.delivered ?? 0} live socket(s) told`
+    selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'track publish failed'
+  } finally { meetingBusy.value = false }
+}
+
+async function unpublishTrack(m: any, p: any, t: any) {
+  meetingBusy.value = true
+  try {
+    await api(`/voice/meetings/${m.id}/video/unpublish`, {
+      method: 'POST', body: JSON.stringify({ participant_id: p.id, track_id: t.track_id }) })
+    note.value = `track ${t.track_id} unpublished`
+    selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'track unpublish failed'
+  } finally { meetingBusy.value = false }
 }
 
 async function enqueueSession(q: any) {
@@ -918,6 +998,11 @@ onMounted(load)
                         :disabled="meetingBusy" @click="setMix(selectedMeeting, p, 'solo', !p.mix?.solo)">{{ p.mix?.solo ? 'unsolo' : 'solo' }}</button>
                 <button v-if="selectedMeeting.floor?.participant_id !== p.id" class="btn btn-ghost text-[11px] px-1.5 text-sky-300" :disabled="meetingBusy" @click="setFloor(selectedMeeting, 'directed', p.id)">give floor</button>
                 <button class="btn btn-ghost text-[11px] px-1.5 text-amber-300" :disabled="meetingBusy" @click="raiseHand(selectedMeeting, p)">raise hand</button>
+                <template v-if="selectedMeeting.state === 'active' && p.channel === 'web'">
+                  <button v-if="!(selectedMeeting.video?.tracks || []).some((t: any) => t.participant_id === p.id && t.kind === 'camera')" class="btn btn-ghost text-[11px] px-1.5 text-emerald-300" :disabled="meetingBusy" title="register the leg's camera track and tell the other legs" @click="publishTrack(selectedMeeting, p, 'camera')">cam</button>
+                  <button v-if="!(selectedMeeting.video?.tracks || []).some((t: any) => t.participant_id === p.id && t.kind === 'screen')" class="btn btn-ghost text-[11px] px-1.5 text-violet-300" :disabled="meetingBusy" title="register the leg's screen track (the screen holder)" @click="publishTrack(selectedMeeting, p, 'screen')">screen</button>
+                </template>
+                <button v-for="t in (selectedMeeting.video?.tracks || []).filter((t: any) => t.participant_id === p.id)" :key="t.track_id" class="btn btn-ghost text-[11px] px-1.5 text-zinc-500" :disabled="meetingBusy" @click="unpublishTrack(selectedMeeting, p, t)">stop {{ t.kind }}</button>
               </template>
             </div>
           </div>
@@ -931,6 +1016,16 @@ onMounted(load)
               <button class="btn btn-ghost text-[11px] px-1.5 text-zinc-500" :disabled="meetingBusy" @click="lowerHand(selectedMeeting, { id: h.participant_id })">lower</button>
             </template>
             <button v-if="selectedMeeting.hand_queue?.count" class="btn btn-ghost text-xs text-sky-300" :disabled="meetingBusy" @click="callNextHand(selectedMeeting)"><Hand class="w-3.5 h-3.5" /> Call next (grants floor)</button>
+          </div>
+          <div class="flex flex-wrap items-center gap-2 text-xs">
+            <span class="text-zinc-500">video:</span>
+            <span v-if="!selectedMeeting.video?.counts?.live_tracks" class="text-zinc-600">no live tracks (the pixels travel browser-to-browser over WebRTC; py8n owns the registry + the signaling)</span>
+            <template v-for="t in selectedMeeting.video?.tracks || []" :key="t.participant_id + t.track_id">
+              <span class="px-1.5 py-0.5 rounded-full border" :class="t.kind === 'camera' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-violet-500/25 bg-violet-500/10 text-violet-300'" :title="t.track_id">
+                {{ t.kind === 'camera' ? '📹' : '🖥' }} {{ t.label }} · {{ t.kind }}
+              </span>
+            </template>
+            <span v-if="selectedMeeting.video?.counts?.live_tracks" class="text-zinc-600">{{ selectedMeeting.video.counts.camera }} cam · {{ selectedMeeting.video.counts.screen }} screen</span>
           </div>
           <div class="space-y-2">
             <div class="flex items-center gap-2 text-xs text-zinc-500"><MessageSquare class="w-3.5 h-3.5" /> room chat <span v-if="selectedMeeting.counts?.chat_messages" class="text-zinc-600">{{ selectedMeeting.counts.chat_messages }} message(s)</span></div>
@@ -953,6 +1048,31 @@ onMounted(load)
               <button class="btn btn-ghost text-xs" :disabled="chatBusy || !chatForm.text" @click="postChat(selectedMeeting)"><Send class="w-3.5 h-3.5" /> Send</button>
             </div>
             <p class="text-zinc-600">chat is the one channel muting never gates - a muted member can still type. ask_agent answers ON the member's leg (chat + the leg's transcript).</p>
+          <details class="text-xs">
+            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200" @click.prevent="loadMeetingAnalytics(selectedMeeting)">the room, measured (derived, nothing stored)</summary>
+            <div v-if="meetingAnalytics && meetingAnalytics.meeting_id === selectedMeeting.id" class="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">legs</div>
+                <div class="text-zinc-200">{{ meetingAnalytics.legs?.live }} live</div>
+                <div class="text-zinc-600"><span v-for="(n, c) in meetingAnalytics.legs?.by_channel" :key="c" class="mr-2">{{ c }} {{ n }}</span></div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">chat</div>
+                <div class="text-zinc-200">{{ meetingAnalytics.chat?.total }} message(s)</div>
+                <div class="text-zinc-600"><span v-for="(n, r) in meetingAnalytics.chat?.by_role" :key="r" class="mr-2">{{ r }} {{ n }}</span></div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">speaking queue</div>
+                <div class="text-zinc-200">{{ meetingAnalytics.speaking_queue?.granted_floor }} granted · {{ meetingAnalytics.speaking_queue?.lowered }} lowered</div>
+                <div class="text-zinc-600">raise→floor mean {{ meetingAnalytics.speaking_queue?.raise_to_floor_seconds?.mean_seconds ?? '–' }}s</div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">conversation</div>
+                <div class="text-zinc-200">{{ meetingAnalytics.conversation?.participant_lines }} said · {{ meetingAnalytics.conversation?.agent_lines }} answered</div>
+                <div class="text-zinc-600">ASR mean {{ meetingAnalytics.conversation?.confidence?.mean ?? '–' }} · weak {{ meetingAnalytics.conversation?.confidence?.weak_turns }}</div>
+              </div>
+            </div>
+          </details>
           </div>
           <ol class="space-y-1.5 text-xs">
             <li v-for="(l, i) in selectedMeeting.transcript || []" :key="i" class="flex gap-3">
@@ -1063,7 +1183,7 @@ onMounted(load)
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Hourglass class="w-4 h-4 text-cyan-400" /> Channel queues ({{ queues.length }})
-          <span class="text-xs text-zinc-500 normal-case font-normal">queueing &amp; waiting · spoken positions on the held leg · SMS backchannel · chat pushed to web legs</span>
+          <span class="text-xs text-zinc-500 normal-case font-normal">queueing &amp; waiting · spoken positions · SMS backchannel · callbacks instead of hold</span>
         </h2>
         <div class="flex flex-wrap items-end gap-2">
           <label class="text-xs text-zinc-500">name <input v-model="queueForm.name" class="input input-xs w-40" placeholder="Support line" /></label>
@@ -1079,6 +1199,11 @@ onMounted(load)
             <option value="">- sms channel -</option>
             <option v-for="ep in endpoints.filter((e: any) => e.channel === 'sms')" :key="ep.id" :value="ep.id">{{ ep.name }} ({{ ep.provider }})</option>
           </select>
+          <label class="text-xs text-zinc-500 flex items-center gap-1"><input v-model="queueForm.cb_enabled" type="checkbox" class="checkbox checkbox-xs" /> callbacks instead of hold</label>
+          <select v-if="queueForm.cb_enabled" v-model="queueForm.cb_endpoint_id" class="input input-xs w-44">
+            <option value="">- dialing endpoint (bind later) -</option>
+            <option v-for="e in voiceEndpoints" :key="e.id" :value="e.id">{{ e.name }}</option>
+          </select>
           <button class="btn btn-ghost text-xs" :disabled="queueBusy || !queueForm.name" @click="createQueue"><Plus class="w-3.5 h-3.5" /> New queue</button>
         </div>
         <p v-if="!queues.length" class="text-sm text-zinc-500">No queues yet - a queue holds live calls in the line (session state on_hold), derives positions and wait times, and seats the head into a destination room.</p>
@@ -1088,12 +1213,14 @@ onMounted(load)
               <span class="text-zinc-100">{{ q.name }}</span>
               <span class="text-xs px-2 py-0.5 rounded-full border" :class="q.state === 'open' ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300' : 'border-rose-500/25 bg-rose-500/10 text-rose-300'">{{ q.state }}</span>
               <span class="text-xs text-cyan-300">{{ q.depth?.waiting }} waiting</span>
+              <span v-if="q.depth?.callback" class="text-xs text-fuchsia-300">{{ q.depth.callback }} callback(s)</span>
               <span v-if="q.depth?.longest_wait_seconds !== null" class="text-xs text-zinc-500">longest {{ q.depth?.longest_wait_seconds }}s / {{ q.config?.max_wait_seconds }}s SLA</span>
               <span v-if="q.meeting_name" class="text-xs text-sky-300">→ {{ q.meeting_name }}</span>
             </div>
             <div class="flex items-center gap-2">
               <button class="btn btn-ghost text-xs" :disabled="queueBusy" title="speak the positions on the held legs (TTS)" @click="announceQueue(q)">Announce</button>
               <button v-if="q.config?.sms?.enabled" class="btn btn-ghost text-xs" :disabled="queueBusy" title="text the positions through the bound SMS channel" @click="textQueueWaiters(q)">Text waiters</button>
+              <button v-if="q.config?.callback?.enabled" class="btn btn-ghost text-xs text-fuchsia-300" :disabled="queueBusy" title="place the callback dials through the composed campaign" @click="dialCallbacks(q)">Dial callbacks</button>
               <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="seatQueueNext(q)">Seat next</button>
               <button class="btn btn-ghost text-xs" :disabled="queueBusy" @click="toggleQueueState(q)">{{ q.state === 'open' ? 'Close' : 'Open' }}</button>
               <button class="btn btn-ghost text-xs" @click="openQueue(q)">Open</button>
@@ -1119,8 +1246,49 @@ onMounted(load)
             <span v-if="e.abandoned" class="text-rose-300">abandoned (caller hung up)</span>
             <span v-if="e.meta?.announcements" class="text-emerald-300" title="queue-position announcements spoken on the held leg">🔊 {{ e.meta.announcements }}</span>
             <span v-for="(sm, i) in (e.meta?.sms || []).slice(-2)" :key="i" class="text-sky-300" :title="sm.text">✉ {{ sm.delivery }}</span>
+            <button v-if="e.status === 'waiting' && selectedQueue.config?.callback?.enabled" class="btn btn-ghost text-[11px] px-1.5 text-fuchsia-300" :disabled="queueBusy" title="trade the hold for a callback - the hold ends, the place in line is kept" @click="requestCallback(selectedQueue, e)">Callback</button>
             <button v-if="e.status === 'waiting'" class="btn btn-ghost text-[11px] px-1.5" :disabled="queueBusy" @click="queueLeave(selectedQueue, e)">Release</button>
           </div>
+          <details v-if="(selectedQueue.callback_entries || []).length" class="text-xs">
+            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200">callback queue ({{ selectedQueue.callback_entries.length }}) - the hold traded for a dial-back, campaign {{ (selectedQueue.callbacks?.campaign_id || '').slice(0, 8) }}</summary>
+            <div class="mt-2 space-y-1">
+              <div v-for="e in selectedQueue.callback_entries" :key="e.id" class="flex items-center gap-2 text-zinc-400 flex-wrap">
+                <span class="text-zinc-200">{{ e.label }}</span>
+                <span class="font-mono text-zinc-500">{{ e.address }}</span>
+                <span class="px-1.5 py-0.5 rounded-full border border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-300">callback</span>
+                <span v-if="e.meta?.callback?.answered_at" class="text-emerald-300" title="the callback was answered and the call walked into the room">answered {{ (e.meta.callback.attached?.meeting_id || '').slice(0, 8) ? '→ room' : '' }}</span>
+                <span v-else class="text-zinc-600">awaiting the dialer (request order)</span>
+              </div>
+              <div v-if="selectedQueue.callbacks?.counts" class="text-zinc-600">
+                campaign targets: <span v-for="(n, st) in selectedQueue.callbacks.counts" :key="st" class="mr-2">{{ st }} {{ n }}</span>
+              </div>
+            </div>
+          </details>
+          <details class="text-xs">
+            <summary class="cursor-pointer text-zinc-400 hover:text-zinc-200" @click.prevent="loadQueueAnalytics(selectedQueue)">the line, measured (derived, nothing stored)</summary>
+            <div v-if="queueAnalytics && queueAnalytics.queue_id === selectedQueue.id" class="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2">
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">abandonment</div>
+                <div class="text-zinc-200">{{ queueAnalytics.abandonment?.abandoned }} of {{ queueAnalytics.abandonment?.ever_waiting }}</div>
+                <div class="text-zinc-600">rate {{ queueAnalytics.abandonment?.rate ?? '–' }}</div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">waits (closed)</div>
+                <div class="text-zinc-200">mean {{ queueAnalytics.waits?.closed?.mean_seconds ?? '–' }}s</div>
+                <div class="text-zinc-600">max {{ queueAnalytics.waits?.closed?.max_seconds ?? '–' }}s · SLA breaches {{ queueAnalytics.waits?.sla_breaches }}</div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">announcements</div>
+                <div class="text-zinc-200">{{ queueAnalytics.announcements?.total }} spoken</div>
+                <div class="text-zinc-600"><span v-for="(n, d) in queueAnalytics.announcements?.delivery_split" :key="d" class="mr-2">{{ d }} {{ n }}</span></div>
+              </div>
+              <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
+                <div class="text-zinc-500">sms · callbacks</div>
+                <div class="text-zinc-200">{{ queueAnalytics.sms?.total }} text(s) · {{ queueAnalytics.callbacks?.requested }} callback(s)</div>
+                <div class="text-zinc-600"><span v-for="(n, d) in queueAnalytics.sms?.delivery_split" :key="d" class="mr-2">{{ d }} {{ n }}</span></div>
+              </div>
+            </div>
+          </details>
           <p v-for="n in selectedQueue.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
         </div>
       </section>

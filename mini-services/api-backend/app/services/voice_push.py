@@ -30,6 +30,15 @@ Frames the platform pushes over the media websocket (server -> client):
 * ``{"event": "audio", "audio_b64", "format": "wav",
      "source", "duration_ms"}``                              - spoken audio
   (the queue announcement's TTS, delivered to the held web leg)
+* ``{"event": "video_track", "action": "published"|
+     "unpublished", "meeting_id", "participant_id",
+     "track_id", "kind"}``                                   - the room's
+  video picture changed (v78 first-class video: the track registry)
+* ``{"event": "video_signal", "meeting_id", "from",
+     "from_label", "data"}``                                 - one WebRTC
+  signaling frame (SDP offer/answer, ICE candidate) relayed from another
+  leg of the meeting - py8n relays the handshake, the browsers carry the
+  pixels
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ import json
 # frames the PLATFORM may push (server -> client) while the stream runs;
 # the transport's own dialect (connected/start/media/mark/stop) stays the
 # client's - a client pushing these events gets the honest unknown_event skip
-PUSH_EVENTS = ("chat", "queue_position", "audio")
+PUSH_EVENTS = ("chat", "queue_position", "audio", "video_track", "video_signal")
 
 
 class _Socket:

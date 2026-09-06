@@ -698,4 +698,4 @@ def test_v76_moderator_hand_queue():
 def test_v76_version_pin():
     from app.config import settings
 
-    assert settings.version == "1.77.0"
+    assert settings.version == "1.78.0"

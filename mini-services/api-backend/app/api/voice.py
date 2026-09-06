@@ -1261,6 +1261,26 @@ async def media_stream(websocket: WebSocket, session_id: str):
                 frame_in = None
             frame, skip = transport.parse_media_frame(frame_in) if frame_in is not None \
                 else (None, {"reason": "bad_json", "detail": "frame was not JSON"})
+            # v78: WebRTC signaling from a web leg - routed by SESSION (the
+            # socket does not know its participant id); the relay is
+            # ephemeral and the honest delivery count is the reply
+            if isinstance(frame_in, dict) and frame_in.get("event") == "video_signal":
+                from ..services import voice_video as video_svc2
+
+                async with AsyncSessionLocal() as rdb:
+                    try:
+                        out = await video_svc2.relay_from_session(
+                            rdb, session_id,
+                            to_participant_id=str(frame_in.get("to") or ""),
+                            data=frame_in.get("data")
+                            if isinstance(frame_in.get("data"), dict) else {})
+                        reply = {"event": "video_signal_ack", **out}
+                    except video_svc2.VideoError as exc:
+                        reply = {"event": "skipped", "reason": "video_signal_refused",
+                                 "detail": str(exc)}
+                if not await _send(reply):
+                    break
+                continue
             if frame is None:
                 stats.skipped_frames += 1
                 if not await _send({"event": "skipped", **(skip or {})}):
@@ -1400,3 +1420,196 @@ async def media_stream(websocket: WebSocket, session_id: str):
             await websocket.close()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---------------------------------------------------------------------------
+# v78: callbacks instead of hold (queue -> campaign composition)
+# ---------------------------------------------------------------------------
+
+
+class QueueCallbackBody(BaseModel):
+    entry_id: str = Field(..., max_length=36,
+                          description="the WAITING entry trading the hold for a callback")
+
+
+@router.post("/queues/{queue_id}/callbacks")
+async def request_queue_callback(queue_id: str, body: QueueCallbackBody,
+                                 user=Depends(get_optional_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Callbacks instead of hold: the caller's place in line is KEPT
+    (joined_at survives), the hold ENDS honestly (the call hangs up with
+    reason=callback) and a target is booked on the queue's composed
+    campaign - the dialer (with its honest skips, retry schedules and
+    AMD) calls them back. The remaining waiters hear the line move."""
+    from ..services import voice_callbacks as cb_svc
+
+    try:
+        return await cb_svc.request_callback(
+            db, getattr(user, "id", None), queue_id, body.entry_id)
+    except (cb_svc.VoiceQueueError, cb_svc.VoiceCampaignError) as exc:
+        raise _http(exc) from exc
+
+
+class QueueCallbackDialBody(BaseModel):
+    limit: int | None = Field(default=None, ge=1, le=100,
+                              description="dial at most this many callbacks this pass")
+    sender: str = Field(default="", max_length=40,
+                        description="internal test hook - leave empty (a non-empty "
+                                    "value refuses loudly outside tests)")
+
+
+@router.post("/queues/{queue_id}/callbacks/dial")
+async def dial_queue_callbacks(queue_id: str, body: QueueCallbackDialBody | None = None,
+                               user=Depends(get_optional_user),
+                               db: AsyncSession = Depends(get_db)):
+    """Place the callback dials: the composed campaign's start pass, in
+    callback order. Answered callbacks walk into the queue's destination
+    meeting on the callback call itself; no_answer/failed land in the
+    campaign's retry schedule like any dial."""
+    from ..services import voice_callbacks as cb_svc
+
+    body = body or QueueCallbackDialBody()
+    if (body.sender or "").strip():
+        raise HTTPException(status_code=400,
+                            detail="the sender hook is an in-process test seam - "
+                                   "it is never accepted over HTTP")
+    try:
+        return await cb_svc.dial_callbacks(
+            db, getattr(user, "id", None), queue_id, limit=body.limit)
+    except (cb_svc.VoiceQueueError, cb_svc.VoiceCampaignError) as exc:
+        raise _http(exc) from exc
+
+
+# ---------------------------------------------------------------------------
+# v78: analytics on the new events - the line, measured; the room, measured
+# ---------------------------------------------------------------------------
+
+
+@router.get("/queues/{queue_id}/analytics")
+async def queue_voice_analytics(queue_id: str, user=Depends(get_optional_user),
+                                db: AsyncSession = Depends(get_db)):
+    """The line, measured (derived, never stored): per-outcome WAIT
+    distributions, the ABANDONMENT rate, the ANNOUNCEMENTS' delivery
+    split (web socket / provider speak / skipped / failed), the SMS
+    backchannel's split, and the CALLBACK picture - all read from the
+    queue's rows and the callers' event timelines at request time."""
+    from ..services.voice_analytics import queue_analytics
+
+    try:
+        return await queue_analytics(db, queue_id, getattr(user, "id", None))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/meetings/{meeting_id}/analytics")
+async def meeting_voice_analytics(meeting_id: str, user=Depends(get_optional_user),
+                                  db: AsyncSession = Depends(get_db)):
+    """The room, measured (derived, never stored): legs by channel and
+    state, the CHAT by role (member/moderator/agent) with the agent's
+    reply and ask-the-agent usage, the SPEAKING QUEUE's raise -> floor
+    record with the wait between, and the per-leg transcript/confidence
+    picture (the v73 derivations, pooled per room)."""
+    from ..services.voice_analytics import meeting_analytics
+
+    try:
+        return await meeting_analytics(db, meeting_id, getattr(user, "id", None))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# v78: first-class video - the track registry + the signaling relay
+# ---------------------------------------------------------------------------
+
+
+class VideoPublishBody(BaseModel):
+    participant_id: str = Field(..., max_length=36)
+    track_id: str = Field(..., min_length=1, max_length=140,
+                          description="the publisher's own stream id (their WebRTC track)")
+    kind: str = Field(default="camera", max_length=20,
+                      description="camera | screen | screen_audio")
+    label: str = Field(default="", max_length=140)
+
+
+@router.post("/meetings/{meeting_id}/video/publish")
+async def publish_video_track(meeting_id: str, body: VideoPublishBody,
+                              user=Depends(get_optional_user),
+                              db: AsyncSession = Depends(get_db)):
+    """A leg starts showing the room a track. py8n records the track in
+    the room's registry (participant meta + a video.started event on the
+    leg's timeline) and pushes the news to every other live web leg -
+    the pixels themselves travel browser-to-browser over WebRTC, py8n
+    never carries them."""
+    from ..services import voice_video
+
+    try:
+        return await voice_video.publish_track(
+            db, getattr(user, "id", None), meeting_id, body.participant_id,
+            track_id=body.track_id, kind=body.kind, label=body.label)
+    except (voice_video.VideoError, agent_svc.VoiceAgentError) as exc:
+        raise _http(exc) from exc
+
+
+class VideoUnpublishBody(BaseModel):
+    participant_id: str = Field(..., max_length=36)
+    track_id: str = Field(..., min_length=1, max_length=140)
+
+
+@router.post("/meetings/{meeting_id}/video/unpublish")
+async def unpublish_video_track(meeting_id: str, body: VideoUnpublishBody,
+                                user=Depends(get_optional_user),
+                                db: AsyncSession = Depends(get_db)):
+    """A leg stops showing a track (camera off, screen share ended):
+    the registry entry is stamped, video.stopped lands on the timeline,
+    the other legs are pushed the news."""
+    from ..services import voice_video
+
+    try:
+        return await voice_video.unpublish_track(
+            db, getattr(user, "id", None), meeting_id, body.participant_id,
+            track_id=body.track_id)
+    except voice_video.VideoError as exc:
+        raise _http(exc) from exc
+
+
+class VideoSignalBody(BaseModel):
+    from_participant_id: str = Field(..., max_length=36)
+    to_participant_id: str = Field(..., max_length=36)
+    data: dict = Field(..., description="the WebRTC signaling payload (SDP offer/answer, "
+                                        "ICE candidate) - relayed verbatim, never parsed "
+                                        "or stored")
+
+
+@router.post("/meetings/{meeting_id}/video/signal")
+async def relay_video_signal(meeting_id: str, body: VideoSignalBody,
+                             user=Depends(get_optional_user),
+                             db: AsyncSession = Depends(get_db)):
+    """Relay one WebRTC signaling frame between two legs of the room
+    through the push hub. Ephemeral by nature: the honest delivery count
+    is the whole report (0 = the peer's socket is not live right now)."""
+    from ..services import voice_video
+
+    try:
+        return await voice_video.relay_signal(
+            db, getattr(user, "id", None), meeting_id,
+            from_participant_id=body.from_participant_id,
+            to_participant_id=body.to_participant_id, data=body.data)
+    except voice_video.VideoError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/meetings/{meeting_id}/video")
+async def meeting_video_state(meeting_id: str, user=Depends(get_optional_user),
+                              db: AsyncSession = Depends(get_db)):
+    """The room's derived video picture: live tracks per leg, screen
+    holders, the grid counts - the registry read back."""
+    from ..services import voice_meetings as meetings_svc
+    from ..services import voice_video
+
+    try:
+        meeting = await meetings_svc._load(db, meeting_id, getattr(user, "id", None))
+    except meetings_svc.VoiceMeetingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    legs = await meetings_svc._participants(db, meeting.id)
+    return {"meeting_id": meeting.id, "state": meeting.state,
+            "video": voice_video.video_state(legs)}

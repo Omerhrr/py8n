@@ -153,6 +153,11 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
         agent_name = agent.name if agent is not None else None
 
     floor = floor_state_of(row, legs)
+    # v78: first-class video - the room's derived track picture rides
+    # every meeting response (the registry lives on the participants' meta)
+    from .voice_video import video_state as _video_state
+
+    video = _video_state(legs)
 
     out = {
         "id": row.id,
@@ -161,6 +166,7 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
         "agent_id": row.agent_id,
         "agent_name": agent_name,
         "floor": floor,
+        "video": video,
         "hand_queue": hand_queue_out(row, legs),
         "participants": [participant_out(p, sessions.get(p.session_id or ""))
                          for p in legs],
@@ -180,6 +186,9 @@ async def meeting_out(db: AsyncSession, row: VoiceMeeting, *,
             "they shape what the agent hears and says per leg, not the provider's blend",
             "the transcript below is DERIVED from the legs' event timelines at read "
             "time - nothing transcript-shaped is stored",
+            "v78 video: the track block above is the room's derived video picture - "
+            "the browsers' WebRTC stacks carry the pixels, py8n owns the registry "
+            "and relays the signaling over the media websockets",
         ],
     }
     if include_transcript:
@@ -608,8 +617,15 @@ async def lower_hand(db: AsyncSession, owner_id: str | None, meeting_id: str,
     if len(remaining) == len(entries):
         raise VoiceMeetingError(
             f"participant {participant_id!r} is not in the speaking queue")
+    removed = next(e for e in entries if e["participant_id"] == participant_id)
     ctx = dict(meeting.context or {})
     ctx["hand_queue"] = {"entries": remaining}
+    # v78: the pop destroys the raised_at the analytics would derive the
+    # wait from - a small history in context keeps the raise -> outcome
+    # record (traffic state about the room's own past)
+    ctx["hand_history"] = (list((meeting.context or {}).get("hand_history") or [])
+                           + [{**removed, "resolved_at": _now().isoformat(),
+                               "outcome": "lowered"}])[-200:]
     meeting.context = ctx
     db.add(meeting)
     await db.flush()
@@ -631,6 +647,11 @@ async def call_next_hand(db: AsyncSession, owner_id: str | None,
     head, rest = entries[0], entries[1:]
     ctx = dict(meeting.context or {})
     ctx["hand_queue"] = {"entries": rest}
+    # v78: the grant is the analytics' raise -> floor moment - recorded
+    # when the entry leaves the queue (the same history lower_hand keeps)
+    ctx["hand_history"] = (list((meeting.context or {}).get("hand_history") or [])
+                           + [{**head, "resolved_at": _now().isoformat(),
+                               "outcome": "granted_floor"}])[-200:]
     meeting.context = ctx
     db.add(meeting)
     await db.flush()

@@ -18,7 +18,13 @@ already owns:
   caller walks from the waiting room into the meeting ON THE SAME CALL;
 * config: max_size (waiting capacity, fail loud when full) and
   max_wait_seconds (the SLA; breaches surface as ``expired: true`` on the
-  entry - derived, honest, and never a silent drop).
+  entry - derived, honest, and never a silent drop);
+* v78: the line can be LEFT - ``config.callback`` composes the queue with
+  the campaign dialer (voice_callbacks): a waiting caller trades the hold
+  for a callback (entry status ``callback``, the call ends honestly with
+  reason=callback, their joined_at keeps the place) and the queue's
+  composed campaign dials them back - answered callbacks walk into the
+  destination meeting on the callback call itself.
 
 Honesty: the queue holds CONVERSATIONS, not audio. It never pretends to
 play hold music; the entry meta records exactly what py8n did (held the
@@ -75,6 +81,12 @@ def queue_config(raw: dict | None) -> dict:
         cfg.update(waiting_config(raw))
     except ValueError as exc:
         raise VoiceQueueError(str(exc)) from exc
+    # v78: the callback block (queue -> campaign composition) validates at
+    # config write too - a lazy import keeps voice_callbacks -> voice_queue
+    # acyclic
+    from .voice_callbacks import callback_config
+
+    cfg["callback"] = callback_config(raw)
     return cfg
 
 
@@ -150,6 +162,7 @@ async def queue_out(db: AsyncSession, row: ChannelQueue, *,
             "waiting": len(live_waiting),
             "seated": sum(1 for e in entries if e.status == "seated"),
             "left": sum(1 for e in entries if e.status == "left"),
+            "callback": sum(1 for e in entries if e.status == "callback"),
             "abandoned": sum(1 for e in waiting
                              if _entry_out(e, sessions.get(e.session_id or ""),
                                            position=None)["abandoned"]),
@@ -169,6 +182,12 @@ async def queue_out(db: AsyncSession, row: ChannelQueue, *,
             "on the held leg (TTS - media websocket for web legs, provider speak "
             "for carrier legs) on join, when the line moves, and via POST /announce; "
             "config.sms texts position updates through a bound SMS channel",
+            "v78 callbacks instead of hold: config.callback composes this queue "
+            "with the campaign dialer - request_callback ends the hold honestly "
+            "(reason=callback) and books a target on the queue's campaign; "
+            "dial_callbacks places the dials (the campaign's own machinery: "
+            "honest skips, retries, AMD) and an ANSWERED callback walks into "
+            "the destination meeting on the callback call itself",
         ],
     }
     if include_entries:
@@ -177,6 +196,12 @@ async def queue_out(db: AsyncSession, row: ChannelQueue, *,
                                      position=positions.get(e.id),
                                      max_wait_seconds=cfg["max_wait_seconds"])
                           for e in shown]
+        callback_shown = [e for e in entries if e.status == "callback"][-50:]
+        out["callback_entries"] = [_entry_out(e, sessions.get(e.session_id or ""),
+                                              position=None) for e in callback_shown]
+        from .voice_callbacks import callbacks_picture
+
+        out["callbacks"] = await callbacks_picture(db, row)
     return out
 
 

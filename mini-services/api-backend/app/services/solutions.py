@@ -590,6 +590,99 @@ CURATED_SOLUTIONS: list[dict] = [
                  "GET /voice/speech/engines for the live local ASR/TTS bridges (whisper.cpp, "
                  "vosk, piper)."),
     },
+    {
+        # v78: the install IS a support line - queue + room + knowledge +
+        # backchannel pre-wired. The support_line block tells the installer
+        # what the queue/room wiring looks like (the voice_agent block runs
+        # FIRST: the room and the queue both bind the installed agent).
+        "slug": "support-line-system",
+        "name": "Support Line System",
+        "tagline": "A complete support line in one click: knowledge-grounded phone agent, "
+                   "a waiting room with spoken positions and an SMS backchannel, callback-"
+                   "instead-of-hold wired, and the agents' meeting room to walk callers into.",
+        "category": "Voice",
+        "icon": "life-buoy",
+        "color": "#0ea5e9",
+        "outcomes_json": [
+            "Support-line FAQ knowledge dataset",
+            "Knowledge-grounded handler workflow",
+            "Voice Agent bound to the knowledge (interruptible greeting)",
+            "Waiting room queue bound to the agent's room",
+            "Spoken positions + SMS backchannel configured",
+            "Callback-instead-of-hold pre-wired (queue -> campaign)",
+            "Wired for Telnyx / Twilio / SIP / in-app / SMS / web chat",
+        ],
+        "pack_json": {**_pack(
+            [
+                _wf("Support Line Handler",
+                    "Trigger -> knowledge-aware reply for the support line. metadata.knowledge "
+                    "(grounded by the voice turn loop) answers the caller; unmatched questions "
+                    "get an honest take-a-message line.",
+                    VOICE_AGENT_HANDLER_GRAPH),
+            ],
+            [
+                _ds("support_line_faq", "The support line's knowledge - questions it can answer",
+                    [{"name": "question", "dtype": "text"}, {"name": "answer", "dtype": "text"}],
+                    [{"question": "How do I reach a human agent",
+                      "answer": "You can stay on the line and an agent will be with you shortly, or leave your number and we will call you back within one business hour."},
+                     {"question": "What are your support hours",
+                      "answer": "Phone support runs Monday to Friday from eight AM to eight PM, and weekends from nine AM to five PM."},
+                     {"question": "How do I reset my password",
+                      "answer": "Open the sign-in page and choose Forgot password. We will email you a reset link that is valid for thirty minutes."},
+                     {"question": "Where is my order",
+                      "answer": "You can track your order from the link in your shipping confirmation email. Have your order number ready when you call."},
+                     {"question": "How do I cancel my subscription",
+                      "answer": "You can cancel any time from the billing page, or ask me to take a message and billing will call you back today."},
+                     {"question": "Do you offer refunds",
+                      "answer": "Yes - within thirty days of purchase, refunded to the original payment method within five business days."},
+                     {"question": "How do I update my billing details",
+                      "answer": "Billing details live on the billing page of your account, or tell me the change and I will take a message for the billing team."},
+                     {"question": "Can I get support by chat",
+                      "answer": "Yes - this line answers on the phone, on SMS, on web chat and in the app, and the conversation follows you across all of them."},
+                     {"question": "Is there a service outage right now",
+                      "answer": "I do not have that in my knowledge yet - let me take a message and the on-call engineer will call you back."},
+                     {"question": "How do I book an onboarding call",
+                      "answer": "Leave your number and preferred time, and an onboarding specialist will call you back within one business hour."}]),
+            ],
+        ),
+        "voice_agent": {
+            "name_suffix": "support line agent",
+            "greeting_text": "Thanks for calling support. I can answer questions about your "
+                             "account, orders and billing - or stay on the line and I will "
+                             "find a human for you.",
+            "system_prompt": "You are a patient support-line agent. Answer ONLY from the "
+                             "knowledge matches in metadata.knowledge; when nothing matches, "
+                             "offer to take a message for a callback.",
+            "knowledge": {"dataset": "support_line_faq", "text_column": "question",
+                          "answer_column": "answer"},
+            "speech": {"asr_provider": "py8n_local", "tts_provider": "openai_tts",
+                       "tts_voice": "alloy", "tts_format": "wav", "language": "en-US",
+                       "barge_in": True},
+        },
+        # the installer reads THIS block: the queue + room wiring (the
+        # sms channel and the callback dialing endpoint are the installer's
+        # credentials to bind - the plumbing exists, the pass records
+        # honest skips until they are)
+        "support_line": {
+            "meeting_title": "Support line room",
+            "queue": {"name": "Support line",
+                      "max_size": 20, "max_wait_seconds": 300,
+                      "announce": {"enabled": True, "interval_seconds": 60},
+                      "sms": {"enabled": True, "channel_id": ""},
+                      "callback": {"enabled": True}},
+        }},
+        "docs": ("Install AS A SUPPORT LINE (tick the box). The install creates the FAQ "
+                 "knowledge dataset, the knowledge-grounded handler, the Voice Agent bound to "
+                 "both, the meeting ROOM the agents work, and the QUEUE wired to it: spoken "
+                 "positions on hold, the SMS backchannel enabled (bind an SMS channel on the "
+                 "queue when your credentials exist), and callbacks-instead-of-hold enabled "
+                 "(bind the queue's callback endpoint - a telnyx voice endpoint - for the "
+                 "dialer). Point a provider at the agent's session webhook/media URL; "
+                 "callers wait with spoken positions, can trade the hold for a callback "
+                 "(POST /voice/queues/{id}/callbacks then /callbacks/dial), and walk into "
+                 "the room on the same or the callback call. POST /voice/queues/{id}/analytics "
+                 "and /voice/meetings/{id}/analytics measure the line and the room."),
+    },
 ]
 
 
@@ -607,6 +700,7 @@ def solution_summary(s: Solution) -> dict:
         "curated": s.owner_id is None,
         "model_system_ready": s.slug in MODEL_SYSTEM_MODALITIES,  # v64: installs as a model system
         "voice_agent_ready": bool((s.pack_json or {}).get("voice_agent")),  # v72: installs as a phone agent
+        "support_line_ready": bool((s.pack_json or {}).get("support_line")),  # v78: installs as a full support line
         "workflow_count": len((s.pack_json or {}).get("workflows", [])),
         "dataset_count": len((s.pack_json or {}).get("datasets", [])),
     }

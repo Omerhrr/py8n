@@ -672,6 +672,16 @@ async def on_call_event(db: AsyncSession, *, call_control_id: str = "",
                     pass
         target.status = "answered"
         target.last_error = ""
+        # v78: a CALLBACK campaign's answered dial walks into the queue's
+        # destination meeting on the callback call itself (best-effort: the
+        # answer must never break because the room is full/ended)
+        if (campaign.config or {}).get("callback_for_queue") and session is not None:
+            try:
+                from .voice_callbacks import on_callback_answered
+
+                await on_callback_answered(db, campaign, target, session)
+            except Exception:  # noqa: BLE001 - the seating is best-effort
+                pass
     elif event_kind == "voicemail_detected":
         # v75: the carrier's AMD verdict - record it, act on the policy.
         # The session-side voicemail state + hangup are the RECEIVER's job
@@ -817,6 +827,16 @@ async def simulate_answer(db: AsyncSession, owner_id: str | None, campaign_id: s
     target.updated_at = _now()
     target.last_error = ""
     db.add(target)
+    # v78: the simulate path books the SAME callback attach hook a real
+    # answered webhook drives (on_call_event never runs on this walk)
+    callback_link = None
+    if (row.config or {}).get("callback_for_queue"):
+        try:
+            from .voice_callbacks import on_callback_answered
+
+            callback_link = await on_callback_answered(db, row, target, session)
+        except Exception:  # noqa: BLE001 - best-effort, same contract as real
+            callback_link = None
     amd_result: dict | None = None
     if as_machine == "greeting_end":
         # v76: the greeting_end walk - verdict + greeting-finished signal,
@@ -864,6 +884,8 @@ async def simulate_answer(db: AsyncSession, owner_id: str | None, campaign_id: s
                       "session_state": session.state}
         if session.state == "ended":
             out["amd"]["session_end_reason"] = session.end_reason
+    if callback_link is not None:
+        out["callback"] = {"simulated": True, **callback_link}
     return out
 
 

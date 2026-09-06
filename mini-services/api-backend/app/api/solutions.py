@@ -61,6 +61,7 @@ class SolutionInstallRequest(BaseModel):
     as_system: bool = Field(default=False, description="v61: also create a Py8n System binding everything this install created")
     as_model_system: bool = Field(default=False, description="v64: also create a Model System (datasets + training/serving workflows as one operating unit)")
     as_voice_agent: bool = Field(default=False, description="v72: also create a Voice Agent bound to the installed handler + knowledge dataset (one-click phone agent)")
+    as_support_line: bool = Field(default=False, description="v78: also create the support-line wiring - the meeting room + the channel queue (announce + SMS + callback pre-configured) bound to the installed agent; needs the solution's support_line block")
     brain: str = Field(default="scaffold", description="v73: voice-agent brain - 'scaffold' (deterministic knowledge handler) or 'ai_agent' (LLM brain scaffolded over the SAME installed knowledge dataset)")
     llm_credential_id: str | None = Field(default=None, max_length=36, description="v74: with brain='ai_agent' - the REAL LLM credential the scaffolded brain routes through (services/llm_routing)")
 
@@ -239,6 +240,58 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
                            "knowledge": va["knowledge"],
                            "wiring": va["wiring"]}
 
+    support_line_ref = None
+    if body and body.as_support_line:
+        from ..services import voice_meetings as meetings_svc
+        from ..services import voice_queue as queue_svc
+
+        spec = (s.pack_json or {}).get("support_line") or {}
+        if not spec:
+            raise HTTPException(status_code=400,
+                                detail="this solution does not declare a support_line pack")
+        if not voice_agent_ref:
+            raise HTTPException(status_code=400,
+                                detail="the support-line wiring needs the voice agent too - "
+                                       "set as_voice_agent=true (the room and the queue bind it)")
+        agent_id = voice_agent_ref["id"]
+        # the ROOM the agents work in
+        room = await meetings_svc.create_meeting(
+            db, owner_id=owner, agent_id=agent_id,
+            title=str(spec.get("meeting_title") or f"{s.name} room"))
+        # the WAITING ROOM: spoken positions + SMS backchannel + callbacks
+        # pre-configured (the SMS channel and the callback dialing endpoint
+        # are the installer's credentials to bind - until then the passes
+        # record honest skips, never silent ones)
+        ql = dict(spec.get("queue") or {})
+        q_cfg = {"max_size": ql.get("max_size") or 20,
+                 "max_wait_seconds": ql.get("max_wait_seconds") or 300,
+                 "announce": {**(ql.get("announce") or {"enabled": True}),
+                              "enabled": True},
+                 "sms": {"enabled": True, "channel_id":
+                         str((ql.get("sms") or {}).get("channel_id") or ""),
+                         "template": (ql.get("sms") or {}).get("template") or ""},
+                 "callback": {"enabled": True,
+                              "endpoint_id":
+                              str((ql.get("callback") or {}).get("endpoint_id") or "")}}
+        try:
+            queue = await queue_svc.create_queue(
+                db, owner_id=owner, name=str(ql.get("name") or "Support line"),
+                meeting_id=room["id"], agent_id=agent_id, config=q_cfg)
+        except queue_svc.VoiceQueueError as exc:
+            raise HTTPException(status_code=400,
+                                detail=f"support-line queue install failed: {exc}") from exc
+        support_line_ref = {"meeting": {"id": room["id"], "title": room["title"]},
+                            "queue": {"id": queue["id"], "name": queue["name"],
+                                      "config": queue["config"]},
+                            "wiring_notes": [
+                                "the queue seats callers into this room (destination meeting bound)",
+                                "the room's legs inherit the agent (greeting, speech, knowledge)",
+                                "bind config.sms.channel_id on the queue when the SMS credentials exist "
+                                "(telnyx_sms or generic_sms) - until then the backchannel skips honestly",
+                                "bind config.callback.endpoint_id on the queue (a telnyx voice endpoint) "
+                                "- dial_callbacks refuses until the dialer has somewhere to dial through",
+                            ]}
+
     await db.commit()
     return {
         "slug": s.slug,
@@ -252,6 +305,7 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         "system": system_ref,
         "model_system": model_system_ref,
         "voice_agent": voice_agent_ref,
+        "support_line": support_line_ref,
     }
 
 

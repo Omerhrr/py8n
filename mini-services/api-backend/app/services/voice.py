@@ -69,6 +69,10 @@ EVENT_KINDS = (
     # stand (position announcement on the held leg) and texted them (the
     # SMS backchannel); records on the session timeline, no state change
     "queue.announced", "queue.sms",
+    # v78: first-class video - the leg's track registry lands on the
+    # session timeline (the pixels themselves never touch py8n: WebRTC
+    # carries them, py8n owns the registry + the signaling relay)
+    "video.started", "video.stopped",
 )
 
 END_KINDS = {  # event kind -> end_reason recorded on the session
