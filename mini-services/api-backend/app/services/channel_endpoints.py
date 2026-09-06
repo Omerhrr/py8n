@@ -244,6 +244,20 @@ async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
 
     # 3. ingest each message through the interaction layer (owner = endpoint owner)
     for msg in result.messages:
+        # v79: the queue's SMS auto-answer intercepts operational keywords
+        # (reply "1" to leave the line) BEFORE the conversation layer - the
+        # reply answers the QUEUE'S OFFER, not the agent's question. None
+        # = not the auto-answer's business, the normal path continues.
+        if msg.channel == "sms":
+            from . import voice_waiting as waiting_svc
+
+            answered = await waiting_svc.try_auto_answer(
+                db, endpoint=endpoint, sender=msg.sender_id, text=msg.text)
+            if answered is not None:
+                handled.append({"sender_id": msg.sender_id,
+                                "text": msg.text[:200], "auto_answer": True,
+                                **answered})
+                continue
         ingest = await inter_svc.ingest(
             db, owner_id=endpoint.owner_id, channel=msg.channel,
             sender_id=msg.sender_id, sender_name=msg.sender_name, text=msg.text,
@@ -259,10 +273,13 @@ async def receive_webhook(db: AsyncSession, endpoint: ChannelEndpoint, *,
                         "conversation_id": ingest["conversation_id"],
                         "reply": ingest.get("reply"), **delivery})
 
-    # 5. event counters on the endpoint (write-side derived bookkeeping)
+    # 5. event counters on the endpoint (write-side derived bookkeeping);
+    # the final commit keeps the counters honest even when EVERY message
+    # was intercepted by the auto-answer (no ingest commit rode along)
     endpoint.events_received = (endpoint.events_received or 0) + 1
     endpoint.last_event_at = datetime.now(timezone.utc)
     db.add(endpoint)
+    await db.commit()
 
     return {"ok": True, "endpoint": endpoint.id, "provider": provider,
             "received": result.count, "skipped": result.skipped,

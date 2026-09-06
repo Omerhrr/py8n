@@ -113,7 +113,7 @@ const chatForm = ref({ text: '', participant_id: '', author: '', ask_agent: fals
 const chatBusy = ref(false)
 const queues = ref<any[]>([])
 const selectedQueue = ref<any>(null)
-const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '' })
+const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '', auto_answer_enabled: false, auto_answer_keyword: '1', auto_answer_action: 'callback' })
 const queueEntryForm = ref({ session_id: '' })
 const queueBusy = ref(false)
 // v78: the line/room, measured + the video picture
@@ -390,10 +390,13 @@ async function createQueue() {
                                 announce: { enabled: true,
                                             interval_seconds: Number(queueForm.value.announce_interval) || 60 },
                                 sms: { enabled: queueForm.value.sms_enabled,
-                                       channel_id: queueForm.value.sms_channel_id || '' },
+                                       channel_id: queueForm.value.sms_channel_id || '',
+                                       auto_answer: { enabled: queueForm.value.auto_answer_enabled,
+                                                      keyword: queueForm.value.auto_answer_keyword || '1',
+                                                      action: queueForm.value.auto_answer_action || 'callback' } },
                                 callback: { enabled: queueForm.value.cb_enabled,
                                             endpoint_id: queueForm.value.cb_endpoint_id || '' } } }) })
-    queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '' }
+    queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '', auto_answer_enabled: false, auto_answer_keyword: '1', auto_answer_action: 'callback' }
     await load()
     await openQueue(created)
   } catch (e: any) {
@@ -1064,12 +1067,12 @@ onMounted(load)
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
                 <div class="text-zinc-500">speaking queue</div>
                 <div class="text-zinc-200">{{ meetingAnalytics.speaking_queue?.granted_floor }} granted · {{ meetingAnalytics.speaking_queue?.lowered }} lowered</div>
-                <div class="text-zinc-600">raise→floor mean {{ meetingAnalytics.speaking_queue?.raise_to_floor_seconds?.mean_seconds ?? '–' }}s</div>
+                <div class="text-zinc-600">raise→floor mean {{ meetingAnalytics.speaking_queue?.raise_to_floor_seconds?.mean_seconds ?? '-' }}s</div>
               </div>
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
                 <div class="text-zinc-500">conversation</div>
                 <div class="text-zinc-200">{{ meetingAnalytics.conversation?.participant_lines }} said · {{ meetingAnalytics.conversation?.agent_lines }} answered</div>
-                <div class="text-zinc-600">ASR mean {{ meetingAnalytics.conversation?.confidence?.mean ?? '–' }} · weak {{ meetingAnalytics.conversation?.confidence?.weak_turns }}</div>
+                <div class="text-zinc-600">ASR mean {{ meetingAnalytics.conversation?.confidence?.mean ?? '-' }} · weak {{ meetingAnalytics.conversation?.confidence?.weak_turns }}</div>
               </div>
             </div>
           </details>
@@ -1199,6 +1202,14 @@ onMounted(load)
             <option value="">- sms channel -</option>
             <option v-for="ep in endpoints.filter((e: any) => e.channel === 'sms')" :key="ep.id" :value="ep.id">{{ ep.name }} ({{ ep.provider }})</option>
           </select>
+          <label v-if="queueForm.sms_enabled" class="text-xs text-zinc-500 flex items-center gap-1"><input v-model="queueForm.auto_answer_enabled" type="checkbox" class="checkbox checkbox-xs" /> auto-answer</label>
+          <template v-if="queueForm.sms_enabled && queueForm.auto_answer_enabled">
+            <label class="text-xs text-zinc-500">reply <input v-model="queueForm.auto_answer_keyword" class="input input-xs w-12" /></label>
+            <select v-model="queueForm.auto_answer_action" class="input input-xs w-32">
+              <option value="callback">→ callback (keep place)</option>
+              <option value="abandon">→ leave the line</option>
+            </select>
+          </template>
           <label class="text-xs text-zinc-500 flex items-center gap-1"><input v-model="queueForm.cb_enabled" type="checkbox" class="checkbox checkbox-xs" /> callbacks instead of hold</label>
           <select v-if="queueForm.cb_enabled" v-model="queueForm.cb_endpoint_id" class="input input-xs w-44">
             <option value="">- dialing endpoint (bind later) -</option>
@@ -1270,12 +1281,12 @@ onMounted(load)
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
                 <div class="text-zinc-500">abandonment</div>
                 <div class="text-zinc-200">{{ queueAnalytics.abandonment?.abandoned }} of {{ queueAnalytics.abandonment?.ever_waiting }}</div>
-                <div class="text-zinc-600">rate {{ queueAnalytics.abandonment?.rate ?? '–' }}</div>
+                <div class="text-zinc-600">rate {{ queueAnalytics.abandonment?.rate ?? '-' }}</div>
               </div>
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
                 <div class="text-zinc-500">waits (closed)</div>
-                <div class="text-zinc-200">mean {{ queueAnalytics.waits?.closed?.mean_seconds ?? '–' }}s</div>
-                <div class="text-zinc-600">max {{ queueAnalytics.waits?.closed?.max_seconds ?? '–' }}s · SLA breaches {{ queueAnalytics.waits?.sla_breaches }}</div>
+                <div class="text-zinc-200">mean {{ queueAnalytics.waits?.closed?.mean_seconds ?? '-' }}s</div>
+                <div class="text-zinc-600">max {{ queueAnalytics.waits?.closed?.max_seconds ?? '-' }}s · SLA breaches {{ queueAnalytics.waits?.sla_breaches }}</div>
               </div>
               <div class="rounded-lg border border-zinc-800 bg-zinc-900/60 p-2">
                 <div class="text-zinc-500">announcements</div>

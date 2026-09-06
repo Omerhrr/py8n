@@ -113,6 +113,20 @@ export function useApi() {
     return url
   }
 
+  // v79: the media websocket for one voice session (the meeting client
+  // speaks the provider media dialect over it - and receives the platform's
+  // pushes: chat, queue positions, announcement audio, WebRTC signaling).
+  function mediaUrl(sessionId: string): string {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const path = `/api/v1/voice/sessions/${sessionId}/media`
+    const url = mode === 'gateway'
+      ? `${proto}://${location.host}${path}?XTransformPort=${apiPort}`
+      : `${proto}://${location.hostname}:${apiPort}${path}`
+    const auth = useAuthStore()
+    if (auth.token) return `${url}&token=${encodeURIComponent(auth.token)}`
+    return url
+  }
+
   // URL for raw backend content (artifact images etc.) - gateway param honored.
   // Accepts paths with or without the /api/v1 prefix (artifact_url ships WITH it).
   function srcUrl(path: string): string {
@@ -141,5 +155,5 @@ export function useApi() {
     return URL.createObjectURL(await res.blob())
   }
 
-  return { api, wsUrl, srcUrl, download, blobUrl, mode }
+  return { api, wsUrl, mediaUrl, srcUrl, download, blobUrl, mode }
 }

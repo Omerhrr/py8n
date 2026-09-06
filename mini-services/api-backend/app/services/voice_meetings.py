@@ -859,8 +859,23 @@ async def join_participant(db: AsyncSession, owner_id: str | None, meeting_id: s
         p.state = "joined"
         db.add(p)
         await db.flush()
-        return {"participant": participant_out(p, row),
-                "meeting": await meeting_out(db, meeting)}
+        # v79: a room under recording captures the NEW leg's utterances
+        # from the moment it joins (lazy import - voice_recordings sits on
+        # this module)
+        from . import voice_recordings as rec_svc
+
+        rec_active = await rec_svc.active_recording_for_meeting(db, meeting.id)
+        rec_note = None
+        if rec_active is not None:
+            from .voice_recordings import start_capture
+
+            rec_note = {"recording_id": rec_active["id"],
+                        "capturing": start_capture(session["id"], rec_active["id"])}
+        out = {"participant": participant_out(p, row),
+               "meeting": await meeting_out(db, meeting)}
+        if rec_note:
+            out["recording"] = rec_note
+        return out
 
     # telnyx / sip - dial through the provider
     if not endpoint_id:
@@ -974,4 +989,15 @@ async def end_meeting(db: AsyncSession, owner_id: str | None, meeting_id: str) -
     row.ended_at = _now()
     db.add(row)
     await db.flush()
-    return await meeting_out(db, row)
+    # v79: the room cannot outlive its archive - an active recording is
+    # stopped automatically (best-effort; a failed archive never fails
+    # the room's end)
+    from . import voice_recordings as rec_svc
+
+    archive = await rec_svc.stop_active_for_meeting(db, row, reason="meeting_ended")
+    out = await meeting_out(db, row)
+    if archive is not None:
+        out["recording"] = {"id": archive["id"], "state": archive["state"],
+                            "counts": archive["counts"],
+                            "artifacts": archive["artifacts"]}
+    return out

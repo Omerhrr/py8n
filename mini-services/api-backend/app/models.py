@@ -1325,6 +1325,44 @@ class VoiceMeetingMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
+class VoiceMeetingRecording(Base):
+    """A meeting's recording/transcription ARCHIVE (v79).
+
+    py8n is not the media plane (the browsers' WebRTC stacks carry the
+    pixels peer-to-peer), so a py8n meeting archive is honest about what
+    it can hold: the words and the audio that actually flowed THROUGH
+    py8n. One row per recording pass over a room:
+
+    * the TRANSCRIPT - the room's derived merged transcript (asr.final +
+      tts.started across the legs) and the chat log, snapshotted into
+      artifacts at stop time - the transcription archive;
+    * the AUDIO of the web legs - the utterances the media websocket
+      decoded (speech.ended segments) are accumulated in an in-process
+      capture buffer while the recording runs and written as real WAV
+      artifacts at stop time. Phone legs ride the carrier's media plane;
+      py8n never has their audio and the archive says so per leg.
+
+    The row is the handle; the artifacts are the content. State:
+    recording -> stopped (or failed). Nothing derived is stored twice:
+    participant lists, durations and counts are recomputed on read from
+    the row's meta pointers and the meeting itself.
+    """
+
+    __tablename__ = "voice_meeting_recordings"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    meeting_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # recording | stopped | failed
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="recording",
+                                       index=True)
+    # pointers to the archived content (artifact ids), set at stop time
+    meta: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ChannelQueue(Base):
     """A channel-side waiting room (v76) - queueing and waiting as a
     first-class primitive.

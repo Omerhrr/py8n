@@ -1333,6 +1333,14 @@ async def media_stream(websocket: WebSocket, session_id: str):
                                                        "end_ms": seg.end_ms,
                                                        "duration_ms": seg.duration_ms})
                         await _send({"event": "speech.ended", "segment": seg.out()})
+                        # v79: a room under recording captures this leg's
+                        # utterance audio (in-process registry; the WAV
+                        # artifact is written when the recording stops)
+                        from ..services import voice_recordings as rec_svc
+
+                        rec_svc.append_utterance(session_id, seg.pcm,
+                                                 seg.duration_ms,
+                                                 frame.sample_rate)
                         # v71: engine resolution - the start frame's
                         # customParameters win, else the session's VoiceAgent,
                         # else py8n_local
@@ -1613,3 +1621,84 @@ async def meeting_video_state(meeting_id: str, user=Depends(get_optional_user),
     legs = await meetings_svc._participants(db, meeting.id)
     return {"meeting_id": meeting.id, "state": meeting.state,
             "video": voice_video.video_state(legs)}
+
+
+# ---------------------------------------------------------------------------
+# v79: recording / transcription archives
+# ---------------------------------------------------------------------------
+
+
+class RecordingCreate(BaseModel):
+    name: str = Field(default="", max_length=200,
+                      description="a human name for the archive (default: recording <title>)")
+
+
+@router.post("/meetings/{meeting_id}/recordings", status_code=201)
+async def start_meeting_recording(meeting_id: str, body: RecordingCreate,
+                                  user=Depends(get_optional_user),
+                                  db: AsyncSession = Depends(get_db)):
+    """Open a recording pass over an ACTIVE room: one at a time, capture
+    starts for the joined web legs' utterances, every leg's timeline
+    learns the room is being recorded (recording.started)."""
+    from ..services import voice_recordings as rec_svc
+
+    try:
+        return await rec_svc.start_recording(db, getattr(user, "id", None),
+                                             meeting_id, name=body.name)
+    except rec_svc.RecordingError as exc:
+        raise _http(exc) from exc
+
+
+@router.get("/meetings/{meeting_id}/recordings")
+async def list_meeting_recordings(meeting_id: str, limit: int = 50,
+                                  user=Depends(get_optional_user),
+                                  db: AsyncSession = Depends(get_db)):
+    """The room's recording passes, newest first (handles + derived
+    counts; the CONTENT rides the artifact ids)."""
+    from ..services import voice_recordings as rec_svc
+
+    return {"recordings": await rec_svc.list_recordings(
+        db, getattr(user, "id", None), meeting_id=meeting_id, limit=limit)}
+
+
+@router.get("/recordings")
+async def list_all_recordings(limit: int = 50, user=Depends(get_optional_user),
+                              db: AsyncSession = Depends(get_db)):
+    """Every recording the owner can see, newest first - the archive
+    shelf across rooms."""
+    from ..services import voice_recordings as rec_svc
+
+    return {"recordings": await rec_svc.list_recordings(
+        db, getattr(user, "id", None), limit=limit)}
+
+
+@router.get("/recordings/{recording_id}")
+async def get_recording(recording_id: str, include: bool = False,
+                        user=Depends(get_optional_user),
+                        db: AsyncSession = Depends(get_db)):
+    """One recording's handle + derived facts (per-leg coverage, artifact
+    pointers); ``include=true`` embeds the archived transcript and chat
+    read back from the artifacts."""
+    from ..services import voice_recordings as rec_svc
+
+    try:
+        return await rec_svc.get_recording(db, getattr(user, "id", None),
+                                           recording_id, include=include)
+    except rec_svc.RecordingError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/meetings/{meeting_id}/recordings/{recording_id}/stop")
+async def stop_meeting_recording(meeting_id: str, recording_id: str,
+                                 user=Depends(get_optional_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """Close the pass and WRITE THE ARCHIVE: the transcript + chat
+    snapshots and each captured web leg's utterance audio (WAV), all
+    regular artifacts pointed to by the recording row."""
+    from ..services import voice_recordings as rec_svc
+
+    try:
+        return await rec_svc.stop_recording(db, getattr(user, "id", None),
+                                            meeting_id, recording_id)
+    except rec_svc.RecordingError as exc:
+        raise _http(exc) from exc

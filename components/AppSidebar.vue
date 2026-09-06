@@ -4,7 +4,7 @@ import {
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
   FileBarChart, BookOpen, Radio, Wand2, Store, Boxes, Trash2, Unlink, BrainCircuit,
-  Globe, Rocket, MessagesSquare, Webhook,
+  Globe, Rocket, MessagesSquare, Webhook, Video,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -44,6 +44,7 @@ const nav = [
   { to: '/deployments', label: 'Deployments', icon: Rocket, match: ['/deployments'] },  // v67 live model endpoints
   { to: '/interactions', label: 'Interactions', icon: MessagesSquare, match: ['/interactions'] },  // v68 channel-agnostic conversation layer
   { to: '/channels', label: 'Channels', icon: Webhook, match: ['/channels'] },  // v69 real provider adapters + voice primitives
+  { to: '/meetings', label: 'Meetings', icon: Video, match: ['/meetings'] },  // v79 the browser meeting client - join from the app
   { to: '/documents', label: 'Documents', icon: FileText, match: ['/documents'] },
   { to: '/apps', label: 'Apps', icon: LayoutGrid, match: ['/apps'] },
   { to: '/dashboards', label: 'Dashboards', icon: Gauge, match: ['/dashboards'] },
@@ -210,7 +211,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.78 · 61 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.79 · 61 node types</span>
       </div>
     </div>
   </aside>

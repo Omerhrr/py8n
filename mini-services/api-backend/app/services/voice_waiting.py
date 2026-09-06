@@ -37,6 +37,7 @@ never mid-announcement).
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -49,9 +50,18 @@ DEFAULT_ANNOUNCE = ("You are number {position} of {depth} in line for {queue_nam
                     "You have been waiting {waited_seconds} seconds.")
 DEFAULT_SMS = ("{queue_name}: you are #{position} of {depth} in line "
                "(waited {waited_seconds}s). We'll text if anything changes.")
+# v79: the auto-answer confirms the keyword by text - one template per
+# action (the callback one keeps the caller's place in the conversation)
+DEFAULT_AUTO_REPLY_CALLBACK = ("{queue_name}: you replied {keyword} - you are off "
+                               "hold and keep your place (#{position} of {depth}). "
+                               "We will call you back at this number.")
+DEFAULT_AUTO_REPLY_ABANDON = ("{queue_name}: you replied {keyword} and have left "
+                              "the line. Thank you for your patience.")
 
 TEMPLATE_KEYS = ("position", "depth", "waited_seconds", "queue_name")
+AUTO_TEMPLATE_KEYS = TEMPLATE_KEYS + ("keyword",)
 MAX_SMS_HISTORY = 20
+AUTO_ANSWER_ACTIONS = ("callback", "abandon")
 
 
 class WaitingError(ValueError):
@@ -110,6 +120,23 @@ def waiting_config(raw: dict | None) -> dict:
     }
     render_template(sms_cfg["template"] or DEFAULT_SMS,
                     position=2, depth=5, waited_seconds=43, queue_name="q")
+    # v79: the auto-answer - the caller REPLYING to the backchannel can
+    # leave the line by text. Validated at CONFIG WRITE time like every
+    # other template (a bad keyword/action refuses loudly, never mid-
+    # conversation).
+    auto = dict(sms.get("auto_answer") or {})
+    keyword = str(auto.get("keyword") or "1").strip()[:20] or "1"
+    action = str(auto.get("action") or "callback").strip().lower()
+    if action not in AUTO_ANSWER_ACTIONS:
+        raise WaitingError(f"sms.auto_answer.action must be "
+                           f"{'|'.join(AUTO_ANSWER_ACTIONS)}, got {action!r}")
+    auto_cfg = {"enabled": bool(auto.get("enabled", False)),
+                "keyword": keyword, "action": action,
+                "reply_template": str(auto.get("reply_template") or "").strip()[:400] or ""}
+    render_template(auto_cfg["reply_template"] or DEFAULT_AUTO_REPLY_CALLBACK,
+                    position=2, depth=5, waited_seconds=43, queue_name="q",
+                    keyword=keyword)
+    sms_cfg["auto_answer"] = auto_cfg
     return {"announce": cfg, "sms": sms_cfg}
 
 
@@ -407,3 +434,163 @@ async def sms_update_pass(db: AsyncSession, queue: ChannelQueue, *,
             "considered": len(items),
             "channel": {"id": endpoint.id, "name": endpoint.name,
                         "provider": endpoint.provider}}
+
+
+# ---------------------------------------------------------------------------
+# v79: the SMS auto-answer - the caller REPLIES to the backchannel and
+# the queue answers: "1" means leave the line
+# ---------------------------------------------------------------------------
+
+
+def _norm_addr(value: str) -> str:
+    """Phone-ish address normalization: whitespace gone, case folded. An
+    exact dialable address is the contract; this only stops a missing
+    match on '+1 555' vs '+1555'."""
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+async def _auto_answer_queues(db: AsyncSession, endpoint: ChannelEndpoint) -> list[ChannelQueue]:
+    """Queues whose SMS backchannel rides THIS endpoint and turned the
+    auto-answer on (owner-scoped like sms_update_pass: either side may be
+    unscoped; a mismatch never matches)."""
+    q = select(ChannelQueue).where(ChannelQueue.state == "open")
+    rows = list((await db.execute(q)).scalars().all())
+    out: list[ChannelQueue] = []
+    for queue in rows:
+        if (queue.owner_id is not None and endpoint.owner_id is not None
+                and queue.owner_id != endpoint.owner_id):
+            continue
+        cfg = waiting_config(queue.config)
+        sms = cfg["sms"]
+        if sms["enabled"] and sms["channel_id"] == endpoint.id \
+                and sms["auto_answer"]["enabled"]:
+            out.append(queue)
+    return out
+
+
+async def try_auto_answer(db: AsyncSession, *, endpoint: ChannelEndpoint,
+                          sender: str, text: str) -> dict | None:
+    """The inbound-SMS intercept, run BEFORE the conversation layer.
+
+    A text arriving from a caller who is WAITING in a queue bound to this
+    endpoint (SMS backchannel + auto-answer enabled) that matches the
+    queue's keyword is an answer to the QUEUE'S OFFER, not a turn for the
+    agent: the entry leaves the line (action=callback composes the hold
+    into the v78 callback campaign - keep the place, end the hold, book
+    the dial; action=abandon closes the entry), the reply is confirmed by
+    SMS through the same endpoint, and the whole story lands in the
+    entry's backchannel log and on the session timeline.
+
+    Returns None when this message is not the auto-answer's business
+    (wrong provider, no waiting entry for the sender, non-keyword text) -
+    the caller then gets the normal conversation path. On the happy path
+    the return is the handled record and the writes are COMMITTED here
+    (the intercept does not ride the ingest's commit)."""
+    if endpoint.provider not in SMS_PROVIDERS:
+        return None
+    body = str(text or "").strip()
+    sender_norm = _norm_addr(sender)
+    if not body or not sender_norm:
+        return None
+    for queue in await _auto_answer_queues(db, endpoint):
+        items = await _live_waiting(db, queue)
+        item = next((it for it in items
+                     if _norm_addr(it["entry"].address) == sender_norm), None)
+        if item is None:
+            continue
+        auto = waiting_config(queue.config)["sms"]["auto_answer"]
+        if body.lower() != auto["keyword"].lower():
+            continue  # a real message from a waiting caller - not the keyword
+        entry: ChannelQueueEntry = item["entry"]
+        session: VoiceSession = item["session"]
+        # plain ids captured BEFORE any rollback: a rollback expires the ORM
+        # objects, and attribute access on an expired instance in async
+        # context raises MissingGreenlet
+        entry_id = entry.id
+        session_id = session.id
+        queue_id = queue.id
+        queue_name = queue.name
+
+        def _log(meta: dict, event: str, **fields) -> dict:
+            history = list(meta.get("sms") or [])
+            history.append({"at": _now().isoformat(), "event": event, **fields})
+            meta["sms"] = history[-MAX_SMS_HISTORY:]
+            return meta
+
+        # the inbound reply is traffic: the backchannel log + the timeline
+        meta = _log(dict(entry.meta or {}), "inbound_reply", text=body[:200])
+        entry.meta = meta
+        db.add(entry)
+        await voice_svc._add_event(db, session, "queue.sms",
+                                   {"queue_id": queue.id, "event": "inbound_reply",
+                                    "from": sender, "text": body[:300]})
+        await db.flush()
+        # the ACTION (failures are honest records, never a 500 on a webhook)
+        try:
+            if auto["action"] == "callback":
+                from . import voice_callbacks
+
+                if not voice_callbacks.callback_config(queue.config)["enabled"]:
+                    raise WaitingError(
+                        "the queue does not take callbacks (config.callback.enabled)")
+                out = await voice_callbacks.request_callback(
+                    db, queue.owner_id, queue.id, entry.id)
+                action_out = {"action": "callback", "done": True,
+                              "entry_id": out["entry_id"],
+                              "campaign_id": out["campaign_id"],
+                              "target_id": out["target_id"]}
+            else:
+                from . import voice_queue
+
+                out = await voice_queue.leave_queue(db, queue.owner_id,
+                                                    queue.id, entry.id)
+                action_out = {"action": "abandon", "done": True,
+                              "entry_id": out["left"]}
+        except Exception as exc:  # noqa: BLE001 - a refused leave is a record,
+            # never a 500 on a webhook. Deliberately NO rollback here: the
+            # request session still owes the webhook's own writes (endpoint
+            # counters, this log), and a rollback would expire those ORM
+            # objects for every later touch (the MissingGreenlet trap).
+            # Every refusal raised in the actions fires BEFORE any state
+            # write, so the pending truth stays exactly what the caller
+            # said: the reply, refused, entry untouched.
+            entry.meta = _log(dict(entry.meta or {}), "auto_answer_refused",
+                              detail=str(exc)[:200])
+            db.add(entry)
+            await voice_svc._add_event(db, session, "queue.sms",
+                                       {"queue_id": queue_id,
+                                        "event": "auto_answer_refused",
+                                        "from": sender,
+                                        "detail": str(exc)[:300]})
+            await db.commit()
+            return {"queue_id": queue_id, "queue_name": queue_name,
+                    "entry_id": entry_id, "session_id": session_id,
+                    "action": {"action": auto["action"], "done": False,
+                               "detail": str(exc)[:300]},
+                    "reply": None, "delivery": None, "text": body}
+        # the confirmation SMS through the SAME endpoint the reply came in on
+        values = {"queue_name": queue.name, "position": item["position"],
+                  "depth": item["depth"], "waited_seconds": int(item["waited"]),
+                  "keyword": auto["keyword"]}
+        template = auto["reply_template"] or (
+            DEFAULT_AUTO_REPLY_CALLBACK if auto["action"] == "callback"
+            else DEFAULT_AUTO_REPLY_ABANDON)
+        reply = render_template(template, **values)
+        from . import channel_endpoints
+
+        delivery = await channel_endpoints.deliver_outbound(
+            endpoint, entry.address or sender, reply)
+        # the send lands in the log like every other backchannel send
+        entry.meta = _log(dict(entry.meta or {}), "auto_answer_reply",
+                          delivery=delivery.get("delivery"),
+                          detail=str(delivery.get("detail") or "")[:200],
+                          text=reply[:200])
+        db.add(entry)
+        await db.commit()
+        return {"queue_id": queue_id, "queue_name": queue_name,
+                "entry_id": entry_id, "session_id": session_id,
+                "action": action_out, "reply": reply,
+                "delivery": {"delivery": delivery.get("delivery"),
+                             "detail": str(delivery.get("detail") or "")[:200]},
+                "text": body}
+    return None

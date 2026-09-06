@@ -73,6 +73,9 @@ EVENT_KINDS = (
     # session timeline (the pixels themselves never touch py8n: WebRTC
     # carries them, py8n owns the registry + the signaling relay)
     "video.started", "video.stopped",
+    # v79: recording archives - the room was told it is being recorded /
+    # the recording pass closed and archived what flowed through py8n
+    "recording.started", "recording.stopped",
 )
 
 END_KINDS = {  # event kind -> end_reason recorded on the session
