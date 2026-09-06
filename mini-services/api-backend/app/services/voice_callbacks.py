@@ -159,6 +159,16 @@ async def request_callback(db: AsyncSession, owner_id: str | None, queue_id: str
                     "entry keeps its original place in line"),
            }
     out.update(hooks)
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, row.owner_id, "callback.scheduled", source="campaign",
+                          actor=entry.address or entry.label,
+                          target_type="campaign_target", target_id=target.id,
+                          payload={"queue_id": row.id, "queue_name": row.name,
+                                   "campaign_id": campaign.id,
+                                   "entry_id": entry.id},
+                          correlation_id=entry.session_id or entry.id,
+                          session_id=entry.session_id)
     return out
 
 

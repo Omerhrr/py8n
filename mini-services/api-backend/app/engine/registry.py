@@ -48,7 +48,7 @@ from .nodes.http import HttpRequestNode
 from .nodes.loop import BatchTriggerNode, LoopOverItemsNode
 from .nodes.sticky import StickyNoteNode
 from .nodes.subflow import ExecuteWorkflowNode
-from .nodes.triggers import ChatTriggerNode, DatasetTriggerNode, ErrorTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
+from .nodes.triggers import ChatTriggerNode, DatasetTriggerNode, ErrorTriggerNode, EventTriggerNode, ManualTriggerNode, ScheduleTriggerNode, WebhookTriggerNode
 from .nodes.wait import WaitForResumeNode
 from .nodes.webhook_respond import RespondToWebhookNode
 
@@ -67,6 +67,7 @@ for _cls in (
     ScheduleTriggerNode,
     DatasetTriggerNode,  # v50: fire when a watched dataset gets a new version
     ChatTriggerNode,    # v25: conversational workflows - one run per chat message
+    EventTriggerNode,   # v80: fire when a system event matches the type pattern
     HttpRequestNode,
     ExecuteWorkflowNode,
     IfConditionNode,

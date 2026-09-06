@@ -127,6 +127,18 @@ export function useApi() {
     return url
   }
 
+  // v80: the event system's live tail - the same token-on-query-param
+  // handshake the execution sockets use (browsers cannot set WS headers).
+  function streamUrl(path: string): string {
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+    const url = mode === 'gateway'
+      ? `${proto}://${location.host}${path}?XTransformPort=${apiPort}`
+      : `${proto}://${location.hostname}:${apiPort}${path}`
+    const auth = useAuthStore()
+    if (auth.token) return `${url}&token=${encodeURIComponent(auth.token)}`
+    return url
+  }
+
   // URL for raw backend content (artifact images etc.) - gateway param honored.
   // Accepts paths with or without the /api/v1 prefix (artifact_url ships WITH it).
   function srcUrl(path: string): string {
@@ -155,5 +167,5 @@ export function useApi() {
     return URL.createObjectURL(await res.blob())
   }
 
-  return { api, wsUrl, mediaUrl, srcUrl, download, blobUrl, mode }
+  return { api, wsUrl, mediaUrl, streamUrl, srcUrl, download, blobUrl, mode }
 }

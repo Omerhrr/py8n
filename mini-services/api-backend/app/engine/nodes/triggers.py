@@ -284,3 +284,69 @@ class ErrorTriggerNode(BaseNode):
         if self.params.include_failed_nodes:
             payload["failed_nodes"] = tp.get("failed_nodes") or []
         return self._single(payload)
+
+
+class EventTriggerNode(BaseNode):
+    """Fired by the real-time event system (v80).
+
+    Every system event (call.waiting, queue.position_changed,
+    participant.joined, meeting.ended, sms.received, ...) is matched
+    against this node's pattern (an exact type or an fnmatch wildcard
+    like ``queue.*``); every active workflow whose pattern matches is
+    dispatched with the event as its payload. This is the node that
+    turns py8n's real-time primitives into composable systems:
+
+        participant.joined -> load context -> AI agent greets
+        queue.position_changed -> position >= 5 -> offer callback
+        meeting.ended -> transcribe -> summarize -> create tasks
+    """
+
+    type = "event_trigger"
+    name = "Event Trigger"
+    description = (
+        "Starts the workflow when a system event matches the type pattern "
+        "(exact 'meeting.ended' or wildcard 'queue.*'). Fires on the event "
+        "system's live stream - calls, queues, meetings, tracks, recordings, "
+        "SMS, callbacks, media sessions."
+    )
+    category = "triggers"
+    icon = "radio"
+    color = "#06b6d4"
+    inputs: ClassVar[list[Handle]] = []
+    outputs: ClassVar[list[Handle]] = [Handle("main", "Out")]
+
+    class ParamsModel(BaseModel):
+        event_type: str = Field(
+            default="",
+            description=(
+                "Event type pattern: exact ('meeting.ended') or wildcard "
+                "('queue.*', 'participant.*'). Required - a trigger without "
+                "a pattern matches nothing."
+            ),
+        )
+        source: str = Field(
+            default="",
+            description="Optional source filter (voice | queue | sms | meeting | video | recording | media | campaign | user | system)",
+            json_schema_extra={
+                "widget": "select",
+                "options": ["", "voice", "queue", "sms", "meeting", "video",
+                            "recording", "media", "campaign", "user", "system"],
+            },
+        )
+
+    async def execute(self, context) -> NodeResult:
+        tp = context.trigger_payload
+        event = tp.get("event") or {}
+        return self._single(
+            {
+                "event": event,
+                "type": event.get("type"),
+                "source": event.get("source"),
+                "actor": event.get("actor"),
+                "payload": event.get("payload") or {},
+                "correlation_id": event.get("correlation_id"),
+                "session_id": event.get("session_id"),
+                "trigger_type": "event",
+                "triggered_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )

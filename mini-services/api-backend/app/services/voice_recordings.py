@@ -287,6 +287,13 @@ async def start_recording(db: AsyncSession, owner_id: str | None, meeting_id: st
                 "note": ("recording - the transcript and chat snapshot at stop "
                          "time; web legs' utterance audio accumulates from NOW "
                          "(earlier speech predates the recording)")})
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "recording.started", source="recording",
+                          actor=owner_id or "system", target_type="recording",
+                          target_id=row.id,
+                          payload={"meeting_id": meeting.id, "name": row.name},
+                          correlation_id=meeting.id)
     return out
 
 
@@ -439,6 +446,19 @@ async def stop_recording(db: AsyncSession, owner_id: str | None, meeting_id: str
     out["note"] = ("the archive is written: transcript + chat snapshots and the "
                    "captured web legs' utterance audio (WAV), each a regular "
                    "artifact - the recording row is the handle")
+    # v80: the archive landing is a system event - the fact a
+    # meeting.ended -> summarize -> action-items workflow keys off
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, row.owner_id, "recording.ready", source="recording",
+                          actor="system", target_type="recording", target_id=row.id,
+                          payload={"meeting_id": row.meeting_id,
+                                   "transcript_artifact_id": meta.get("transcript_artifact_id"),
+                                   "chat_artifact_id": meta.get("chat_artifact_id"),
+                                   "transcript_lines": meta.get("transcript_lines"),
+                                   "audio_blocks": len(audio_blocks),
+                                   "stop_reason": reason},
+                          correlation_id=row.meeting_id)
     return out
 
 

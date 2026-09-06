@@ -102,6 +102,10 @@ class Workflow(Base):
         """v50: dataset watchers - fire when a watched dataset version advances."""
         return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "dataset_trigger"]
 
+    def event_trigger_nodes(self) -> list[dict]:
+        """v80: event watchers - fire when a system event matches the pattern."""
+        return [n for n in (self.graph or {}).get("nodes", []) if n.get("type") == "event_trigger"]
+
 
 class ExecutionLog(Base):
     """Persisted record of one workflow execution, including per-node runs."""
@@ -1534,3 +1538,92 @@ class VoiceAgent(Base):
     llm_credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     context: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SystemEvent(Base):
+    """A first-class real-time event (v80) - the primitive that makes the
+    other primitives composable.
+
+    Everything the real-time layers do generates one: calls start and
+    end, callers wait and get seated, participants join rooms, tracks
+    publish, recordings land, texts arrive, callbacks schedule. An event
+    is TRAFFIC (it happened - the same deliberate exception to
+    derived-never-stored as the call timeline), stored once and readable
+    by anyone the owner hands the filter to:
+
+    * ``source``  - the system component that emitted it (voice, queue,
+      sms, meeting, video, recording, media, campaign, user);
+    * ``type``    - the dotted, namespaced what-happened
+      (``call.waiting``, ``queue.position_changed``, ``participant.joined``,
+      ``meeting.ended``, ``recording.ready``, ``sms.received``);
+    * ``actor``   - who did it (a session ref, a participant label, a
+      user, ``system``);
+    * ``target``  - the entity it happened to (type + id);
+    * ``payload`` - the event's own data (positions, keywords, artifact
+      pointers) so a reacting workflow never has to re-fetch blindly;
+    * ``correlation_id`` - the thread that ties a journey together (one
+      caller's queue wait across announcements, SMS and the callback);
+    * ``session_id`` - the live call it rode on, when one existed.
+
+    Workflows subscribe with the Event Trigger node (a type pattern like
+    ``queue.*``); when an event lands, matching workflows are dispatched
+    fire-and-forget with the event as the trigger payload - that is the
+    moment py8n's primitives become systems: participant.joined can load
+    context and greet, position >= 5 can offer a callback, meeting.ended
+    can transcribe, summarize and create tasks.
+    """
+
+    __tablename__ = "system_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    target_type: Mapped[str] = mapped_column(String(40), nullable=False, default="")
+    target_id: Mapped[str] = mapped_column(String(180), nullable=False, default="")
+    correlation_id: Mapped[str] = mapped_column(String(180), nullable=False, default="", index=True)
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
+                                                 index=True)
+
+
+class MediaSession(Base):
+    """The real-time runtime object (v80) - the MediaSession abstraction.
+
+    v69..v79 grew the real-time layers as honest primitives: calls
+    (state machine + ASR/TTS + barge-in), meetings (the room, its legs,
+    mix/floor/chat), video (track registry + signaling relay), queues,
+    recordings. This row is the RUNTIME handle that unifies them - the
+    single object a client joins, watches and ends, whatever modality it
+    carries:
+
+        Voice Session = MediaSession + audio          (wraps a call)
+        Video Session = MediaSession + audio + video  (a video-first room)
+        Meeting       = MediaSession + participants   (the room)
+
+    The row is the handle and its config; EVERYTHING else about the
+    session is DERIVED at read time from the underlying primitive it
+    wraps (``ref_kind``/``ref_id`` -> a VoiceSession call or a
+    VoiceMeeting room): participants, audio/video/screen tracks, data
+    channels, permissions, presence, the event timeline, the active
+    recording and the transcript. Nothing is stored twice.
+    """
+
+    __tablename__ = "media_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # voice | video | meeting
+    kind: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    # session (wraps a VoiceSession call) | meeting (wraps a VoiceMeeting room)
+    ref_kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    ref_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    agent_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # active | ended
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="active", index=True)
+    config: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

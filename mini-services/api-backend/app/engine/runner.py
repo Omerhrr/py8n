@@ -412,6 +412,7 @@ class GraphRunner:
             "schedule": "schedule_trigger",
             "error": "error_trigger",  # v22: error-handler workflows start from the Error Trigger
             "chat": "chat_trigger",    # v25: chat workflows start from the Chat Trigger
+            "event": "event_trigger",  # v80: event workflows start from the Event Trigger
         }.get(self.trigger_type)
             if expected and t.type == expected:
                 return t

@@ -333,6 +333,19 @@ async def announce_pass(db: AsyncSession, queue: ChannelQueue, *,
                      "announcements": int(meta.get("announcements") or 0) + 1})
         entry.meta = meta
         db.add(entry)
+        # v80: the position change is a system event - the fact a
+        # wait-experience workflow reacts to (position >= 5 -> offer callback)
+        from . import system_events as events_svc
+
+        await events_svc.emit(db, queue.owner_id, "queue.position_changed",
+                              source="queue", actor=entry.address or entry.label,
+                              target_type="queue_entry", target_id=entry.id,
+                              payload={"queue_id": queue.id, "queue_name": queue.name,
+                                       "position": item["position"],
+                                       "depth": item["depth"],
+                                       "waited_seconds": int(item["waited"]),
+                                       "delivery": delivery.get("delivery")},
+                              correlation_id=session.id, session_id=session.id)
         announced.append({"entry_id": entry.id, "session_id": session.id,
                           "position": item["position"], "depth": item["depth"],
                           "waited_seconds": int(item["waited"]), "text": text,
@@ -424,6 +437,17 @@ async def sms_update_pass(db: AsyncSession, queue: ChannelQueue, *,
         meta["sms"] = history[-MAX_SMS_HISTORY:]
         entry.meta = meta
         db.add(entry)
+        # v80: a backchannel send is traffic the event system carries too
+        from . import system_events as events_svc
+
+        await events_svc.emit(db, queue.owner_id, "sms.sent", source="sms",
+                              actor=f"channel:{endpoint.name}",
+                              target_type="queue_entry", target_id=entry.id,
+                              payload={"queue_id": queue.id, "event": event,
+                                       "to": entry.address,
+                                       "delivery": record.get("delivery"),
+                                       "text": str(record.get("text") or "")[:200]},
+                              correlation_id=session.id, session_id=session.id)
         sent.append({"entry_id": entry.id, "session_id": session.id,
                      "position": item["position"], "to": entry.address or None,
                      "delivery": record.get("delivery"),
@@ -524,6 +548,19 @@ async def try_auto_answer(db: AsyncSession, *, endpoint: ChannelEndpoint,
         await voice_svc._add_event(db, session, "queue.sms",
                                    {"queue_id": queue.id, "event": "inbound_reply",
                                     "from": sender, "text": body[:300]})
+        # v80: the inbound keyword reply is a system event - the SMS
+        # backchannel answering the queue's offer, seen by every workflow
+        from . import system_events as events_svc
+
+        await events_svc.emit(db, queue.owner_id, "sms.received", source="sms",
+                              actor=sender, target_type="queue_entry",
+                              target_id=entry_id,
+                              payload={"queue_id": queue_id,
+                                       "queue_name": queue_name,
+                                       "keyword": auto["keyword"],
+                                       "text": body[:200],
+                                       "auto_answer_action": auto["action"]},
+                              correlation_id=session_id, session_id=session_id)
         await db.flush()
         # the ACTION (failures are honest records, never a 500 on a webhook)
         try:
@@ -586,6 +623,15 @@ async def try_auto_answer(db: AsyncSession, *, endpoint: ChannelEndpoint,
                           detail=str(delivery.get("detail") or "")[:200],
                           text=reply[:200])
         db.add(entry)
+        await events_svc.emit(db, queue.owner_id, "sms.sent", source="sms",
+                              actor=f"channel:{endpoint.name}",
+                              target_type="queue_entry", target_id=entry_id,
+                              payload={"queue_id": queue_id,
+                                       "event": "auto_answer_reply",
+                                       "to": entry.address or sender,
+                                       "delivery": delivery.get("delivery"),
+                                       "text": reply[:200]},
+                              correlation_id=session_id, session_id=session_id)
         await db.commit()
         return {"queue_id": queue_id, "queue_name": queue_name,
                 "entry_id": entry_id, "session_id": session_id,

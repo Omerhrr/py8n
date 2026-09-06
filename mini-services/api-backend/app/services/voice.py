@@ -373,6 +373,14 @@ async def create_session(db: AsyncSession, *, owner_id: str | None, direction: s
                     db.add(conv_row)
     await db.flush()
     await db.refresh(row)
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "call.created", source="voice",
+                          actor=from_ref or direction,
+                          target_type="session", target_id=row.id,
+                          payload={"direction": direction, "provider": row.provider,
+                                   "to_ref": row.to_ref, "agent_id": agent_id},
+                          correlation_id=row.id, session_id=row.id)
     return await get_session(db, row.id, owner_id)  # type: ignore[return-value]
 
 
@@ -435,6 +443,25 @@ async def apply_event(db: AsyncSession, session: VoiceSession, kind: str,
         session.end_reason = str(payload["reason"])[:40]
     db.add(session)
     await db.flush()
+    # v80: the call's life lands in the event system too - one door for
+    # every workflow that reacts to real-time telephony (the timeline row
+    # and the system event are the same fact seen from two layers)
+    from . import system_events as events_svc
+
+    if kind == "call.answered":
+        await events_svc.emit(db, session.owner_id, "call.started", source="voice",
+                              actor=session.from_ref or session.direction,
+                              target_type="session", target_id=session.id,
+                              payload={"to_ref": session.to_ref,
+                                       "provider": session.provider},
+                              correlation_id=session.id, session_id=session.id)
+    elif kind in END_KINDS:
+        await events_svc.emit(db, session.owner_id, "call.ended", source="voice",
+                              actor=session.from_ref or session.direction,
+                              target_type="session", target_id=session.id,
+                              payload={"end_reason": session.end_reason or kind,
+                                       "state": session.state},
+                              correlation_id=session.id, session_id=session.id)
     return {"event": _event_out(event), "state": session.state,
             "end_reason": session.end_reason or None}
 

@@ -364,6 +364,19 @@ async def enqueue(db: AsyncSession, owner_id: str | None, queue_id: str,
     out["note"] = ("the call is on hold and holds its place in line - seating "
                    "releases it (and attaches it to the destination meeting when "
                    "one is bound)")
+    # v80: the wait begins in the event system - the fact every
+    # wait-experience workflow composes on
+    from . import system_events as events_svc
+
+    position = next((e.get("position") for e in out.get("entries", [])
+                     if e.get("id") == entry.id), None)
+    await events_svc.emit(db, row.owner_id, "call.waiting", source="queue",
+                          actor=entry.address or entry.label,
+                          target_type="queue_entry", target_id=entry.id,
+                          payload={"queue_id": row.id, "queue_name": row.name,
+                                   "position": position,
+                                   "session_state": "on_hold"},
+                          correlation_id=session.id, session_id=session.id)
     return out
 
 
@@ -420,6 +433,15 @@ async def seat_next(db: AsyncSession, owner_id: str | None, queue_id: str, *,
                    + (f" and attached to meeting {attached['meeting_id'][:8]}"
                       if attached else " - no destination meeting bound, the call is "
                       "back on the line for whoever takes it"))
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, row.owner_id, "call.seated", source="queue",
+                          actor=head.address or head.label,
+                          target_type="queue_entry", target_id=head.id,
+                          payload={"queue_id": row.id, "queue_name": row.name,
+                                   "meeting_id": attached["meeting_id"] if attached else None,
+                                   "waited_meta": seat_meta},
+                          correlation_id=head_session.id, session_id=head_session.id)
     return out
 
 
@@ -450,4 +472,13 @@ async def leave_queue(db: AsyncSession, owner_id: str | None, queue_id: str,
     out = await queue_out(db, row)
     out.update(hooks)
     out["left"] = entry.id
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, row.owner_id, "queue.left", source="queue",
+                          actor=entry.address or entry.label,
+                          target_type="queue_entry", target_id=entry.id,
+                          payload={"queue_id": row.id, "queue_name": row.name,
+                                   "reason": "queue_leave"},
+                          correlation_id=entry.session_id or entry.id,
+                          session_id=entry.session_id)
     return out

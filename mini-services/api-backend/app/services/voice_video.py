@@ -140,6 +140,14 @@ async def publish_track(db: AsyncSession, owner_id: str | None, meeting_id: str,
              "participant_id": p.id, "label": p.label or p.address,
              "track_id": track_id, "kind": kind}
     push = await voice_push.push_to_session_legs([q.session_id for q in others], frame)
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "track.published", source="video",
+                          actor=p.label or p.address or "participant",
+                          target_type="meeting", target_id=meeting.id,
+                          payload={"track_id": track_id, "kind": kind,
+                                   "participant_id": p.id},
+                          correlation_id=meeting.id, session_id=p.session_id)
     return {"meeting_id": meeting.id, "participant_id": p.id,
             "track": {**tracks[-1]}, "event_id": event.id if event else None,
             "push": {**push, "notified_legs": len(others)},
@@ -190,6 +198,14 @@ async def unpublish_track(db: AsyncSession, owner_id: str | None, meeting_id: st
              "participant_id": p.id, "label": p.label or p.address,
              "track_id": track_id, "kind": hit.get("kind")}
     push = await voice_push.push_to_session_legs([q.session_id for q in others], frame)
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "track.unpublished", source="video",
+                          actor=p.label or p.address or "participant",
+                          target_type="meeting", target_id=meeting.id,
+                          payload={"track_id": track_id, "kind": hit.get("kind"),
+                                   "participant_id": p.id},
+                          correlation_id=meeting.id, session_id=p.session_id)
     return {"meeting_id": meeting.id, "participant_id": p.id,
             "track": hit, "event_id": event.id if event else None,
             "push": {**push, "notified_legs": len(others)},

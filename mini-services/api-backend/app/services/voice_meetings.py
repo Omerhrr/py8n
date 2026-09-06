@@ -327,6 +327,23 @@ async def set_floor(db: AsyncSession, owner_id: str | None, meeting_id: str, *,
     meeting.context = ctx
     db.add(meeting)
     await db.flush()
+    from . import system_events as events_svc
+
+    if mode == "directed" and participant_id:
+        holder = await db.get(VoiceMeetingParticipant, participant_id)
+        await events_svc.emit(db, owner_id, "floor.granted", source="meeting",
+                              actor=holder.label if holder else participant_id,
+                              target_type="meeting", target_id=meeting.id,
+                              payload={"participant_id": participant_id,
+                                       "mode": "directed"},
+                              correlation_id=meeting.id,
+                              session_id=holder.session_id if holder else None)
+    else:
+        await events_svc.emit(db, owner_id, "floor.released", source="meeting",
+                              actor=owner_id or "system", target_type="meeting",
+                              target_id=meeting.id,
+                              payload={"mode": "auto"},
+                              correlation_id=meeting.id)
     return {"meeting": await meeting_out(db, meeting)}
 
 
@@ -528,6 +545,14 @@ async def post_chat_message(db: AsyncSession, owner_id: str | None, meeting_id: 
     out["push"] = {"legs": push["legs"], "delivered": delivered,
                    "note": "frames accepted by live media websockets in this "
                            "process - the chat log is the source of truth"}
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "chat.posted", source="meeting",
+                          actor=row.author, target_type="meeting", target_id=meeting.id,
+                          payload={"role": row.role, "text": row.text[:300],
+                                   "message_id": row.id,
+                                   "participant_id": row.participant_id},
+                          correlation_id=meeting.id, session_id=row.session_id)
     return out
 
 
@@ -603,6 +628,14 @@ async def raise_hand(db: AsyncSession, owner_id: str | None, meeting_id: str,
     db.add(meeting)
     await db.flush()
     legs = await _participants(db, meeting_id)
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, owner_id, "hand.raised", source="meeting",
+                          actor=p.label or p.address or "participant",
+                          target_type="meeting", target_id=meeting.id,
+                          payload={"participant_id": p.id,
+                                   "queue_position": len(_hand_entries(meeting))},
+                          correlation_id=meeting.id, session_id=p.session_id)
     return {"hand_queue": hand_queue_out(meeting, legs),
             "participant": participant_out(p, None)}
 
@@ -875,6 +908,19 @@ async def join_participant(db: AsyncSession, owner_id: str | None, meeting_id: s
                "meeting": await meeting_out(db, meeting)}
         if rec_note:
             out["recording"] = rec_note
+        # v80: the room's news in the event system - the fact a greeting
+        # workflow composes on (participant.joined -> load context -> greet)
+        from . import system_events as events_svc
+
+        await events_svc.emit(db, owner_id, "participant.joined", source="meeting",
+                              actor=label or p.address or "participant",
+                              target_type="meeting_participant", target_id=p.id,
+                              payload={"meeting_id": meeting.id,
+                                       "meeting_title": meeting.title,
+                                       "channel": "web",
+                                       "session_id": session["id"],
+                                       "participants": len(await _participants(db, meeting.id))},
+                              correlation_id=meeting.id, session_id=session["id"])
         return out
 
     # telnyx / sip - dial through the provider
@@ -960,6 +1006,20 @@ async def link_call(db: AsyncSession, *, call_control_id: str,
                 bound = None
     db.add(p)
     await db.flush()
+    if p.state == "joined":
+        from . import system_events as events_svc
+
+        await events_svc.emit(db, meeting.owner_id, "participant.joined",
+                              source="meeting",
+                              actor=p.label or p.address or "participant",
+                              target_type="meeting_participant", target_id=p.id,
+                              payload={"meeting_id": meeting.id,
+                                       "meeting_title": meeting.title,
+                                       "channel": p.channel,
+                                       "session_id": session.id if session is not None else None,
+                                       "participants": len(await _participants(db, meeting.id))},
+                              correlation_id=meeting.id,
+                              session_id=session.id if session is not None else None)
     return {"meeting_id": meeting.id, "participant_id": p.id,
             "state": p.state, "agent_bound": bound}
 
@@ -1000,4 +1060,12 @@ async def end_meeting(db: AsyncSession, owner_id: str | None, meeting_id: str) -
         out["recording"] = {"id": archive["id"], "state": archive["state"],
                             "counts": archive["counts"],
                             "artifacts": archive["artifacts"]}
+    from . import system_events as events_svc
+
+    await events_svc.emit(db, row.owner_id, "meeting.ended", source="meeting",
+                          actor=owner_id or "system", target_type="meeting",
+                          target_id=row.id,
+                          payload={"title": row.title, "hung_up_legs": hung_up,
+                                   "recording_id": archive["id"] if archive else None},
+                          correlation_id=row.id)
     return out
