@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
     App,
+    BusinessProcess,
     ChannelQueue,
     Dashboard,
     Dataset,
@@ -43,7 +44,7 @@ from .health import compute_health
 # v81: the interaction layer joins the estate - a system covers
 # Interactions (agents, waiting rooms, rooms), not just data plumbing.
 COMPONENT_KINDS = ("workflow", "dataset", "app", "dashboard", "model", "report", "model_system",
-                   "voice_agent", "queue", "meeting")
+                   "voice_agent", "queue", "meeting", "process")
 KIND_TABLES = {
     "workflow": Workflow,
     "dataset": Dataset,
@@ -55,6 +56,7 @@ KIND_TABLES = {
     "voice_agent": VoiceAgent,    # v81: the phone agent
     "queue": ChannelQueue,        # v81: the channel-side waiting room
     "meeting": VoiceMeeting,      # v81: the (persistent) room
+    "process": BusinessProcess,   # v84: the business state machine
 }
 HEALTH_BUDGET = 10  # datasets fully health-scored per system-health call
 

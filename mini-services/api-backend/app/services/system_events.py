@@ -47,7 +47,7 @@ from ..models import SystemEvent, Workflow
 # (POST /events - a workflow or an operator composing); ``system`` is
 # reserved for the platform itself.
 EVENT_SOURCES = ("voice", "queue", "sms", "meeting", "video", "recording",
-                 "media", "campaign", "user", "system")
+                 "media", "campaign", "user", "system", "business")
 
 # dotted, lowercase, at least two segments: call.waiting, queue.position_changed
 _TYPE_RE = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$")

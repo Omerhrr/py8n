@@ -115,6 +115,8 @@ async def event_contracts():
                        "system.paused", "system.resumed", "system.upgraded",
                        "system.component_added", "system.component_removed",
                        "system.built"],  # v82: the AI composer builds a system
+            # v84: the business state machines move - long-running autonomy
+            "business": ["business.state_changed"],
         },
         "trigger_node": {
             "type": "event_trigger",
