@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Store, CheckCircle2, Download, Search, PackageOpen,
   AlertTriangle, ExternalLink, Sparkles, X, Layers, BrainCircuit, Boxes, Phone, Bot,
+  Building2, Video, TrendingUp, HeartPulse, LayoutDashboard,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -14,6 +15,24 @@ import { useApi } from '~/composables/useApi'
 // MODEL SYSTEM (datasets + training/serving workflows as one unit).
 // v72: + AS A VOICE AGENT (knowledge dataset + handler + phone agent,
 // one click -> a full phone-agent system).
+// v83: OPERATORS - the shelf above solutions. "Install a business
+// operator" not "Install a workflow template": one click composes the
+// whole business (datasets + event-reactive workflows + agent + room +
+// queue + campaign + staff dashboard) into a RUNNING system.
+
+interface OperatorSummary {
+  slug: string; name: string; tagline: string; category: string
+  icon: string; color: string; outcomes: string[]
+  topology: { datasets: number; workflows: number; agents: number
+    rooms: number; queues: number; campaign: number; dashboard: number }
+}
+interface OperatorResult {
+  datasets: any[]; workflows: any[]; agents: any[]; rooms: any[]
+  queues: any[]; campaign: { id: string; name: string } | null
+  dashboard: { id: string; name: string; slug: string } | null
+  system: { id: string; name: string; lifecycle: string } | null
+  notes: string[]
+}
 
 interface SolutionSummary {
   id: string; slug: string; name: string; tagline: string; category: string
@@ -40,6 +59,41 @@ const solutions = ref<SolutionSummary[]>([])
 const categories = ref<string[]>([])
 const category = ref('')
 const q = ref('')
+
+// v83: the operators shelf above the solutions grid
+const operators = ref<OperatorSummary[]>([])
+const installingOp = ref('')
+const opResults = ref<Record<string, OperatorResult>>({})
+const opErrors = ref<Record<string, string>>({})
+
+const OP_ICONS: Record<string, any> = {
+  video: Video, 'trending-up': TrendingUp, 'heart-pulse': HeartPulse,
+}
+function opIcon(icon: string) {
+  return OP_ICONS[icon] || Building2
+}
+
+async function loadOperators() {
+  try {
+    const res = await api.get<{ operators: OperatorSummary[] }>('/operators')
+    operators.value = res.operators
+  } catch {
+    // the shelf stays empty honestly - the solutions grid still works
+  }
+}
+
+async function installOperator(slug: string) {
+  installingOp.value = slug
+  opErrors.value = { ...opErrors.value, [slug]: '' }
+  try {
+    const res = await api.post<OperatorResult>(`/operators/${slug}/install`, {})
+    opResults.value = { ...opResults.value, [slug]: res }
+  } catch (e: any) {
+    opErrors.value = { ...opErrors.value, [slug]: e?.data?.detail || e?.message || 'Install failed' }
+  } finally {
+    installingOp.value = ''
+  }
+}
 
 const detail = ref<SolutionDetail | null>(null)
 const detailLoading = ref(false)
@@ -107,7 +161,7 @@ function dsRef(d: any): string {
 }
 
 onMounted(async () => {
-  await loadShelf()
+  await Promise.all([loadShelf(), loadOperators()])
   loading.value = false
 })
 </script>
@@ -160,7 +214,84 @@ onMounted(async () => {
         <Loader2 class="h-6 w-6 animate-spin" />
       </div>
 
-      <div v-else class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <template v-else>
+        <!-- v83: OPERATORS - "Install a business operator" -->
+        <section v-if="operators.length" class="mb-8">
+          <div class="mb-3 flex items-center gap-2">
+            <Building2 class="h-4 w-4 text-emerald-400" />
+            <h2 class="text-xs font-bold uppercase tracking-widest text-emerald-300">Operators</h2>
+            <span class="text-[10px] text-zinc-600">not a workflow template - a whole business, running from the first click</span>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+            <div
+              v-for="op in operators" :key="op.slug"
+              class="flex flex-col rounded-2xl border border-emerald-900/60 bg-gradient-to-b from-zinc-900/80 to-zinc-950 p-5 transition hover:border-emerald-500/40"
+            >
+              <div class="flex items-start gap-3">
+                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-lg" :style="{ background: `linear-gradient(135deg, ${op.color}, ${op.color}55)`, boxShadow: `0 8px 20px ${op.color}22` }">
+                  <component :is="opIcon(op.icon)" class="h-5 w-5 text-zinc-950" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <p class="text-sm font-bold leading-tight">{{ op.name }}</p>
+                  <p class="mt-0.5 text-[10px] text-zinc-600">{{ op.category }} · business operator</p>
+                </div>
+              </div>
+              <p class="mt-3 text-[11px] leading-relaxed text-zinc-400">{{ op.tagline }}</p>
+              <div class="mt-3 flex flex-wrap gap-1">
+                <span class="rounded-full bg-lime-500/10 px-2 py-0.5 text-[9px] font-semibold text-lime-300">{{ op.topology.datasets }} dataset{{ op.topology.datasets === 1 ? '' : 's' }}</span>
+                <span class="rounded-full bg-orange-500/10 px-2 py-0.5 text-[9px] font-semibold text-orange-300">{{ op.topology.workflows }} reactive workflow{{ op.topology.workflows === 1 ? '' : 's' }}</span>
+                <span v-if="op.topology.agents" class="rounded-full bg-amber-500/10 px-2 py-0.5 text-[9px] font-semibold text-amber-300">AI agent</span>
+                <span v-if="op.topology.rooms" class="rounded-full bg-sky-500/10 px-2 py-0.5 text-[9px] font-semibold text-sky-300">{{ op.topology.rooms }} room{{ op.topology.rooms === 1 ? '' : 's' }}</span>
+                <span v-if="op.topology.queues" class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[9px] font-semibold text-cyan-300">waiting queue</span>
+                <span v-if="op.topology.campaign" class="rounded-full bg-violet-500/10 px-2 py-0.5 text-[9px] font-semibold text-violet-300">campaign</span>
+                <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-300">staff dashboard</span>
+              </div>
+              <div class="mt-3 space-y-1">
+                <span v-for="o in op.outcomes.slice(0, 4)" :key="o" class="flex items-center gap-1 text-[10px] text-zinc-400">
+                  <CheckCircle2 class="h-2.5 w-2.5 shrink-0" :style="{ color: op.color }" /> {{ o }}
+                </span>
+              </div>
+
+              <template v-if="opResults[op.slug]">
+                <div class="mt-3 space-y-1.5">
+                  <p class="text-[10px] font-bold uppercase tracking-widest text-emerald-400">Running - the whole estate</p>
+                  <NuxtLink v-if="opResults[op.slug].system" to="/systems" class="flex items-center justify-between rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2 transition hover:border-sky-500/50">
+                    <span class="flex items-center gap-1.5 text-xs font-semibold text-sky-200"><Boxes class="h-3.5 w-3.5" /> {{ opResults[op.slug].system.name }} ({{ opResults[op.slug].system.lifecycle }})</span>
+                    <span class="flex items-center gap-1 text-[10px] text-zinc-500">open systems <ExternalLink class="h-3 w-3" /></span>
+                  </NuxtLink>
+                  <NuxtLink v-if="opResults[op.slug].dashboard" :to="`/dashboards/${opResults[op.slug].dashboard?.id}`" class="flex items-center justify-between rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3 py-2 transition hover:border-emerald-500/50">
+                    <span class="flex items-center gap-1.5 text-xs font-semibold text-emerald-200"><LayoutDashboard class="h-3.5 w-3.5" /> {{ opResults[op.slug].dashboard?.name }}</span>
+                    <span class="flex items-center gap-1 text-[10px] text-zinc-500">open board <ExternalLink class="h-3 w-3" /></span>
+                  </NuxtLink>
+                  <NuxtLink v-for="w in opResults[op.slug].workflows" :key="w.id" :to="wfRef(w)" class="flex items-center justify-between rounded-xl border border-orange-500/30 bg-orange-500/5 px-3 py-2 transition hover:border-orange-500/50">
+                    <span class="text-xs font-semibold text-orange-200">{{ w.name }}</span>
+                    <span class="flex items-center gap-1 text-[10px] text-zinc-500">reacts to {{ w.trigger }} · inactive until boot <ExternalLink class="h-3 w-3" /></span>
+                  </NuxtLink>
+                  <p class="text-[10px] leading-relaxed text-zinc-500">{{ opResults[op.slug].notes?.[0] }}</p>
+                </div>
+              </template>
+              <p v-else-if="opErrors[op.slug]" class="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">{{ opErrors[op.slug] }}</p>
+
+              <button
+                v-if="!opResults[op.slug]"
+                class="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                :disabled="installingOp === op.slug"
+                @click="installOperator(op.slug)"
+              >
+                <Loader2 v-if="installingOp === op.slug" class="h-4 w-4 animate-spin" />
+                <Building2 v-else class="h-4 w-4" />
+                Install operator
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <div class="mb-3 flex items-center gap-2">
+          <PackageOpen class="h-4 w-4 text-cyan-400" />
+          <h2 class="text-xs font-bold uppercase tracking-widest text-cyan-300">Solutions</h2>
+          <span class="text-[10px] text-zinc-600">capability packs - install, then wire the credentials you own</span>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         <button
           v-for="s in filtered" :key="s.slug"
           class="flex flex-col rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-5 text-left transition hover:border-cyan-500/40 hover:bg-zinc-900"
@@ -192,7 +323,8 @@ onMounted(async () => {
         <p v-if="!filtered.length" class="col-span-full rounded-2xl border border-dashed border-zinc-800 py-12 text-center text-xs text-zinc-600">
           Nothing here yet - author a solution from your own workflows via POST /solutions.
         </p>
-      </div>
+        </div>
+      </template>
     </main>
 
     <!-- detail modal -->

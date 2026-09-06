@@ -264,6 +264,11 @@ async def upgrade_from_solution(db: AsyncSession, system: Py8nSystem, *,
         raise SystemRuntimeError(
             "this system was not installed from a solution - upgrade needs "
             "source_solution_slug (install with as_system=true)")
+    if slug.startswith("operator:"):
+        raise SystemRuntimeError(
+            f"this system was installed from the OPERATOR {slug.split(':', 1)[1]!r} - "
+            "operators upgrade by reinstalling from the operators shelf (a re-install "
+            "builds a fresh system; components are never swapped under a running one)")
     sol = (await db.execute(select(Solution).where(Solution.slug == slug))).scalar_one_or_none()
     if sol is None:
         raise SystemRuntimeError(f"solution {slug!r} no longer exists - cannot upgrade")
