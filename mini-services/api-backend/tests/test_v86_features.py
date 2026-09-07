@@ -151,9 +151,11 @@ def test_v86_six_operators_install_bound_and_seeded():
                 "support-operator": ("Case lifecycle",
                                      {"opened": 1, "assigned": 1, "investigating": 1},
                                      4, False),
-                "operations-operator": ("Request lifecycle",
-                                        {"submitted": 1, "in_review": 1, "approved": 1},
-                                        4, False),
+                "operations-operator": (None,  # two machines since v89 - the
+                                # Customer onboarding desk the won deals land on
+                                {"Request lifecycle": {"submitted": 1, "in_review": 1, "approved": 1},
+                                 "Customer onboarding": {"kickoff": 1, "training": 1}},
+                                5, False),
                 "hr-operator": (None,  # two machines - asserted separately
                                 {"Onboarding pipeline": {"day_one": 1, "accepted": 1, "buddied": 1},
                                  "Leave pipeline": {"requested": 1, "manager_review": 1, "approved": 1}},
@@ -392,20 +394,24 @@ def test_v86_scheduler_door_escalates_the_new_machines():
             user = await _mk_user(client, "door")
             h = _auth(user["token"])
 
-            res = await client.post("/operators/finance-operator/install",
+            # v89: the finance machine walks the DIGEST beat now (its policy
+            # is the daily-digest flagship) - the knock-beat door walk uses
+            # the procurement machine, same shape (escalate self-loop on
+            # the initial state)
+            res = await client.post("/operators/procurement-operator/install",
                                     headers=h, json={})
             assert res.status_code == 200, res.text
             pid = res.json()["processes"][0]["id"]
 
-            # the seeded invoices sit far inside their SLA - the door passes
+            # the seeded purchases sit far inside their SLA - the door passes
             res = await client.post("/scheduler/escalations/tick", headers=h, json={})
             out = res.json()
             assert out["scanned"] >= 3 and not out["escalated"] and not out["recorded"]
 
-            # a fresh invoice due in one second breaches - the machine's own
-            # escalate move (received -> received) re-arms the stint
+            # a fresh purchase due in one second breaches - the machine's own
+            # escalate move (requested -> requested) re-arms the stint
             res = await client.post(f"/processes/{pid}/instances", headers=h, json={
-                "ref": "+15550007999", "title": "The stuck invoice",
+                "ref": "+15550007999", "title": "The stuck purchase",
                 "due_in_seconds": 1})
             iid = res.json()["id"]
             await asyncio.sleep(1.2)
@@ -415,12 +421,12 @@ def test_v86_scheduler_door_escalates_the_new_machines():
             assert len(out["escalated"]) == 1, out
             entry = out["escalated"][0]
             assert entry["instance_id"] == iid
-            assert entry["state"] == "received" and entry["moved_to"] == "received"
+            assert entry["state"] == "requested" and entry["moved_to"] == "requested"
 
             # the stint restarted, on the record
             res = await client.get(f"/processes/{pid}/instances/{iid}", headers=h)
             inst = res.json()
-            assert inst["state"] == "received"
+            assert inst["state"] == "requested"
             assert inst["age_in_state_seconds"] < 5
             moves = [j for j in inst["journey"] if j["transition"] == "escalate"]
             assert len(moves) == 1 and moves[0]["actor"] == user["id"]
@@ -450,4 +456,4 @@ def test_v86_scheduler_door_escalates_the_new_machines():
 # ---------------------------------------------------------------------------
 
 def test_v86_version_pin():
-    assert settings.version == "1.88.0"
+    assert settings.version == "1.89.0"

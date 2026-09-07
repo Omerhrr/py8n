@@ -20,9 +20,11 @@ interface ProcessDef {
   states: string[]; initial: string
   transitions: { name: string; from: string; to: string; description?: string }[]
   terminal_states: string[]
-  escalation_policy: { channel: string; to: string; repeat_every_seconds: number
+  escalation_policy: { channel: string; to: string; mode?: string
+    digest_every_seconds?: number; repeat_every_seconds: number
     max_repeats: number; message_template: string } | null
   escalation_summary: string
+  journeys: { on_state: string; open: { process: string; state?: string | null; title_template?: string } }[]
   instance_counts: Record<string, number>
   created_at: string
 }
@@ -74,6 +76,7 @@ const annotateError = ref('')
 const ackForId = ref('')
 const ackBy = ref('')
 const ackNote = ref('')
+const ackSnooze = ref('')  // v89: hours - the hold is a loan, then the door re-knocks
 const acking = ref(false)
 const ackError = ref('')
 
@@ -106,6 +109,7 @@ function fmtAge(sec: number): string {
 
 // v87: the episode bookkeeping the door keeps on the instance's memory
 // v88: the ack rides the same book (the door holds acknowledged episodes)
+// v89: digest sends stamp last_delivery='digest' - the summary receipt
 function escBook(inst: Instance): { count: number; last_delivery: string; acked: { by: string; at: string; note?: string } | null } | null {
   const b = inst.context?.escalations
   if (!b || typeof b !== 'object') return null
@@ -225,10 +229,13 @@ async function annotate(inst: Instance) {
 }
 
 // v88: the receipt - acknowledge the escalation, the door quiets
+// v89: the ack may carry a snooze - the hold becomes a loan (N hours,
+// then the door re-knocks)
 function openAck(inst: Instance) {
   ackForId.value = inst.id
   ackBy.value = ''
   ackNote.value = ''
+  ackSnooze.value = ''
   ackError.value = ''
 }
 
@@ -239,10 +246,12 @@ async function ackEscalation(inst: Instance) {
   try {
     await api.post(
       `/processes/${selected.value.id}/instances/${inst.id}/escalations/ack`,
-      { by: ackBy.value.trim(), note: ackNote.value.trim() })
+      { by: ackBy.value.trim(), note: ackNote.value.trim(),
+        snooze_hours: ackSnooze.value.trim() ? Number(ackSnooze.value) : null })
     ackForId.value = ''
     ackBy.value = ''
     ackNote.value = ''
+    ackSnooze.value = ''
     await refreshAll()
   } catch (e: any) {
     ackError.value = e?.data?.detail || e?.message || 'The acknowledgement was refused'
@@ -362,7 +371,11 @@ onMounted(async () => {
               <span v-if="selected.escalation_summary && selected.escalation_summary !== 'no escalation policy'" class="flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[9px] font-semibold text-indigo-300">
                 <BellRing class="h-2.5 w-2.5" /> {{ selected.escalation_summary }}
               </span>
-              <span v-if="selected.escalation_policy && !selected.escalation_policy.to" class="text-[9px] text-zinc-600">bind escalation_policy.to + a channel endpoint to deliver</span>
+              <span v-if="selected.escalation_policy && !selected.escalation_policy.to && !(selected.escalation_policy as any).handlers?.length" class="text-[9px] text-zinc-600">bind escalation_policy.to + a channel endpoint to deliver</span>
+              <!-- v89: cross-operator journeys - the legs this machine opens -->
+              <span v-for="j in selected.journeys || []" :key="j.on_state" class="flex items-center gap-1 rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-semibold text-fuchsia-300" :title="`when this machine lands on ${j.on_state}, a case opens itself on ${j.open.process}`">
+                {{ j.on_state }} → {{ j.open.process }}
+              </span>
             </div>
             <!-- the pipeline -->
             <div class="mt-4 flex flex-wrap items-center gap-1.5">
@@ -449,6 +462,7 @@ onMounted(async () => {
                   <span class="ml-auto flex items-center gap-1 text-[10px] text-zinc-600"><Clock class="h-3 w-3" /> {{ fmtAge(inst.age_in_state_seconds) }} in state</span>
                   <span v-if="inst.is_stuck" class="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300">stuck</span>
                   <span v-if="escBook(inst)?.acked" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${escBook(inst)!.acked!.by}${escBook(inst)!.acked!.note ? ` - ${escBook(inst)!.acked!.note}` : ''}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack by {{ escBook(inst)!.acked!.by }}</span>
+                  <span v-else-if="escBook(inst)?.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest - one summary per window instead of N knocks">digest ×{{ escBook(inst)!.count }}</span>
                   <span v-else-if="escBook(inst)" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="`last delivery: ${escBook(inst)!.last_delivery || 'n/a'}`">escalated ×{{ escBook(inst)!.count }}</span>
                   <span v-if="inst.is_terminal" class="flex items-center gap-1 text-[10px] text-zinc-500"><CheckCircle2 class="h-3 w-3" /> closed</span>
                 </div>
@@ -487,10 +501,11 @@ onMounted(async () => {
                   </button>
                   <p v-if="annotateError" class="w-full text-[10px] text-rose-300">{{ annotateError }}</p>
                 </div>
-                <!-- v88: the ack form - the handler takes it -->
+                <!-- v88: the ack form - the handler takes it; v89: the snooze makes it a loan -->
                 <div v-if="ackForId === inst.id" class="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
                   <input v-model="ackBy" placeholder="acknowledged by" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
-                  <input v-model="ackNote" placeholder="note (on it, calling now...)" class="w-48 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                  <input v-model="ackNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                  <input v-model="ackSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
                   <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="acking || !ackBy.trim()" @click="ackEscalation(inst)">
                     <Loader2 v-if="acking" class="h-3 w-3 animate-spin" /> Acknowledge
                   </button>

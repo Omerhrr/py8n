@@ -19,6 +19,14 @@ declares the rest:
     the rest of the stint (the person who said "I have this" owns it); a
     state change starts a fresh episode and the door may knock again.
 
+    v89: two more dimensions. SNOOZE - the ack may carry snooze_hours: the
+    hold is a loan, not a pardon, and when the snooze runs out the door
+    RE-KNOCKS on its cadence (re-acking extends; an ack without a snooze
+    still owns the rest of the stint, v88 semantics untouched). DIGEST -
+    mode="digest" replaces the N knocks with ONE summary per window: the
+    door lists the stuck items in a daily (digest_every_seconds) digest
+    over the policy's channel instead of messaging per attempt.
+
 The door (business_processes.escalate_stuck - the APScheduler sweep and
 POST /scheduler/escalations/tick) consults the policy per stuck instance:
 
@@ -33,6 +41,14 @@ POST /scheduler/escalations/tick) consults the policy per stuck instance:
     correlation thread (beside the door's ``business.stuck``) - absent
     target, endpoint or credentials is an HONEST SKIP recorded in the
     payload, never a silent one;
+  * mode="digest" (v89) walks a different beat: per instance the door
+    only decides WHO belongs in the summary (fresh episode, not acked -
+    or the snooze ran out - and under the cap); the bucket is due when
+    its oldest pending item has waited digest_every_seconds, and ONE
+    business.escalation_digest event + ONE channel message covers them
+    all. The machine's own escalate move is not taken in digest mode
+    (the summary is the nudge; a self-loop per tick would re-arm stints
+    the digest bookkeeping depends on).
   * a machine WITHOUT a policy keeps the v85 semantics exactly: one
     knock per stint, on the record, no channel.
 
@@ -43,7 +59,7 @@ injectable (now=) so tests and replay tools walk time without sleeping.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,8 +76,17 @@ DEFAULT_TEMPLATE = ("[py8n] {process}: '{title}' (ref {ref}) has been in state "
                     "'{state}' for {overdue_minutes} minutes past its SLA "
                     "(escalation attempt {attempt}).")
 
+# v89: the digest mode - one summary per window instead of N knocks
+MODES = ("knock", "digest")
+MIN_DIGEST_SECONDS = 60
+DEFAULT_DIGEST_SECONDS = 86400  # one summary per day, as sold
+DIGEST_TEMPLATE = ("[py8n] Escalation digest - {count} item(s) past SLA on "
+                   "{process}:\n{items}")
+DIGEST_ITEM_TEMPLATE = ("- '{title}' (ref {ref}) in '{state}' for {overdue_minutes}m "
+                        "past SLA (digest {attempt})")
+
 _POLICY_KEYS = {"channel", "to", "handlers", "repeat_every_seconds",
-                "max_repeats", "message_template"}
+                "max_repeats", "message_template", "mode", "digest_every_seconds"}
 MAX_HANDLERS = 10
 
 
@@ -123,14 +148,44 @@ def validate_escalation_policy(policy: dict | None) -> dict | None:
         raise EscalationPolicyError(
             "set escalation_policy.handlers (rotation) OR 'to' (pinned target), "
             "not both - the door refuses to guess which promise is real")
-    try:
-        repeat = int(policy.get("repeat_every_seconds") or DEFAULT_REPEAT_SECONDS)
-    except (TypeError, ValueError):
-        raise EscalationPolicyError("repeat_every_seconds must be an integer") from None
-    if repeat < MIN_REPEAT_SECONDS:
+    # v89: the mode - knock (the default, N messages on a cadence) or
+    # digest (one summary per window). The two rhythms refuse to ride
+    # together - the door refuses to carry both clocks.
+    mode = str(policy.get("mode") or "knock").strip().lower()
+    if mode not in MODES:
         raise EscalationPolicyError(
-            f"repeat_every_seconds must be >= {MIN_REPEAT_SECONDS} (the door ticks "
-            "on an interval - a faster cadence cannot be honestly honored)")
+            f"escalation mode {mode!r} is not a mode (known: {', '.join(MODES)}; "
+            "knock = a message per attempt, digest = one summary per window)")
+    if mode == "digest" and (policy.get("repeat_every_seconds") or "") not in \
+            ("", DEFAULT_REPEAT_SECONDS):
+        raise EscalationPolicyError(
+            "mode='digest' sets its rhythm with digest_every_seconds, not "
+            "repeat_every_seconds - the door refuses to carry both clocks")
+    if mode == "knock" and (policy.get("digest_every_seconds") or "") not in \
+            ("", DEFAULT_DIGEST_SECONDS):
+        raise EscalationPolicyError(
+            "digest_every_seconds only means something with mode='digest' - "
+            "set mode='digest' or drop the key")
+    repeat = DEFAULT_REPEAT_SECONDS
+    if mode == "knock":
+        try:
+            repeat = int(policy.get("repeat_every_seconds") or DEFAULT_REPEAT_SECONDS)
+        except (TypeError, ValueError):
+            raise EscalationPolicyError("repeat_every_seconds must be an integer") from None
+        if repeat < MIN_REPEAT_SECONDS:
+            raise EscalationPolicyError(
+                f"repeat_every_seconds must be >= {MIN_REPEAT_SECONDS} (the door ticks "
+                "on an interval - a faster cadence cannot be honestly honored)")
+    digest_every = DEFAULT_DIGEST_SECONDS
+    if mode == "digest":
+        try:
+            digest_every = int(policy.get("digest_every_seconds") or DEFAULT_DIGEST_SECONDS)
+        except (TypeError, ValueError):
+            raise EscalationPolicyError("digest_every_seconds must be an integer") from None
+        if digest_every < MIN_DIGEST_SECONDS:
+            raise EscalationPolicyError(
+                f"digest_every_seconds must be >= {MIN_DIGEST_SECONDS} (the door ticks "
+                "on an interval - a faster cadence cannot be honestly honored)")
     try:
         max_repeats = int(policy.get("max_repeats") if policy.get("max_repeats") is not None
                           else DEFAULT_MAX_REPEATS)
@@ -141,7 +196,8 @@ def validate_escalation_policy(policy: dict | None) -> dict | None:
     template = str(policy.get("message_template") or "").strip() or DEFAULT_TEMPLATE
     return {"channel": channel, "to": to, "handlers": handlers,
             "repeat_every_seconds": repeat, "max_repeats": max_repeats,
-            "message_template": template}
+            "message_template": template, "mode": mode,
+            "digest_every_seconds": digest_every}
 
 
 def policy_from_definition(definition: dict | None) -> dict | None:
@@ -173,14 +229,19 @@ def describe_policy(policy: dict | None) -> str:
     """One-line human summary for boards and shelves."""
     if not policy:
         return "no escalation policy"
-    cadence = f"every {policy['repeat_every_seconds']}s"
     channel = policy["channel"] or "event-only"
+    if policy.get("mode") == "digest":
+        window = policy["digest_every_seconds"]
+        cadence = "daily" if window == DEFAULT_DIGEST_SECONDS else f"every {window}s"
+        line = (f"stuck -> {cadence} digest over {channel} "
+                f"(x{1 + policy['max_repeats']})")
+    else:
+        cadence = f"every {policy['repeat_every_seconds']}s"
+        line = f"stuck -> {channel} (x{1 + policy['max_repeats']}, {cadence})"
     if policy.get("handlers"):
         roster = " -> ".join(policy["handlers"])
-        return (f"stuck -> {channel} (x{1 + policy['max_repeats']}, {cadence})"
-                f" rotate {len(policy['handlers'])}: {roster}")
-    return (f"stuck -> {channel} (x{1 + policy['max_repeats']}, {cadence})"
-            + (f" -> {policy['to']}" if policy["to"] else ""))
+        return f"{line} rotate {len(policy['handlers'])}: {roster}"
+    return line + (f" -> {policy['to']}" if policy["to"] else "")
 
 
 def rotation_target(policy: dict, attempt: int) -> str:
@@ -210,8 +271,10 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
 
     An episode belongs to ONE stuck stint: the bookkeeping remembers the
     state it started in - the instance moving states starts fresh. An
-    ACKNOWLEDGED episode goes quiet for the rest of the stint (v88 - the
-    human who said "I have this" owns it; a state change starts fresh).
+    ACKNOWLEDGED episode goes quiet (v88 - the human who said "I have
+    this" owns it). v89: an ack that carried snooze_hours holds only
+    until the snooze runs out - the door RE-KNOCKS on its cadence, the
+    attempt count continuing inside the same episode (and its cap).
     Past 1 + max_repeats the episode is complete; before
     repeat_every_seconds has elapsed since the last attempt the door
     holds (too_soon)."""
@@ -219,10 +282,21 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
     book = episode_book(instance)
     fresh = book.get("state") != instance.state
     count = 0 if fresh else int(book.get("count") or 0)
-    # the human's acknowledgement outranks the cadence and the cap
+    # the human's acknowledgement outranks the cadence and the cap -
+    # until the snooze runs out (v89: the hold is a loan, not a pardon)
     if not fresh and isinstance(book.get("acked"), dict):
-        return {"action": "hold", "reason": "acknowledged", "attempts": count,
-                "acked_by": str(book["acked"].get("by") or "")}
+        acked = book["acked"]
+        until = _parse_iso(acked.get("snooze_until"))
+        if until is None or now < until:
+            hold = {"action": "hold", "reason": "acknowledged",
+                    "attempts": count,
+                    "acked_by": str(acked.get("by") or "")}
+            if until is not None:
+                hold["snooze_until"] = until.isoformat()
+                hold["snooze_remaining_seconds"] = round(
+                    (until - now).total_seconds())
+            return hold
+        # the snooze ran out - fall through: the door re-knocks
     if count >= 1 + policy["max_repeats"]:
         return {"action": "hold", "reason": "episode_complete", "attempts": count}
     last = _parse_iso(book.get("last_at")) if not fresh else None
@@ -258,14 +332,23 @@ def record_episode(db: AsyncSession, instance: BusinessProcessInstance,
 
 def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
                *, by: str, note: str = "",
+               snooze_hours: float | None = None,
                now: datetime | None = None) -> dict:
     """v88: write the acknowledgement onto the episode's bookkeeping -
     the door reads it through episode_gate and holds the episode. The
-    rest of the book (count, last delivery) rides along untouched."""
+    rest of the book (count, last delivery) rides along untouched.
+
+    v89: snooze_hours turns the hold into a LOAN - the ack carries a
+    snooze_until stamp and the door re-knocks once it runs out (an ack
+    without one still owns the rest of the stint)."""
     now = _aware(now) or _now()
-    book = episode_book(instance)
     ack = {"by": (by or "").strip()[:140], "at": now.isoformat(),
            "note": (note or "").strip()[:500]}
+    if snooze_hours is not None:
+        hours = max(0.0, float(snooze_hours))
+        ack["snooze_hours"] = round(hours, 4)
+        ack["snooze_until"] = (now + timedelta(hours=hours)).isoformat()
+    book = episode_book(instance)
     entry = {"count": int(book.get("count") or 0),
              "last_at": book.get("last_at"),
              "state": instance.state,
@@ -359,6 +442,11 @@ async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance
 
 
 def _parse_iso(value) -> datetime | None:
+    return parse_iso(value)
+
+
+def parse_iso(value) -> datetime | None:
+    """An isoformat stamp (naive ones normalized to UTC) or None."""
     if not value:
         return None
     try:
@@ -368,3 +456,138 @@ def _parse_iso(value) -> datetime | None:
         return dt
     except ValueError:
         return None
+
+
+# ---------------------------------------------------------------------------
+# the digest (v89) - one summary per window instead of N knocks
+# ---------------------------------------------------------------------------
+
+def digest_gate(instance: BusinessProcessInstance, policy: dict,
+                now: datetime) -> dict:
+    """Digest mode's per-instance gate: not a knock decision - a question
+    of WHO belongs in the summary.
+
+    * hold (acknowledged): the human's take holds, snooze and all (the
+      same loan semantics as knock mode - an expired snooze falls back
+      into the bucket);
+    * hold (episode_complete): the item has appeared in 1 + max_repeats
+      digests - the team was told, repeatedly;
+    * candidate otherwise, with ``pending_since`` - the moment the
+      current episode first showed up (first_at) or the last digest that
+      listed it (digest_last_at). The bucket is due when its OLDEST
+      pending_since has waited digest_every_seconds; a fresh candidate
+      (``fresh``) must have its book written NOW or the window would
+      restart every tick and never elapse."""
+    now = _aware(now) or _now()
+    book = episode_book(instance)
+    fresh = book.get("state") != instance.state
+    count = 0 if fresh else int(book.get("count") or 0)
+    if not fresh and isinstance(book.get("acked"), dict):
+        acked = book["acked"]
+        until = _parse_iso(acked.get("snooze_until"))
+        if until is None or now < until:
+            hold = {"action": "hold", "reason": "acknowledged",
+                    "attempts": count,
+                    "acked_by": str(acked.get("by") or "")}
+            if until is not None:
+                hold["snooze_until"] = until.isoformat()
+                hold["snooze_remaining_seconds"] = round(
+                    (until - now).total_seconds())
+            return hold
+        # the snooze ran out - the item rides the next digest
+    if count >= 1 + policy["max_repeats"]:
+        return {"action": "hold", "reason": "episode_complete", "attempts": count}
+    pending_since = (None if fresh
+                     else _parse_iso(book.get("digest_last_at"))
+                     or _parse_iso(book.get("first_at")))
+    return {"action": "candidate", "attempt": count + 1, "fresh": fresh,
+            "pending_since": (pending_since or now).isoformat(),
+            "waited_seconds": round((now - (pending_since or now)).total_seconds())}
+
+
+def record_digest_book(db: AsyncSession, instance: BusinessProcessInstance,
+                       *, count: int, now: datetime,
+                       first_at: datetime | None = None,
+                       digest_last_at: datetime | None = None,
+                       delivery: dict | None = None) -> None:
+    """The digest bookkeeping on the instance's running memory (fresh-dict
+    discipline). first_at anchors the episode's pending-since; digest_last_at
+    is stamped when a digest actually lists the item; an ack rides along."""
+    now = _aware(now) or _now()
+    book = episode_book(instance)
+    entry = {"count": int(count),
+             "state": instance.state,
+             "first_at": (first_at or now).isoformat()}
+    if digest_last_at is not None:
+        entry["digest_last_at"] = digest_last_at.isoformat()
+    elif book.get("state") == instance.state and book.get("digest_last_at"):
+        entry["digest_last_at"] = book["digest_last_at"]
+    entry["last_delivery"] = (delivery or {}).get("delivery",
+                                                  book.get("last_delivery", ""))
+    entry["last_detail"] = ((delivery or {}).get("detail",
+                            book.get("last_detail", "")))[:300]
+    if book.get("state") == instance.state and isinstance(book.get("acked"), dict):
+        entry["acked"] = book["acked"]
+    new_ctx = dict(instance.context or {})
+    new_ctx["escalations"] = entry
+    instance.context = new_ctx
+    db.add(instance)
+
+
+def render_digest(*, process_name: str, items: list[dict]) -> str:
+    """The one summary that replaces the N knocks - a line per stuck item."""
+    body = "\n".join(DIGEST_ITEM_TEMPLATE.format(**it) for it in items)
+    try:
+        return DIGEST_TEMPLATE.format(count=len(items), process=process_name,
+                                      items=body)
+    except Exception:  # noqa: BLE001 - a broken render must not stop the door
+        return (f"[py8n] Escalation digest - {len(items)} item(s) past SLA on "
+                f"{process_name}.")
+
+
+async def deliver_digest(db: AsyncSession, *, owner_id: str | None,
+                         policy: dict, process_id: str, process_name: str,
+                         items: list[dict], actor: str = "scheduler",
+                         now: datetime | None = None) -> dict:
+    """Send ONE digest message over the policy's channel for the bucket
+    and put it on the record: a single ``business.escalation_digest``
+    event carrying every listed item (the bucket is the journey here -
+    the digest's whole point is not being per-entity noise). The delivery
+    skips honestly (no channel / no target / no endpoint), and the skip
+    IS the result - named in the payload, never silent."""
+    from . import system_events as events_svc
+
+    now = _aware(now) or _now()
+    # the roster advances with the deepest attempt in the bucket
+    target = rotation_target(policy, max((it.get("attempt") or 1) for it in items))
+    base = {"process_id": process_id, "process_name": process_name,
+            "mode": "digest", "window_seconds": policy["digest_every_seconds"],
+            "items": items, "item_count": len(items),
+            "to": target or None, "rotated": bool(policy.get("handlers"))}
+    if not policy["channel"]:
+        delivery = {"delivery": "skipped",
+                    "detail": "policy is event-only (no channel configured) - "
+                              "the digest is on the event timeline"}
+    elif not target:
+        delivery = {"delivery": "skipped",
+                    "detail": f"no target configured - bind escalation_policy.to "
+                              f"(or a handlers roster) to deliver over {policy['channel']}"}
+    else:
+        endpoint = await _resolve_endpoint(db, owner_id, policy["channel"])
+        if endpoint is None:
+            delivery = {"delivery": "skipped",
+                        "detail": f"no {policy['channel']} channel endpoint bound - "
+                                  "the digest was rendered but not delivered"}
+        else:
+            from . import channel_endpoints as cep_svc
+
+            text = render_digest(process_name=process_name, items=items)
+            result = await cep_svc.deliver_outbound(endpoint, target, text)
+            delivery = {"delivery": result.get("delivery", "failed"),
+                        "detail": result.get("detail", ""),
+                        "endpoint": endpoint.name, "provider": endpoint.provider}
+    await events_svc.emit(
+        db, owner_id, "business.escalation_digest", source="business",
+        actor=actor, target_type="process", target_id=process_id,
+        payload={**base, "channel": policy["channel"] or None, **delivery})
+    return {**delivery, "to": target or None}

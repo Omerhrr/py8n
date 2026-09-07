@@ -118,10 +118,15 @@ async def event_contracts():
             # v84: the business state machines move - long-running autonomy
             # v85: the scheduler door's escalations are facts too
             # v88: the agents' annotations + the team's receipts are facts too
+            # v89: the daily digest replaces the N knocks; cross-operator
+            # journeys open the next leg (opened + the honest skips)
             "business": ["business.state_changed", "business.stuck",
                          "business.escalated",  # v87: the policy delivery
                          "business.annotated",  # v88: facts land on the memory
-                         "business.escalation_acknowledged"],  # v88: the receipt
+                         "business.escalation_acknowledged",  # v88: the receipt
+                         "business.escalation_digest",  # v89: one summary per window
+                         "business.journey_opened",  # v89: the next leg opens itself
+                         "business.journey_skipped"],  # v89: the honest skip
         },
         "trigger_node": {
             "type": "event_trigger",

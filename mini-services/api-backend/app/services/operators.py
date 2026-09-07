@@ -316,6 +316,11 @@ _SALES_OPERATOR = {
         "Stale deals: the machine defines escalate self-loops on interested / "
         "proposal_sent / negotiating - the scheduler door (POST "
         "/scheduler/escalations/tick) walks past-SLA instances through them.",
+        "Won deals hand themselves off: the pipeline carries a cross-operator "
+        "journey (won -> Customer onboarding) - install the Operations operator "
+        "too and the onboarding case OPENS ITSELF at kickoff, ref = the lead's "
+        "phone; until then the landing skips honestly (business.journey_skipped "
+        "names the missing machine).",
         "WhatsApp/Email channels are the installer's endpoints to bind (channels page) - "
         "the operator is the system underneath them, channels stay interchangeable.",
     ],
@@ -654,6 +659,7 @@ _OPERATIONS_OPERATOR = {
     "outcomes": [
         "Ops requests dataset (requests + statuses)",
         "Request lifecycle business process (pre-wired, seeded from the requests)",
+        "Customer onboarding machine - the leg a won deal opens (cross-operator journeys)",
         "Ops concierge grounded in the handbook",
         "Work queue (announce + SMS + callback wired)",
         "sms.received -> request intake (event-reactive: row AND tracked request)",
@@ -680,6 +686,19 @@ _OPERATIONS_OPERATOR = {
                         "call) - who decided what, and when",
          "columns": ["request_ref", "decision", "decided_by", "at"],
          "rows": []},
+        {"name": "Onboarding cases",
+         "description": "The customer onboarding desk's queue - one row per new "
+                        "customer being brought live; rows land here when a deal "
+                        "WINS (the cross-operator journey from the Sales lead "
+                        "pipeline) or through a bulk import, and the machine "
+                        "tracks each one to handoff",
+         "columns": ["customer", "phone", "plan", "stage"],
+         "rows": [
+             {"customer": "Northwind Traders", "phone": "+15550007101",
+              "plan": "growth", "stage": "kickoff"},
+             {"customer": "Acme Corp", "phone": "+15550007202",
+              "plan": "enterprise", "stage": "training"},
+         ]},
         {"name": "Ops handbook",
          "description": "The concierge's knowledge - how the back office runs",
          "columns": ["question", "answer"],
@@ -797,6 +816,38 @@ _OPERATIONS_OPERATOR = {
          "state_column": "status",
          "due_in_seconds": 2 * 24 * 3600,
         },
+        {"name": "Customer onboarding",
+         "description": ("The won deal's landing path as a state machine - one "
+                         "tracked instance per new customer. Cases OPEN "
+                         "THEMSELVES when a deal wins (the cross-operator "
+                         "journey from the Sales operator's lead pipeline: "
+                         "won -> kickoff), and the team walks them to "
+                         "handoff; the door nudges a stalled onboarding."),
+         "definition": {
+             "states": ["kickoff", "provisioning", "training", "go_live",
+                        "handed_off"],
+             "initial": "kickoff",
+             "transitions": [
+                 {"name": "provision", "from": "kickoff", "to": "provisioning"},
+                 {"name": "train", "from": "provisioning", "to": "training"},
+                 {"name": "go_live", "from": "training", "to": "go_live"},
+                 {"name": "hand_off", "from": "go_live", "to": "handed_off"},
+                 {"name": "escalate", "from": "kickoff", "to": "kickoff",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "provisioning", "to": "provisioning",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "training", "to": "training",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "go_live", "to": "go_live",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Onboarding cases",
+         "ref_column": "phone",
+         "title_from": ["customer", "plan"],
+         "state_column": "stage",
+         "due_in_seconds": 14 * 24 * 3600,
+        },
     ],
     "dashboard": {"name": "Operations Operator Board",
                   "description": "The back office at a glance - requests by status, "
@@ -809,6 +860,10 @@ _OPERATIONS_OPERATOR = {
         "The machine defines escalate self-loops on every working state - the "
         "scheduler door sweeps past-SLA requests through them (POST "
         "/scheduler/escalations/tick).",
+        "Cross-operator journeys land here: the Sales operator's lead pipeline "
+        "fires a journey on 'won' that opens a Customer onboarding case at "
+        "kickoff (ref = the lead's phone) - install both operators and the "
+        "handoff between them is a state change, not a meeting.",
         "The handbook is the concierge's knowledge - edit the dataset and the "
         "answers follow, no redeploy.",
     ],
@@ -1579,10 +1634,40 @@ _ESCALATION_POLICIES: dict[str, dict] = {
     "Request lifecycle":   {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
     "Leave pipeline":      {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
     "Onboarding pipeline": {"channel": "email", "to": "", "repeat_every_seconds": 86400, "max_repeats": 2},
-    "Invoice lifecycle":   {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
+    # v89: the invoice chaser is the classic digest case - a DAILY summary
+    # of everything past due instead of four knocks per invoice per day
+    "Invoice lifecycle":   {"channel": "email", "to": "", "mode": "digest",
+                            "digest_every_seconds": 86400, "max_repeats": 3},
     "Purchase lifecycle":  {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
     "Delivery pipeline":   {"channel": "sms",   "to": "", "repeat_every_seconds": 21600, "max_repeats": 3},
+    "Customer onboarding": {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
 }
+
+
+# v89: cross-operator JOURNEYS per operator machine - when the machine
+# lands on the fire-state, the next leg OPENS ITSELF on the target
+# machine (a won deal opening an onboarding case). The target is named
+# here and resolved at FIRE time by name - operators install
+# independently, so an uninstalled target skips honestly (the event
+# names it; install the second operator and the handoff becomes real).
+_JOURNEYS: dict[str, list[dict]] = {
+    "Lead pipeline": [
+        {"on_state": "won",
+         "open": {"process": "Customer onboarding",
+                  "title_template": "Onboarding - {title}",
+                  "memory": {"via": "won-deal journey",
+                             "source_operator": "sales"}}},
+    ],
+}
+
+
+def _journeys_for(pspec: dict) -> list[dict] | None:
+    """The shelf journeys for a pack's process, applied into the
+    definition at install time (validate_definition re-validates them
+    loudly)."""
+    name = str(pspec.get("name") or "").strip()
+    journeys = _JOURNEYS.get(name)
+    return [dict(j, open=dict(j["open"])) for j in journeys] if journeys else None
 
 
 def _policy_for(pspec: dict) -> dict | None:
@@ -1605,6 +1690,13 @@ def _describe_pack_policy(pspec: dict) -> str:
     from . import escalations as escalations_svc
 
     return escalations_svc.describe_policy(_policy_for(pspec))
+
+
+def _describe_pack_journeys(pspec: dict) -> list[dict]:
+    """The shelf's journey display for a pack's process."""
+    journeys = _journeys_for(pspec) or []
+    return [{"on_state": j["on_state"], "opens": j["open"]["process"]}
+            for j in journeys]
 
 
 def _onboarding_loop(pspec: dict) -> dict | None:
@@ -1712,7 +1804,8 @@ def operator_detail(slug: str) -> dict:
                            "seeded_from": p.get("seed_from_dataset"),
                            "escalates": any(t.get("name") == "escalate"
                                             for t in p["definition"]["transitions"]),
-                           "escalation": _describe_pack_policy(p)}
+                           "escalation": _describe_pack_policy(p),
+                           "journeys": _describe_pack_journeys(p)}
                           for p in (op.get("processes") or [])],
             "agent": {"name": op["agent"]["name"],
                       "knowledge": (op["agent"]["knowledge"] or {}).get("dataset")},
@@ -1857,6 +1950,9 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
         policy = _policy_for(pspec)  # v87: the channel + repeat policy rides the definition
         if policy:
             definition["escalation_policy"] = policy
+        journeys = _journeys_for(pspec)  # v89: the legs this machine opens
+        if journeys:
+            definition["journeys"] = journeys
         proc = await process_svc.create_process(
             db, owner_id=owner_id, name=str(pspec["name"])[:140],
             description=str(pspec.get("description") or "")[:500],

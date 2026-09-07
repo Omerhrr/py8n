@@ -424,6 +424,9 @@ class BusinessAckNode(BaseNode):
         ref: str = Field(default="", description="The external key of the instance to acknowledge - the most recent OPEN instance carrying this ref")
         by: str = Field(default="workflow", description="Who acknowledged (the receipt's name - journey log + event actor)")
         note: str = Field(default="", description="The handler's own words (journey log)")
+        snooze_hours: float | None = Field(default=None, ge=0, description=(
+            "v89: hold the door quiet for N hours, then it re-knocks on its "
+            "cadence (omitted = the take owns the rest of the state stint)"))
         on_missing: str = Field(
             default="error",
             json_schema_extra={"widget": "select", "options": list(_ON_MISSING)},
@@ -464,7 +467,8 @@ class BusinessAckNode(BaseNode):
             try:
                 out = await bp_svc.acknowledge_escalation(
                     session, proc.id, instance_id, owner_id=context.owner_id,
-                    by=p.by or "workflow", note=p.note)
+                    by=p.by or "workflow", note=p.note,
+                    snooze_hours=p.snooze_hours)
                 await session.commit()  # nodes own their sessions (the dataset_write rule)
             except bp_svc.ProcessError as exc:
                 if p.on_missing == "skip" and "no escalation episode" in str(exc):
@@ -480,6 +484,7 @@ class BusinessAckNode(BaseNode):
             "ref": out["instance"]["ref"],
             "state": out["instance"]["state"],
             "acknowledged_by": out["ack"]["by"],
+            "snooze_until": out["ack"].get("snooze_until"),
             "attempt": ((out["instance"].get("context") or {})
                         .get("escalations", {}).get("count")),
             "process": proc.name,

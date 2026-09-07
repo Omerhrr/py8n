@@ -466,4 +466,4 @@ def test_v87_prewired_meeting_clinic_processes():
 # ---------------------------------------------------------------------------
 
 def test_v87_version_pin():
-    assert settings.version == "1.88.0"
+    assert settings.version == "1.89.0"

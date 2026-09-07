@@ -172,23 +172,29 @@ async def annotate(process_id: str, instance_id: str, body: InstanceAnnotate,
 
 
 class EscalationAck(BaseModel):
-    """v88: the human's receipt - a named take of the escalation."""
+    """v88: the human's receipt - a named take of the escalation.
+    v89: snooze_hours turns the take into a loan - the door re-knocks
+    once the snooze runs out (omit it to own the rest of the stint)."""
 
     by: str = Field(..., min_length=1, description="who acknowledged (the receipt's name)")
     note: str = Field(default="", description="the handler's own words")
+    snooze_hours: float | None = Field(default=None, ge=0, description=(
+        "hold the door quiet for N hours, then it re-knocks on its cadence "
+        "(re-acking replaces the loan; omitted = the take owns the rest of "
+        "the state stint)"))
 
 
 @router.post("/{process_id}/instances/{instance_id}/escalations/ack")
 async def ack_escalation(process_id: str, instance_id: str, body: EscalationAck,
                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     """v88: acknowledge the instance's escalation episode - the door goes
-    quiet for the rest of this state stint (the handler who said 'I have
-    this' owns it); the receipt is on the record and
-    business.escalation_acknowledged lands on the correlation thread."""
+    quiet (the handler who said 'I have this' owns it); the receipt is on
+    the record and business.escalation_acknowledged lands on the
+    correlation thread. v89: snooze_hours re-arms the door after N hours."""
     try:
         out = await acknowledge_escalation(
             db, process_id, instance_id, owner_id=getattr(user, "id", None),
-            by=body.by, note=body.note)
+            by=body.by, note=body.note, snooze_hours=body.snooze_hours)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

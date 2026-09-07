@@ -32,11 +32,14 @@ class ProcessError(ValueError):
 
 # v88: the paperwork rows the journey carries but the machines' move
 # counts must not - annotations are memory writes, acknowledgements are
-# the human's receipt; the door's own no-move 'escalated' stays counted
-# beside the machine's 'escalate' move (the v86 fix, untouched)
-PAPERWORK_TRANSITIONS = frozenset({"annotate", "escalation_acknowledged"})
+# the human's receipt, digest rows are the summary's receipts; the door's
+# own no-move 'escalated' stays counted beside the machine's 'escalate'
+# move (the v86 fix, untouched)
+PAPERWORK_TRANSITIONS = frozenset({"annotate", "escalation_acknowledged",
+                                   "escalation_digest"})
 ANNOTATE_TRANSITION = "annotate"
 ACK_TRANSITION = "escalation_acknowledged"
+DIGEST_TRANSITION = "escalation_digest"
 # the escalation door's episode bookkeeping lives at context.escalations -
 # the annotate door (the AGENTS' write path) refuses to write under it
 RESERVED_CONTEXT_KEYS = frozenset({"escalations"})
@@ -103,6 +106,63 @@ def validate_definition(definition: dict | None) -> dict:
         raise ProcessError(str(exc)) from exc
     if policy:
         out["escalation_policy"] = policy
+    # v89: cross-operator JOURNEYS ride the definition too - when this
+    # machine lands on a named state, the next leg OPENS ITSELF on the
+    # target machine (a won deal opening an onboarding case). Validated
+    # loudly here (the fire-state must exist, the target must be named);
+    # resolved at FIRE time by name - operators install independently, so
+    # the target may arrive with a later install (the skip is then an
+    # honest event, never a silent one).
+    raw_journeys = d.get("journeys")
+    if raw_journeys not in (None, []):
+        if not isinstance(raw_journeys, list):
+            raise ProcessError("definition.journeys must be a list of "
+                               "{on_state, open} objects")
+        clean_journeys: list[dict] = []
+        seen_fires: set[str] = set()
+        for j in raw_journeys:
+            j = j if isinstance(j, dict) else {}
+            unknown_j = sorted(set(j) - {"on_state", "open"})
+            if unknown_j:
+                raise ProcessError(f"journey has unknown key(s) {unknown_j} - "
+                                   "allowed: ['on_state', 'open']")
+            on_state = str(j.get("on_state") or "").strip()
+            if on_state not in clean_states:
+                raise ProcessError(f"journey fires on {on_state!r} - not a "
+                                   f"state of this machine (states: {clean_states})")
+            if on_state in seen_fires:
+                raise ProcessError(f"duplicate journey firing on {on_state!r} - "
+                                   "one journey per fire-state (the door refuses "
+                                   "to guess which leg is real)")
+            seen_fires.add(on_state)
+            open_spec = j.get("open")
+            if not isinstance(open_spec, dict):
+                raise ProcessError(f"the journey on {on_state!r} needs an "
+                                   "'open' object naming the target machine")
+            unknown_o = sorted(set(open_spec) - {"process", "state",
+                                                 "title_template",
+                                                 "ref_template", "memory"})
+            if unknown_o:
+                raise ProcessError(f"journey open has unknown key(s) {unknown_o} - "
+                                   "allowed: ['process', 'state', 'title_template', "
+                                   "'ref_template', 'memory']")
+            target = str(open_spec.get("process") or "").strip()
+            if not target:
+                raise ProcessError(f"the journey on {on_state!r} opens nothing - "
+                                   "open.process is required (which machine opens "
+                                   "the next leg?)")
+            memory = open_spec.get("memory")
+            if memory is not None and not isinstance(memory, dict):
+                raise ProcessError("journey open.memory must be an object of "
+                                   "{key: value} the opened instance starts with")
+            clean_journeys.append({
+                "on_state": on_state,
+                "open": {"process": target[:140],
+                         "state": (str(open_spec.get("state") or "").strip() or None),
+                         "title_template": str(open_spec.get("title_template") or "").strip(),
+                         "ref_template": str(open_spec.get("ref_template") or "").strip(),
+                         "memory": dict(memory or {})}})
+        out["journeys"] = clean_journeys
     return out
 
 
@@ -128,6 +188,7 @@ def process_out(p: BusinessProcess, *, instance_counts: dict | None = None) -> d
             "escalation_policy": d.get("escalation_policy"),
             "escalation_summary": escalations_svc.describe_policy(
                 escalations_svc.policy_from_definition(d)),
+            "journeys": d.get("journeys", []),
             "terminal_states": sorted(_terminal_states(d)) if d else [],
             "instance_counts": instance_counts or {},
             "created_at": p.created_at.isoformat() if p.created_at else None}
@@ -341,7 +402,13 @@ async def advance_instance(db: AsyncSession, instance_id: str, *, owner_id: str 
                  "transition": chosen["name"], "note": (note or "")[:200]},
         correlation_id=row.id)
     journey = await instance_journey(db, row.id)
-    return instance_out(row, definition=definition, journey=journey)
+    out = instance_out(row, definition=definition, journey=journey)
+    # v89: the machine landed on a fire-state - the next leg opens itself
+    opened = await fire_journeys(db, row, p, definition, to_state=chosen["to"],
+                                 actor=(actor or "system"), now=now)
+    if opened:
+        out["journeys_opened"] = opened
+    return out
 
 
 async def instance_journey(db: AsyncSession, instance_id: str) -> list[dict]:
@@ -350,6 +417,159 @@ async def instance_journey(db: AsyncSession, instance_id: str) -> list[dict]:
         .where(BusinessProcessTransitionLog.instance_id == instance_id)
         .order_by(BusinessProcessTransitionLog.created_at.asc()))).scalars().all()
     return [_log_out(t) for t in rows]
+
+
+# ---------------------------------------------------------------------------
+# cross-operator journeys (v89) - when this machine lands, the next leg opens
+# ---------------------------------------------------------------------------
+
+async def _resolve_process_ref(db: AsyncSession, want: str,
+                               owner_id: str | None) -> BusinessProcess | None:
+    """Find a process by id or case-insensitive name (most recent wins),
+    owner-scoped - the same resolution the read door uses, because the
+    journey's target is named at definition time and resolved when the
+    machine actually lands (operators install independently)."""
+    want = str(want or "").strip()
+    if not want:
+        return None
+    prow = (await db.execute(
+        select(BusinessProcess).where(BusinessProcess.id == want))).scalars().first()
+    if prow is None:
+        prow = (await db.execute(
+            select(BusinessProcess)
+            .where(func.lower(BusinessProcess.name) == want.lower())
+            .order_by(BusinessProcess.created_at.desc()))).scalars().first()
+    if prow is None:
+        return None
+    if owner_id is not None and prow.owner_id not in (owner_id, None):
+        return None
+    return prow
+
+
+def _render_journey_template(template: str, fields: dict) -> str:
+    """Fill a journey's title/ref template from the source instance's
+    fields ({ref} {title} {state} {process}) - unknown placeholders stay
+    literal, a broken or empty template renders empty (the caller falls
+    back to the source's own values)."""
+    if not template:
+        return ""
+    try:
+        return str(template.format(**fields)).strip()
+    except Exception:  # noqa: BLE001 - a broken template must not stop the deal
+        return ""
+
+
+async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
+                        process: BusinessProcess, definition: dict, *,
+                        to_state: str, actor: str,
+                        now: datetime) -> list[dict]:
+    """The machine LANDED on a fire-state - open the next leg.
+
+    Every journey keyed on to_state opens an instance on its target
+    machine (resolved by name/id, owner-scoped): the ref/title render
+    from the source's fields, the opened context carries the spec's
+    memory plus the journey link (from_process / from_instance /
+    from_ref / from_state), and the leg is on the record BOTH ways -
+    business.journey_opened on the source's correlation thread, and an
+    honest business.journey_skipped when the target machine does not
+    exist yet (the target operator was never installed), already tracks
+    an open instance with that ref (never double-tracks), or refuses the
+    start (a bad state= naming). Journeys fire on ADVANCES only - the
+    opened leg starts its own life and its own future fires; nothing
+    recurses through the start itself."""
+    journeys = [j for j in (definition.get("journeys") or [])
+                if j.get("on_state") == to_state]
+    if not journeys:
+        return []
+    from . import system_events as events_svc
+
+    out: list[dict] = []
+    for j in journeys:
+        spec = j["open"]
+        entry: dict = {"on_state": to_state, "target_process": spec["process"]}
+        fields = {"ref": row.ref, "title": row.title, "state": to_state,
+                  "process": process.name}
+        ref = _render_journey_template(spec.get("ref_template"), fields) or row.ref
+        title = _render_journey_template(spec.get("title_template"), fields) or row.title
+        entry["ref"] = ref
+        target = await _resolve_process_ref(db, spec["process"], row.owner_id)
+        if target is None:
+            entry["opened"] = False
+            entry["reason"] = (f"target process {spec['process']!r} not found - "
+                               "install the operator that ships it and the leg "
+                               "opens on the next landing")
+            await events_svc.emit(
+                db, row.owner_id, "business.journey_skipped", source="business",
+                actor=actor or "journey", target_type="process_instance",
+                target_id=row.id,
+                payload={"process_id": process.id, "process_name": process.name,
+                         "instance_id": row.id, "ref": row.ref,
+                         "title": row.title, "on_state": to_state,
+                         "target_process": spec["process"], "reason": entry["reason"]},
+                correlation_id=row.id)
+            out.append(entry)
+            continue
+        dup = (await db.execute(
+            select(BusinessProcessInstance)
+            .where(BusinessProcessInstance.process_id == target.id,
+                   BusinessProcessInstance.ref == ref,
+                   BusinessProcessInstance.ended_at.is_(None)))).scalars().first()
+        if dup is not None:
+            entry["opened"] = False
+            entry["reason"] = (f"an open instance of {target.name!r} already "
+                               f"carries ref {ref!r} - the journey never "
+                               "double-tracks")
+            await events_svc.emit(
+                db, row.owner_id, "business.journey_skipped", source="business",
+                actor=actor or "journey", target_type="process_instance",
+                target_id=row.id,
+                payload={"process_id": process.id, "process_name": process.name,
+                         "instance_id": row.id, "ref": row.ref,
+                         "on_state": to_state, "target_process": target.name,
+                         "target_ref": ref, "reason": entry["reason"]},
+                correlation_id=row.id)
+            out.append(entry)
+            continue
+        context = dict(spec.get("memory") or {})
+        context["journey"] = {"from_process": process.name,
+                              "from_instance": row.id,
+                              "from_ref": row.ref,
+                              "from_state": to_state,
+                              "at": now.isoformat()}
+        try:
+            started = await start_instance(
+                db, target.id, owner_id=row.owner_id, ref=ref,
+                title=title[:200], context=context,
+                state=spec.get("state") or None,
+                actor=actor or "journey")
+        except ProcessError as exc:
+            entry["opened"] = False
+            entry["reason"] = str(exc)
+            await events_svc.emit(
+                db, row.owner_id, "business.journey_skipped", source="business",
+                actor=actor or "journey", target_type="process_instance",
+                target_id=row.id,
+                payload={"process_id": process.id, "process_name": process.name,
+                         "instance_id": row.id, "ref": row.ref,
+                         "on_state": to_state, "target_process": target.name,
+                         "reason": entry["reason"][:300]},
+                correlation_id=row.id)
+            out.append(entry)
+            continue
+        entry["opened"] = True
+        entry["target"] = {"process_id": target.id, "process_name": target.name,
+                           "instance_id": started["id"], "ref": started["ref"],
+                           "title": started["title"], "state": started["state"]}
+        await events_svc.emit(
+            db, row.owner_id, "business.journey_opened", source="business",
+            actor=actor or "journey", target_type="process_instance",
+            target_id=row.id,
+            payload={"process_id": process.id, "process_name": process.name,
+                     "instance_id": row.id, "ref": row.ref, "title": row.title,
+                     "on_state": to_state, "target": entry["target"]},
+            correlation_id=row.id)
+        out.append(entry)
+    return out
 
 
 async def get_instance(db: AsyncSession, process_id: str, instance_id: str,
@@ -513,13 +733,19 @@ async def annotate_instance(db: AsyncSession, process_id: str, instance_id: str,
 
 async def acknowledge_escalation(db: AsyncSession, process_id: str,
                                  instance_id: str, *, owner_id: str | None,
-                                 by: str, note: str = "") -> dict:
-    """A human takes the escalation: the episode goes quiet for the rest
-    of this state stint (episode_gate holds with reason 'acknowledged'),
-    the receipt is ON THE RECORD (an 'escalation_acknowledged' journey
-    row naming who) and ``business.escalation_acknowledged`` lands on the
-    instance's correlation thread - so a workflow can react to the take
-    (ack -> open the follow-up task, post to the channel).
+                                 by: str, note: str = "",
+                                 snooze_hours: float | None = None) -> dict:
+    """A human takes the escalation: the episode goes quiet (episode_gate
+    holds with reason 'acknowledged'), the receipt is ON THE RECORD (an
+    'escalation_acknowledged' journey row naming who) and
+    ``business.escalation_acknowledged`` lands on the instance's
+    correlation thread - so a workflow can react to the take (ack -> open
+    the follow-up task, post to the channel).
+
+    v89: snooze_hours turns the hold into a LOAN - the receipt carries a
+    snooze_until stamp and the door RE-KNOCKS once it runs out (an ack
+    without one still owns the rest of the state stint, v88 semantics).
+    Re-acking replaces the loan - snoozing again extends it.
 
     The door has to have knocked first: an episode bookkeeping with at
     least one attempt in the current stint, or an escalation marker on
@@ -533,6 +759,14 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
     if not who:
         raise ProcessError("an acknowledgement names who acknowledged (by) - "
                            "a receipt without a name is not a receipt")
+    if snooze_hours is not None:
+        try:
+            snooze_hours = float(snooze_hours)
+        except (TypeError, ValueError):
+            raise ProcessError("snooze_hours must be a number of hours") from None
+        if snooze_hours < 0:
+            raise ProcessError("snooze_hours must be >= 0 (0 = the door keeps "
+                               "its cadence; omit it to own the rest of the stint)")
     book = escalations_svc.episode_book(row)
     has_episode = (int(book.get("count") or 0) >= 1
                    and book.get("state") == row.state)
@@ -542,13 +776,18 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
         raise ProcessError("no escalation episode to acknowledge - the door "
                            "has not knocked for this stint (state "
                            f"{row.state!r})")
-    ack = escalations_svc.record_ack(db, row, by=who, note=note, now=_now())
+    ack = escalations_svc.record_ack(db, row, by=who, note=note,
+                                     snooze_hours=snooze_hours, now=_now())
+    payload = {"attempt": int(book.get("count") or 0)}
+    if ack.get("snooze_until"):
+        payload["snooze_hours"] = ack["snooze_hours"]
+        payload["snooze_until"] = ack["snooze_until"]
     db.add(BusinessProcessTransitionLog(
         process_id=p.id, instance_id=row.id, from_state=row.state,
         to_state=row.state, transition=ACK_TRANSITION,
         actor=who[:140], note=(note or "").strip()[:500]
         or "escalation acknowledged - the episode goes quiet",
-        payload={"attempt": int(book.get("count") or 0)}))
+        payload=payload))
     await db.flush()
 
     from . import system_events as events_svc
@@ -559,7 +798,9 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
         payload={"process_id": p.id, "process_name": p.name,
                  "instance_id": row.id, "ref": row.ref, "title": row.title,
                  "state": row.state, "acknowledged_by": who,
-                 "note": (note or "")[:200]},
+                 "note": (note or "")[:200],
+                 **({k: ack[k] for k in ("snooze_hours", "snooze_until")
+                     if k in ack})},
         correlation_id=row.id)
     return {"instance": instance_out(row, definition=p.definition,
                                      journey=await instance_journey(db, row.id)),
@@ -615,6 +856,7 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
     escalations = 0
     annotations = 0
     acknowledgements = 0
+    digests = 0
     for t in logs:
         if t.from_state is not None:
             advance_counts[t.transition] = advance_counts.get(t.transition, 0) + 1
@@ -630,6 +872,10 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
             annotations += 1
         if t.transition == ACK_TRANSITION:
             acknowledgements += 1
+        # v89: the digest receipts - a 'digest' row says this entity was
+        # listed in a summary that went out
+        if t.transition == DIGEST_TRANSITION:
+            digests += 1
     for name in PAPERWORK_TRANSITIONS:
         advance_counts.pop(name, None)
     return {
@@ -640,6 +886,7 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
         "escalations": escalations,
         "annotations": annotations,
         "acknowledgements": acknowledgements,
+        "digests": digests,
         "mean_time_in_state_seconds": mean_time_in_state,
         "advance_counts": advance_counts,
         "terminal_states": sorted(terminal),
@@ -718,6 +965,16 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
     machine without a policy keeps the v85 semantics exactly: one knock
     per state stint, on the record, no channel.
 
+    v89: mode="digest" replaces the N knocks with ONE summary per
+    window. Per stuck instance the door only decides WHO belongs in the
+    summary (fresh episode, not acked - or the snooze ran out - and
+    under the cap); the bucket (one per owner+process) is due when its
+    OLDEST pending item has waited digest_every_seconds, and then ONE
+    ``business.escalation_digest`` event + ONE channel message lists
+    them all. The machine's own escalate move is not taken in digest
+    mode (a self-loop per tick would re-arm the stints the digest
+    bookkeeping rides on).
+
     The v81 lifecycle gate holds the door for processes bound to a
     paused/stopped system; unbound processes always sweep. The clock is
     injectable (now=) for tests and replay tools.
@@ -731,7 +988,7 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
     open_rows = (await db.execute(q)).scalars().all()
     if not open_rows:
         return {"scanned": 0, "stuck": 0, "escalated": [], "recorded": [],
-                "held": [], "already": 0}
+                "held": [], "already": 0, "digest": {"sent": [], "pending": []}}
 
     # terminal states per process + the lifecycle gate
     process_ids = {r.process_id for r in open_rows}
@@ -748,6 +1005,8 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
     recorded: list[dict] = []
     held: list[dict] = []
     already = 0
+    # v89: the digest buckets - (owner_id, process_id) -> [member, ...]
+    buckets: dict[tuple, list[dict]] = {}
     for row in open_rows:
         definition = definitions.get(row.process_id) or {}
         terminal = _terminal_states(definition) if definition else set()
@@ -764,10 +1023,50 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                          "note": "bound system is not running - the door holds"})
             continue
 
+        breach_payload = {"process_id": row.process_id,
+                          "process_name": names.get(row.process_id, ""),
+                          "instance_id": row.id, "ref": row.ref,
+                          "title": row.title, "state": row.state,
+                          "due_at": _aware(row.due_at).isoformat() if row.due_at else None,
+                          "overdue_seconds": overdue}
+
         # v87: a policy-carrying machine gates its repeats through the
         # episode bookkeeping (cadence + cap); a machine without one keeps
         # the v85 semantics - one knock per state stint
         policy = escalations_svc.policy_from_definition(definition)
+
+        # v89: digest mode - the door decides WHO belongs in the summary;
+        # the machine's own escalate move is deliberately not taken
+        if policy is not None and policy["mode"] == "digest":
+            gate = escalations_svc.digest_gate(row, policy, now)
+            if gate["action"] == "hold":
+                held.append({"instance_id": row.id, "ref": row.ref,
+                             "process_id": row.process_id,
+                             "reason": gate["reason"],
+                             **({k: gate[k] for k in ("attempts", "acked_by",
+                                                      "snooze_until",
+                                                      "snooze_remaining_seconds")
+                                 if k in gate})})
+                continue
+            if gate.get("fresh"):
+                # first observation of THIS episode: the breach itself is
+                # a fact worth one event - after that the digest carries
+                # the beat (no per-tick noise; that is the whole point)
+                escalations_svc.record_digest_book(db, row, count=0, now=now)
+                from . import system_events as events_svc
+
+                await events_svc.emit(
+                    db, row.owner_id, "business.stuck", source="business",
+                    actor=actor, target_type="process_instance",
+                    target_id=row.id,
+                    payload={**breach_payload, "mode": "digest"},
+                    correlation_id=row.id)
+            buckets.setdefault((row.owner_id, row.process_id), []).append(
+                {"row": row, "policy": policy, "attempt": gate["attempt"],
+                 "pending_since": gate["pending_since"], "overdue": overdue,
+                 "process_name": names.get(row.process_id, "")})
+            continue
+
         attempt = 1
         if policy is not None:
             gate = escalations_svc.episode_gate(row, policy, now)
@@ -776,7 +1075,8 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                              "process_id": row.process_id,
                              "reason": gate["reason"],
                              **({k: gate[k] for k in ("attempts", "next_in_seconds",
-                                                      "acked_by")
+                                                      "acked_by", "snooze_until",
+                                                      "snooze_remaining_seconds")
                                  if k in gate})})
                 continue
             attempt = gate["attempt"]
@@ -796,13 +1096,6 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                              "reason": "acknowledged",
                              "acked_by": str(book["acked"].get("by") or "")})
                 continue
-
-        breach_payload = {"process_id": row.process_id,
-                          "process_name": names.get(row.process_id, ""),
-                          "instance_id": row.id, "ref": row.ref,
-                          "title": row.title, "state": row.state,
-                          "due_at": _aware(row.due_at).isoformat() if row.due_at else None,
-                          "overdue_seconds": overdue}
 
         # the machine's own move, when the machine defines one from here
         move = next((t for t in definition.get("transitions", [])
@@ -861,6 +1154,53 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
             entry["delivery"] = delivery.get("delivery", "")
             entry["delivery_detail"] = (delivery.get("detail") or "")[:300]
 
-    return {"scanned": len(open_rows), "stuck": len(escalated) + len(recorded) + already,
+    # ---- v89: the digest send phase - one summary per due bucket ---------
+    digest_report: dict = {"sent": [], "pending": []}
+    for (b_owner, b_pid), members in buckets.items():
+        policy = members[0]["policy"]
+        process_name = members[0]["process_name"]
+        # the bucket is due when its OLDEST pending item has waited the
+        # window (pending_since stamps are aware-UTC isoformat strings,
+        # so lexicographic order is chronological order)
+        oldest = min(m["pending_since"] for m in members)
+        oldest_dt = escalations_svc.parse_iso(oldest)
+        waited = ((now - oldest_dt).total_seconds()
+                  if oldest_dt is not None else policy["digest_every_seconds"])
+        if waited < policy["digest_every_seconds"]:
+            digest_report["pending"].append({
+                "process_id": b_pid, "process_name": process_name,
+                "items": len(members),
+                "next_in_seconds": round(policy["digest_every_seconds"] - waited)})
+            continue
+        items = [{"instance_id": m["row"].id, "ref": m["row"].ref,
+                  "title": m["row"].title, "state": m["row"].state,
+                  "overdue_seconds": m["overdue"],
+                  "overdue_minutes": max(0, m["overdue"] // 60),
+                  "attempt": m["attempt"]} for m in members]
+        delivery = await escalations_svc.deliver_digest(
+            db, owner_id=b_owner, policy=policy, process_id=b_pid,
+            process_name=process_name, items=items, actor=actor, now=now)
+        for m in members:
+            escalations_svc.record_digest_book(
+                db, m["row"], count=m["attempt"], now=now,
+                digest_last_at=now, delivery=delivery)
+            db.add(BusinessProcessTransitionLog(
+                process_id=b_pid, instance_id=m["row"].id,
+                from_state=m["row"].state, to_state=m["row"].state,
+                transition=DIGEST_TRANSITION, actor=(actor or "scheduler")[:140],
+                note=f"listed in the escalation digest "
+                     f"({delivery.get('delivery', '')})",
+                payload={"attempt": m["attempt"],
+                         "overdue_seconds": m["overdue"]}))
+        await db.flush()
+        digest_report["sent"].append({
+            "process_id": b_pid, "process_name": process_name,
+            "items": len(items), "delivery": delivery.get("delivery", ""),
+            "detail": (delivery.get("detail") or "")[:200],
+            "to": delivery.get("to")})
+
+    return {"scanned": len(open_rows),
+            "stuck": (len(escalated) + len(recorded) + already
+                      + sum(len(v) for v in buckets.values())),
             "escalated": escalated, "recorded": recorded,
-            "held": held, "already": already}
+            "held": held, "already": already, "digest": digest_report}

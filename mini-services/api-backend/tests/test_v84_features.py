@@ -431,4 +431,4 @@ def test_v84_owner_scoping_and_system_attach():
 # ---------------------------------------------------------------------------
 
 def test_v84_version_pin():
-    assert settings.version == "1.88.0"
+    assert settings.version == "1.89.0"
