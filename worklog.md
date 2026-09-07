@@ -1474,3 +1474,97 @@ board re-tunes 3600s -> 60s, the door re-knocks attempt 2 over the actual
 SMTP wire, knock->digest mid-episode anchors the window and ONE digest
 crosses the wire with the scan-line subject, (3) the shelf legs (10 across
 the shelf, finance fed by three departments).
+
+Task 77 (v92 - the loop closes from the operator's chair)
+
+"proceed with ack/snooze straight from attention rows, a before/after diff
+on policy save, and a drawn 3-operator chain view on operator detail."
+
+THE DIFF ON POLICY SAVE: update_escalation_policy now reads the OLD policy
+first (policy_from_definition - both sides of the comparison go through the
+SAME validator, so the shapes are canonical: mode filled, defaults named,
+the unused clock pinned) and the response carries a RECEIPT -
+policy_diff: {before, after, changed} - where changed is the exact sorted
+key list this save MOVES (_policy_diff_keys: a no-op save diffs EMPTY, a
+knock->digest switch names the rhythm AND both clock keys it re-anchored,
+a removal names every key the machine gave back, a field left alone never
+shows up). business.policy_updated's payload carries the same `changed`
+list, so workflows react to WHAT moved, not just that something did. The
+process body keeps its v91 shape - the diff rides beside it (additive, the
+v91 tests untouched). Frontend: the /processes policy editor is now a
+two-step save - Save policy builds the form's policy, normalizes it
+through the same canonical lens as the server (normPolicy), diffs it
+against the machine's current policy, and RENDERS the before/after rows
+(label per key, rose strikethrough old -> emerald new, `new` badge on
+added keys, "nothing changed" refused honestly) BEFORE anything lands;
+Confirm save (N) is the only button that PATCHes; Remove walks the same
+review (every key struck out); after the save the machine header wears
+the SERVER's receipt (policySavedNote: "saved - N keys changed: ...",
+dismissible).
+
+ACK/SNOOZE STRAIGHT FROM THE ATTENTION ROW: the v91 row already carried
+the door's book; now it ANSWERS it - each row grows an Ack button (hidden
+once acked) opening the same inline receipt the machine view uses (by +
+note + snooze hrs), posted to the SAME endpoint addressed by the ROW's own
+ids (POST /processes/{pid}/instances/{iid}/escalations/ack - no detour
+through the machine view); the feed re-reads after the ack, so the row
+stays on the feed (still open, still past SLA) now wearing the ack chip;
+a snoozed chip (sky, tooltip naming snooze_until) joined the chip row and
+the digest/escalated chips were made independent of it (ack + snoozed +
+escalated xN co-exist honestly).
+
+THE CHAINS DRAWN ON OPERATOR DETAIL: the shelf's chains are now NAMED and
+RESOLVED - _CHAINS (revenue / supply / care, each a walk of (source
+process, fire state) pairs) resolves against _JOURNEYS once at import
+(_resolve_chains: a leg that is not a journey, or a walk that does not
+connect, REFUSES AT IMPORT - the two tables can never drift);
+_chains_for(slug) returns the chains the operator sits in with the ordered
+operator walk (slug/name/icon/color), the resolved legs (fire state, the
+process that opens itself, the leg's own due_in_seconds, from_operator +
+opens_operator) and `position` - where this operator's node sits (0 = the
+chain starts here, last = the terminus); operator_detail carries `chains`,
+operator_catalog cards carry the chain slugs beside the v91 legs. NEW
+PAGE pages/marketplace/[slug].vue: the operator's detail room - header
+(icon/name/tagline/back + install + the v83 receipt panel), the drawn
+chain view (SVG per chain: one node per operator left to right, the
+operator you are reading LIT in its own color with a YOU ARE HERE marker,
+arrows painted fuchsia when the leg is this operator's to fire or
+receive - dashed for pure inbound - each labeled with the fire state, the
+process that opens itself and the leg's own SLA; below the drawing, one
+honest sentence per leg: "your leg - when X lands on Y, Z opens itself"
+/ "fed by <operator>"), then the full install plan (pre-wired machines
+with states + escalation + journeys, datasets, workflows, agent, rooms,
+queues, campaign, dashboard, wiring notes). The marketplace cards grew a
+"View operator detail" link. Sidebar v1.92.
+
+TESTS: tests/test_v92_features.py (4 tests) - the diff receipt (gain:
+before None + every canonical key moved, journeys surviving all four
+saves in their exact normalized shape; knock->digest: mode + both clocks,
+the old cadence named honestly on the before side; no-op: EMPTY diff;
+remove: every key given back; loud refusals never reach a save; the
+policy_updated events carrying `changed`), the attention row answering
+the door (the row carries process_id + instance_id + an empty acked_by,
+the receipt posts straight from the row, the row stays on the feed
+wearing ack + snooze, the door holds reason=acknowledged while the loan
+runs), the resolved chains (5 legs matching _JOURNEYS exactly - the drift
+guard; sales starts revenue at position 0 with the leg SLAs; finance
+terminates all three; clinic starts care; meeting stands alone; the
+catalog cards name their chains; unknown operator still 404), version
+pin. Version pins v79-v91 -> 1.92.0. Fixed live during the smoke run: the
+digest-switch PATCH omitted max_repeats so the cap default counted as a
+move (5 -> 3) - the smoke now saves like the board does (every field
+sent), which is exactly the invariant the diff promises: a field left
+alone never shows up.
+
+VERIFIED: 522 passed + 7 deliberate skips (518 -> 522, no regressions);
+Nuxt build green (1.94 MB); scripts/smoke_v92_live.py 3/3 green on a real
+uvicorn :8218 + the dev SMTP sink - (1) the diff on policy save end to
+end on the REAL clock: attempt 1 delivered, the re-tune response carrying
+changed == ['repeat_every_seconds'], the door re-knocking attempt 2 over
+the actual SMTP wire, the knock->digest switch naming the rhythm + both
+clocks, ONE digest crossing the wire with the scan-line subject, (2) the
+row receipt: ack+snooze posted straight from the attention row's ids, the
+row staying on the feed wearing the ack + the snooze, the door holding
+(reason=acknowledged), (3) the chain data: revenue resolved at position 0
+for sales, finance terminating all three chains (2/2/1), the shelf cards
+naming their chains beside the 10 legs.

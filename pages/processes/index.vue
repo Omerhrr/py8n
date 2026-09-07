@@ -102,6 +102,43 @@ const attention = ref<AttentionRow[]>([])
 const attentionMachines = ref(0)
 const attentionLoading = ref(false)
 
+// v92: ack/snooze STRAIGHT from the attention row - the row already
+// carries process_id + instance_id, so the receipt needs no detour
+// through the machine view
+const attAckForId = ref('')
+const attAckBy = ref('')
+const attAckNote = ref('')
+const attAckSnooze = ref('')
+const attAcking = ref(false)
+const attAckError = ref('')
+
+function openAttAck(row: AttentionRow) {
+  attAckForId.value = attAckForId.value === row.instance_id ? '' : row.instance_id
+  attAckBy.value = ''
+  attAckNote.value = ''
+  attAckSnooze.value = ''
+  attAckError.value = ''
+}
+
+async function ackFromAttention(row: AttentionRow) {
+  if (!attAckBy.value.trim()) return
+  attAcking.value = true
+  attAckError.value = ''
+  try {
+    await api.post(
+      `/processes/${row.process_id}/instances/${row.instance_id}/escalations/ack`,
+      { by: attAckBy.value.trim(), note: attAckNote.value.trim(),
+        snooze_hours: attAckSnooze.value.trim() ? Number(attAckSnooze.value) : null })
+    attAckForId.value = ''
+    await loadAttention()  // the row stays on the feed wearing the ack chip
+    if (selected.value?.id === row.process_id) await refreshAll()
+  } catch (e: any) {
+    attAckError.value = e?.data?.detail || e?.message || 'The acknowledgement was refused'
+  } finally {
+    attAcking.value = false
+  }
+}
+
 async function loadAttention() {
   attentionLoading.value = true
   try {
@@ -134,6 +171,83 @@ const polMaxRepeats = ref('')
 const polTemplate = ref('')
 const policySaving = ref(false)
 const policyError = ref('')
+const policySavedNote = ref('')
+
+// v92: the before/after diff - every save is reviewed BEFORE it lands,
+// and the server's receipt (policy_diff.changed) confirms what moved
+interface PolicyDiffRow { key: string; kind: 'added' | 'removed' | 'changed'
+  before: string; after: string }
+const policyReview = ref<{ rows: PolicyDiffRow[]; after: Record<string, any> | null } | null>(null)
+
+const POLICY_LABELS: Record<string, string> = {
+  channel: 'channel', to: 'deliver to', handlers: 'handler rotation',
+  mode: 'rhythm', repeat_every_seconds: 'knock cadence',
+  digest_every_seconds: 'digest window', max_repeats: 'cap',
+  message_template: 'template',
+}
+
+// the client lens on the CANONICAL policy shape the server validates to
+// (escalations.validate_escalation_policy): defaults filled, the cadence
+// key the mode does not use pinned to its default - so a diff row only
+// appears when the value truly moves
+function normPolicy(p: any): Record<string, any> {
+  if (!p) return {}
+  const mode = p.mode || 'knock'
+  const out: Record<string, any> = {
+    channel: p.channel || '',
+    to: p.to || '',
+    handlers: Array.isArray(p.handlers) ? p.handlers : [],
+    mode,
+    max_repeats: p.max_repeats ?? 3,
+    message_template: p.message_template || '',
+  }
+  if (mode === 'digest') {
+    out.digest_every_seconds = p.digest_every_seconds ?? 86400
+    out.repeat_every_seconds = 3600
+  } else {
+    out.repeat_every_seconds = p.repeat_every_seconds ?? 3600
+    out.digest_every_seconds = 86400
+  }
+  return out
+}
+
+function fmtPolicyVal(key: string, v: any): string {
+  if (key === 'handlers') return Array.isArray(v) && v.length ? v.join(' -> ') : '(none)'
+  if (key === 'message_template') return v ? String(v).slice(0, 60) : '(default)'
+  if (key === 'to' || key === 'channel') return v === '' ? '(event-only)' : String(v)
+  if (typeof v === 'number' && key.endsWith('_seconds')) return fmtAge(v)
+  return String(v)
+}
+
+function diffPolicyRows(before: any, after: Record<string, any> | null): PolicyDiffRow[] {
+  const b = normPolicy(before)
+  const a = after || {}
+  const rows: PolicyDiffRow[] = []
+  for (const key of Object.keys({ ...b, ...a })) {
+    const had = key in b
+    const has = !!after && key in a
+    if (had && !has) rows.push({ key, kind: 'removed', before: fmtPolicyVal(key, b[key]), after: '' })
+    else if (!had && has) rows.push({ key, kind: 'added', before: '', after: fmtPolicyVal(key, a[key]) })
+    else if (JSON.stringify(b[key]) !== JSON.stringify(a[key]))
+      rows.push({ key, kind: 'changed', before: fmtPolicyVal(key, b[key]), after: fmtPolicyVal(key, a[key]) })
+  }
+  return rows
+}
+
+// the policy the form builds - the exact object a confirmed save PATCHes
+function builtPolicy(): Record<string, any> {
+  const cadence = polCadence.value.trim() ? Number(polCadence.value) : undefined
+  const policy: Record<string, any> = {
+    channel: polChannel.value,
+    to: polTo.value.trim(),
+    mode: polMode.value,
+    max_repeats: polMaxRepeats.value.trim() ? Number(polMaxRepeats.value) : undefined,
+  }
+  if (polMode.value === 'digest') policy.digest_every_seconds = cadence
+  else policy.repeat_every_seconds = cadence
+  if (polTemplate.value.trim()) policy.message_template = polTemplate.value.trim()
+  return policy
+}
 
 function openPolicyEditor() {
   const pol = selected.value?.escalation_policy
@@ -148,47 +262,49 @@ function openPolicyEditor() {
   polMaxRepeats.value = pol ? String(pol.max_repeats ?? 3) : ''
   polTemplate.value = pol?.message_template || ''
   policyError.value = ''
+  policyReview.value = null
   policyOpen.value = true
 }
 
-async function savePolicy() {
+// v92: Save first SHOWS the diff - the confirm button is the one that PATCHes
+function requestPolicySave() {
   if (!selected.value) return
+  policyError.value = ''
+  const rows = diffPolicyRows(selected.value.escalation_policy, builtPolicy())
+  if (!rows.length) {
+    policyReview.value = null
+    policyError.value = 'nothing changed - the form matches the policy on the machine'
+    return
+  }
+  policyReview.value = { rows, after: builtPolicy() }
+}
+
+// removing is a save too - the diff shows every key the machine gives back
+function requestPolicyRemove() {
+  if (!selected.value) return
+  policyError.value = ''
+  const rows = diffPolicyRows(selected.value.escalation_policy, null)
+  policyReview.value = { rows, after: null }
+}
+
+async function confirmPolicyReview() {
+  if (!selected.value || !policyReview.value) return
   policySaving.value = true
   policyError.value = ''
-  const cadence = polCadence.value.trim() ? Number(polCadence.value) : undefined
-  const policy: Record<string, any> = {
-    channel: polChannel.value,
-    to: polTo.value.trim(),
-    mode: polMode.value,
-    max_repeats: polMaxRepeats.value.trim() ? Number(polMaxRepeats.value) : undefined,
-  }
-  if (polMode.value === 'digest') policy.digest_every_seconds = cadence
-  else policy.repeat_every_seconds = cadence
-  if (polTemplate.value.trim()) policy.message_template = polTemplate.value.trim()
   try {
-    await api.patch(`/processes/${selected.value.id}/escalation-policy`,
-      { policy, actor: 'staff' })
+    const res = await api.patch<any>(
+      `/processes/${selected.value.id}/escalation-policy`,
+      { policy: policyReview.value.after, actor: 'staff' })
+    const moved = res?.policy_diff?.changed || []
+    policySavedNote.value = policyReview.value.after
+      ? `saved - ${moved.length} key${moved.length === 1 ? '' : 's'} changed: ${moved.join(', ')}`
+      : 'policy removed - the machine falls back to one knock per stint, event-only'
+    policyReview.value = null
     policyOpen.value = false
     await refreshAll()
     await loadAttention()
   } catch (e: any) {
     policyError.value = e?.data?.detail || e?.message || 'The policy was refused'
-  } finally {
-    policySaving.value = false
-  }
-}
-
-async function removePolicy() {
-  if (!selected.value) return
-  policySaving.value = true
-  policyError.value = ''
-  try {
-    await api.patch(`/processes/${selected.value.id}/escalation-policy`,
-      { policy: null, actor: 'staff' })
-    policyOpen.value = false
-    await refreshAll()
-  } catch (e: any) {
-    policyError.value = e?.data?.detail || e?.message || 'The policy could not be removed'
   } finally {
     policySaving.value = false
   }
@@ -457,21 +573,40 @@ onMounted(async () => {
         </div>
         <div v-if="attention.length" class="mt-3 space-y-1.5">
           <div v-for="row in attention.slice(0, 8)" :key="row.instance_id"
-            class="flex flex-wrap items-center gap-2 rounded-xl border border-rose-500/20 bg-zinc-950/60 px-3 py-2">
-            <span class="rounded-lg bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300">{{ row.state }}</span>
-            <span class="text-xs font-semibold text-zinc-200">{{ row.ref }}</span>
-            <span class="truncate text-[10px] text-zinc-500">{{ row.title }}</span>
-            <span class="text-[10px] text-zinc-500">on <span class="text-zinc-400">{{ row.process_name }}</span></span>
-            <span class="rounded-full bg-rose-500/10 px-1.5 py-0.5 text-[9px] font-bold text-rose-300" title="time past the SLA promise">
-              {{ fmtAge(row.overdue_seconds) }} overdue
-            </span>
-            <span v-if="row.escalation?.acked_by" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${row.escalation.acked_by}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack</span>
-            <span v-else-if="row.escalation?.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest">digest ×{{ row.escalation.count }}</span>
-            <span v-else-if="row.escalation" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="row.escalation.last_detail || row.escalation.last_delivery">escalated ×{{ row.escalation.count }}</span>
-            <span v-if="row.journey_leg" class="rounded-full bg-fuchsia-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-fuchsia-300" title="this entity opened itself from another department's hand-off">journey leg</span>
-            <button class="ml-auto flex items-center gap-1 text-[10px] font-bold text-cyan-400 transition hover:text-cyan-300" @click="openAttentionMachine(row)">
-              open machine <ChevronRight class="h-3 w-3" />
-            </button>
+            class="rounded-xl border border-rose-500/20 bg-zinc-950/60 px-3 py-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="rounded-lg bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300">{{ row.state }}</span>
+              <span class="text-xs font-semibold text-zinc-200">{{ row.ref }}</span>
+              <span class="truncate text-[10px] text-zinc-500">{{ row.title }}</span>
+              <span class="text-[10px] text-zinc-500">on <span class="text-zinc-400">{{ row.process_name }}</span></span>
+              <span class="rounded-full bg-rose-500/10 px-1.5 py-0.5 text-[9px] font-bold text-rose-300" title="time past the SLA promise">
+                {{ fmtAge(row.overdue_seconds) }} overdue
+              </span>
+              <span v-if="row.escalation?.acked_by" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${row.escalation.acked_by}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack</span>
+              <span v-if="row.escalation?.snooze_until" class="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold text-sky-300" :title="`the door re-knocks after ${row.escalation.snooze_until}`">snoozed</span>
+              <span v-if="row.escalation && !row.escalation.acked_by && row.escalation.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest">digest ×{{ row.escalation.count }}</span>
+              <span v-else-if="row.escalation && !row.escalation.acked_by" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="row.escalation.last_detail || row.escalation.last_delivery">escalated ×{{ row.escalation.count }}</span>
+              <span v-if="row.journey_leg" class="rounded-full bg-fuchsia-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-fuchsia-300" title="this entity opened itself from another department's hand-off">journey leg</span>
+              <!-- v92: the receipt straight from the row - no detour through the machine -->
+              <button v-if="!row.escalation?.acked_by"
+                class="flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-bold text-emerald-300 transition hover:bg-emerald-500/20"
+                @click="openAttAck(row)">
+                <CheckCheck class="h-2.5 w-2.5" /> Ack
+              </button>
+              <button class="ml-auto flex items-center gap-1 text-[10px] font-bold text-cyan-400 transition hover:text-cyan-300" @click="openAttentionMachine(row)">
+                open machine <ChevronRight class="h-3 w-3" />
+              </button>
+            </div>
+            <!-- v92: the row's own ack form (by + note + snooze, same receipt as the machine view) -->
+            <div v-if="attAckForId === row.instance_id" class="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+              <input v-model="attAckBy" placeholder="acknowledged by" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+              <input v-model="attAckNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+              <input v-model="attAckSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
+              <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="attAcking || !attAckBy.trim()" @click="ackFromAttention(row)">
+                <Loader2 v-if="attAcking" class="h-3 w-3 animate-spin" /> Acknowledge
+              </button>
+              <p v-if="attAckError" class="w-full text-[10px] text-rose-300">{{ attAckError }}</p>
+            </div>
           </div>
           <p v-if="attention.length > 8" class="text-[10px] text-zinc-600">+ {{ attention.length - 8 }} more past SLA (the feed caps at 200, most overdue first)</p>
         </div>
@@ -531,6 +666,11 @@ onMounted(async () => {
               <!-- v89: cross-operator journeys - the legs this machine opens -->
               <span v-for="j in selected.journeys || []" :key="j.on_state" class="flex items-center gap-1 rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-semibold text-fuchsia-300" :title="`when this machine lands on ${j.on_state}, a case opens itself on ${j.open.process}`">
                 {{ j.on_state }} → {{ j.open.process }}
+              </span>
+              <!-- v92: the server's receipt for the last save - what actually moved -->
+              <span v-if="policySavedNote" class="flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-300">
+                <CheckCheck class="h-2.5 w-2.5" /> {{ policySavedNote }}
+                <button class="ml-0.5 text-zinc-600 hover:text-zinc-300" title="dismiss" @click="policySavedNote = ''">✕</button>
               </span>
             </div>
             <!-- the pipeline -->
@@ -607,12 +747,39 @@ onMounted(async () => {
               </div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <input v-model="polTemplate" placeholder="custom message template ({process}, {ref}, {state}, {overdue_minutes}, {attempt})" class="min-w-64 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60" />
-                <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="savePolicy">
+                <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="requestPolicySave">
                   <Loader2 v-if="policySaving" class="h-3 w-3 animate-spin" /> Save policy
                 </button>
-                <button v-if="selected.escalation_policy" class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-50" :disabled="policySaving" title="remove the policy - the machine falls back to one knock per stint, event-only" @click="removePolicy">
+                <button v-if="selected.escalation_policy" class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-50" :disabled="policySaving" title="remove the policy - the machine falls back to one knock per stint, event-only" @click="requestPolicyRemove">
                   Remove
                 </button>
+              </div>
+              <!-- v92: the before/after diff - save shows what moves BEFORE it lands -->
+              <div v-if="policyReview" class="mt-2 rounded-xl border border-indigo-500/40 bg-zinc-950/70 px-3 py-2.5">
+                <div class="flex flex-wrap items-center gap-2">
+                  <p class="text-[10px] font-bold uppercase tracking-widest text-indigo-300">
+                    {{ policyReview.after ? 'This save - before / after' : 'Removing the policy' }}
+                  </p>
+                  <span class="rounded-full bg-indigo-500/15 px-2 py-0.5 text-[9px] font-bold text-indigo-300">{{ policyReview.rows.length }} key{{ policyReview.rows.length === 1 ? '' : 's' }} move{{ policyReview.rows.length === 1 ? 's' : '' }}</span>
+                </div>
+                <div class="mt-1.5 space-y-1">
+                  <div v-for="r in policyReview.rows" :key="r.key" class="flex flex-wrap items-center gap-2 text-[10px]">
+                    <span class="w-28 shrink-0 text-zinc-500">{{ POLICY_LABELS[r.key] || r.key }}</span>
+                    <span class="rounded bg-rose-500/10 px-1.5 py-0.5 font-mono text-rose-300/90 line-through decoration-rose-400/50">{{ r.before || '(unset)' }}</span>
+                    <span class="text-zinc-600">→</span>
+                    <span class="rounded bg-emerald-500/10 px-1.5 py-0.5 font-mono text-emerald-300">{{ r.after || '(unset)' }}</span>
+                    <span v-if="r.kind === 'added'" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[8px] font-bold uppercase text-emerald-300">new</span>
+                  </div>
+                </div>
+                <div class="mt-2 flex items-center gap-2">
+                  <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="confirmPolicyReview">
+                    <Loader2 v-if="policySaving" class="h-3 w-3 animate-spin" />
+                    {{ policyReview.after ? `Confirm save (${policyReview.rows.length})` : 'Confirm remove' }}
+                  </button>
+                  <button class="rounded-lg border border-zinc-700 px-2.5 py-1 text-[10px] font-bold text-zinc-400 transition hover:text-zinc-200" :disabled="policySaving" @click="policyReview = null">
+                    Keep editing
+                  </button>
+                </div>
               </div>
               <p class="mt-1.5 text-[9px] text-zinc-600">the door reads the policy fresh at every sweep - the new rhythm rules the NEXT tick; running instances and their episodes are untouched</p>
               <p v-if="policyError" class="mt-1 text-[10px] text-rose-300">{{ policyError }}</p>

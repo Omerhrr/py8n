@@ -305,9 +305,15 @@ onMounted(async () => {
               </template>
               <p v-else-if="opErrors[op.slug]" class="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-300">{{ opErrors[op.slug] }}</p>
 
+              <!-- v92: the operator's detail page - the install plan + the chains drawn -->
+              <NuxtLink :to="`/marketplace/${op.slug}`"
+                class="mt-4 flex items-center justify-center gap-1.5 rounded-xl border border-emerald-500/40 bg-emerald-500/5 px-4 py-2 text-xs font-bold text-emerald-300 transition hover:bg-emerald-500/15">
+                <ExternalLink class="h-3.5 w-3.5" /> View operator detail
+              </NuxtLink>
+
               <button
                 v-if="!opResults[op.slug]"
-                class="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                class="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50"
                 :disabled="installingOp === op.slug"
                 @click="installOperator(op.slug)"
               >

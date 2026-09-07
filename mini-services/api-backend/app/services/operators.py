@@ -1831,6 +1831,99 @@ for _op in OPERATORS:
 del _op, _pspec, _loop
 
 
+# v92: the NAMED chains - the drawn view on the operator detail page. A
+# chain names its ordered walk as (source process, fire state) pairs;
+# everything else (the opened process, the leg's own SLA) RESOLVES from
+# _JOURNEYS so the two tables can never drift: a leg that is not a
+# journey, or a walk that does not connect, refuses loudly at import.
+_CHAINS: list[dict] = [
+    {"slug": "revenue", "name": "Revenue",
+     "story": "a deal won onboards the customer, and the hand-off lands the invoice",
+     "path": [("Lead pipeline", "won"), ("Customer onboarding", "handed_off")]},
+    {"slug": "supply", "name": "Supply",
+     "story": "a purchase order dispatches the delivery, and the goods received land the bill",
+     "path": [("Purchase lifecycle", "ordered"), ("Delivery pipeline", "delivered")]},
+    {"slug": "care", "name": "Care",
+     "story": "a billed visit hands the money to finance",
+     "path": [("Appointment journey", "billed")]},
+]
+
+
+def _resolve_chains() -> list[dict]:
+    """Resolve the chain walks against _JOURNEYS once at import - the
+    drawn view renders RESOLVED legs, never re-derives them."""
+    resolved: list[dict] = []
+    for chain in _CHAINS:
+        legs: list[dict] = []
+        for i, (src, state) in enumerate(chain["path"]):
+            hits = [j for j in _JOURNEYS.get(src, []) if j["on_state"] == state]
+            if len(hits) != 1:
+                raise RuntimeError(
+                    f"chain {chain['slug']!r}: leg ({src!r} on {state!r}) is not "
+                    "a journey in _JOURNEYS - the walk and the journeys drifted")
+            open_spec = hits[0].get("open") or {}
+            opens = str(open_spec.get("process") or "")
+            nxt = chain["path"][i + 1][0] if i + 1 < len(chain["path"]) else None
+            if nxt and opens != nxt:
+                raise RuntimeError(
+                    f"chain {chain['slug']!r}: leg ({src!r} on {state!r}) opens "
+                    f"{opens!r}, but the walk continues at {nxt!r}")
+            legs.append({"from_process": src, "on_state": state,
+                         "opens": opens,
+                         "due_in_seconds": open_spec.get("due_in_seconds")})
+        resolved.append({**chain, "legs": legs})
+    return resolved
+
+
+_RESOLVED_CHAINS = _resolve_chains()
+
+
+def _journey_owner_of() -> dict[str, str]:
+    owner_of: dict[str, str] = {}
+    for op in OPERATORS:
+        for p in (op.get("processes") or []):
+            owner_of[p["name"]] = op["slug"]
+    return owner_of
+
+
+def _operator_brief(slug: str) -> dict:
+    op = OPERATORS_BY_SLUG.get(slug)
+    if op is None:
+        return {"slug": slug, "name": slug, "icon": "", "color": "#71717a"}
+    return {"slug": op["slug"], "name": op["name"],
+            "icon": op["icon"], "color": op["color"]}
+
+
+def _chains_for(slug: str) -> list[dict]:
+    """v92: the named chains THIS operator sits in - drawn on the detail
+    page. ``position`` is where the operator's node sits in the walk
+    (0 = the chain starts here, the last index = the terminus), and each
+    leg names who FIRES it and who RECEIVES, so the drawing can flag the
+    operator's own legs (out = it fires, in = it is fed)."""
+    owner_of = _journey_owner_of()
+    out: list[dict] = []
+    for chain in _RESOLVED_CHAINS:
+        walk = [chain["legs"][0]["from_process"]] + \
+               [leg["opens"] for leg in chain["legs"]]
+        ops_order: list[str] = []
+        for pr in walk:
+            s = owner_of.get(pr, "")
+            if s and s not in ops_order:
+                ops_order.append(s)
+        if slug not in ops_order:
+            continue
+        legs = [{**leg,
+                 "from_operator": owner_of.get(leg["from_process"], ""),
+                 "opens_operator": owner_of.get(leg["opens"], "")}
+                for leg in chain["legs"]]
+        out.append({"slug": chain["slug"], "name": chain["name"],
+                    "story": chain["story"],
+                    "operators": [_operator_brief(s) for s in ops_order],
+                    "legs": legs,
+                    "position": ops_order.index(slug)})
+    return out
+
+
 def _catalog_journeys(slug: str) -> list[dict]:
     """v91: the journey legs ON the shelf card - what installing this
     operator wires into the cross-department chains. Two directions,
@@ -1870,6 +1963,7 @@ def operator_catalog() -> dict:
              "category": op["category"], "icon": op["icon"], "color": op["color"],
              "outcomes": list(op["outcomes"]),
              "journeys": _catalog_journeys(op["slug"]),
+             "chains": [c["slug"] for c in _chains_for(op["slug"])],
              "topology": {
                  "datasets": len(op["datasets"]),
                  "workflows": len(op["workflows"]),
@@ -1893,6 +1987,7 @@ def operator_detail(slug: str) -> dict:
         "slug": op["slug"], "name": op["name"], "tagline": op["tagline"],
         "category": op["category"], "icon": op["icon"], "color": op["color"],
         "outcomes": list(op["outcomes"]),
+        "chains": _chains_for(slug),
         "installs": {
             "datasets": [{"name": d["name"], "description": d["description"],
                           "columns": list(d["columns"]), "rows": len(d["rows"])}

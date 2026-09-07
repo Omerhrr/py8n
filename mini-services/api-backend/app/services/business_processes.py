@@ -248,6 +248,17 @@ async def get_process(db: AsyncSession, process_id: str, owner_id: str | None) -
     return process_out(p, instance_counts=counts)
 
 
+def _policy_diff_keys(before: dict | None, after: dict | None) -> list[str]:
+    """v92: the keys this save MOVES. Both sides come out of
+    validate_escalation_policy (canonical shape, same key set), so a key
+    differs only when its value truly changes - a no-op save diffs empty,
+    a knock->digest switch names the clock keys it re-anchored, and a
+    removal names every key the machine gave back."""
+    b = before or {}
+    a = after or {}
+    return [k for k in sorted(set(b) | set(a)) if b.get(k) != a.get(k)]
+
+
 async def update_escalation_policy(db: AsyncSession, process_id: str, *,
                                    owner_id: str | None, policy: dict | None,
                                    actor: str = "") -> dict:
@@ -261,12 +272,21 @@ async def update_escalation_policy(db: AsyncSession, process_id: str, *,
     definitions, now a first-class door with the same loud validation).
 
     policy=None removes the policy - the machine falls back to the v85
-    semantics (one knock per state stint, event-only)."""
+    semantics (one knock per state stint, event-only).
+
+    v92: the save comes with a RECEIPT - ``policy_diff`` names the
+    before policy, the after policy, and the exact keys that moved, so
+    the board can show the operator what they just changed."""
     p = await _load_process(db, process_id, owner_id)
+    # v92: read the OLD policy first - both sides of the diff go through
+    # the same validator, so the comparison is canonical (mode filled,
+    # defaults named) and a no-op save diffs empty
+    before = escalations_svc.policy_from_definition(dict(p.definition or {}))
     try:
         clean = escalations_svc.validate_escalation_policy(policy)
     except escalations_svc.EscalationPolicyError as exc:
         raise ProcessError(str(exc)) from exc
+    changed = _policy_diff_keys(before, clean)
     d = dict(p.definition or {})
     if clean:
         d["escalation_policy"] = clean
@@ -283,10 +303,13 @@ async def update_escalation_policy(db: AsyncSession, process_id: str, *,
         actor=(actor or "api")[:140], target_type="process", target_id=p.id,
         payload={"process_id": p.id, "process_name": p.name,
                  "escalation_policy": clean,
+                 "changed": changed,
                  "escalation_summary": escalations_svc.describe_policy(
                      escalations_svc.policy_from_definition(d))})
     counts = await _instance_counts(db, p.id)
-    return process_out(p, instance_counts=counts)
+    out = process_out(p, instance_counts=counts)
+    out["policy_diff"] = {"before": before, "after": clean, "changed": changed}
+    return out
 
 
 async def _instance_counts(db: AsyncSession, process_id: str) -> dict:
