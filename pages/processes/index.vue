@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
   Flag, RefreshCw, ChevronRight, ListChecks, BellRing, PenLine, CheckCheck,
-  Siren, SlidersHorizontal,
+  Siren, SlidersHorizontal, Radio, Eye,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -59,7 +59,6 @@ interface AttentionRow {
   journey_leg: boolean
 }
 
-const { api } = useApi()
 const loading = ref(true)
 const pageError = ref('')
 const processes = ref<ProcessDef[]>([])
@@ -101,6 +100,82 @@ const ackError = ref('')
 const attention = ref<AttentionRow[]>([])
 const attentionMachines = ref(0)
 const attentionLoading = ref(false)
+
+// v93: the attention feed AUTO-REFRESHES on business.stuck - the board
+// rides the same owner-scoped live tail every reactive surface rides
+// (WS /events/stream); a breach anywhere re-reads the feed without
+// anybody pressing refresh
+const { api, streamUrl } = useApi()
+const liveState = ref<'connecting' | 'live' | 'reconnecting'>('connecting')
+const lastStuckNote = ref('')
+let liveWs: WebSocket | null = null
+let liveReconnectDelay = 2000
+let liveReconnectTimer: ReturnType<typeof setTimeout> | null = null
+let attentionRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleAttentionRefresh() {
+  if (attentionRefreshTimer) clearTimeout(attentionRefreshTimer)
+  attentionRefreshTimer = setTimeout(async () => {
+    attentionRefreshTimer = null
+    await loadAttention()
+    // the open machine's own board moves too - quietly, forms untouched
+    if (selected.value) {
+      try {
+        const [p, inst, a] = await Promise.all([
+          api.get<ProcessDef>(`/processes/${selected.value.id}`),
+          api.get<{ instances: Instance[] }>(
+            `/processes/${selected.value.id}/instances${stateFilter.value ? `?state=${stateFilter.value}` : ''}`),
+          api.get<Analytics>(`/processes/${selected.value.id}/analytics`),
+        ])
+        selected.value = p
+        instances.value = inst.instances
+        analytics.value = a
+      } catch { /* the next event or a manual refresh catches it */ }
+    }
+  }, 600)
+}
+
+function connectLiveTail() {
+  if (liveWs) return
+  try {
+    liveWs = new WebSocket(streamUrl('/api/v1/events/stream'))
+  } catch {
+    liveState.value = 'reconnecting'
+    scheduleLiveReconnect()
+    return
+  }
+  liveState.value = 'connecting'
+  liveWs.onopen = () => { liveState.value = 'live'; liveReconnectDelay = 2000 }
+  liveWs.onmessage = (m) => {
+    try {
+      const msg = JSON.parse(m.data as string)
+      if (msg?.event !== 'system_event' || msg?.type !== 'business.stuck') return
+      const p = msg.payload || {}
+      lastStuckNote.value =
+        `refreshed by business.stuck - ${p.ref || 'an entity'} on ${p.process_name || 'a machine'}` +
+        ` (+${fmtAge(Number(p.overdue_seconds) || 0)} past SLA)`
+      scheduleAttentionRefresh()
+    } catch { /* a malformed frame is not worth the board's attention */ }
+  }
+  liveWs.onclose = () => { liveWs = null; liveState.value = 'reconnecting'; scheduleLiveReconnect() }
+  liveWs.onerror = () => { try { liveWs?.close() } catch { /* onclose follows */ } }
+}
+
+function scheduleLiveReconnect() {
+  if (liveReconnectTimer) return
+  liveReconnectTimer = setTimeout(() => {
+    liveReconnectTimer = null
+    liveReconnectDelay = Math.min(liveReconnectDelay * 2, 15000)
+    connectLiveTail()
+  }, liveReconnectDelay)
+}
+
+onUnmounted(() => {
+  if (attentionRefreshTimer) clearTimeout(attentionRefreshTimer)
+  if (liveReconnectTimer) clearTimeout(liveReconnectTimer)
+  if (liveWs) { try { liveWs.onclose = null; liveWs.close() } catch { /* gone */ } }
+  liveWs = null
+})
 
 // v92: ack/snooze STRAIGHT from the attention row - the row already
 // carries process_id + instance_id, so the receipt needs no detour
@@ -249,7 +324,7 @@ function builtPolicy(): Record<string, any> {
   return policy
 }
 
-function openPolicyEditor() {
+async function openPolicyEditor() {
   const pol = selected.value?.escalation_policy
   polChannel.value = pol?.channel || ''
   polTo.value = pol?.to || ''
@@ -263,7 +338,10 @@ function openPolicyEditor() {
   polTemplate.value = pol?.message_template || ''
   policyError.value = ''
   policyReview.value = null
+  preview.value = null
+  previewError.value = ''
   policyOpen.value = true
+  await loadPreview()  // v93: the preview typesets itself on open
 }
 
 // v92: Save first SHOWS the diff - the confirm button is the one that PATCHes
@@ -286,6 +364,46 @@ function requestPolicyRemove() {
   const rows = diffPolicyRows(selected.value.escalation_policy, null)
   policyReview.value = { rows, after: null }
 }
+
+// v93: the SLA digest preview - the door's next move rendered over the
+// machine's LIVE overdue items under the DRAFT the form is holding. It
+// rides the same validator a save runs, so a broken draft refuses HERE,
+// before it can be saved; every form change re-typesets it (debounced).
+const preview = ref<any | null>(null)
+const previewLoading = ref(false)
+const previewError = ref('')
+let previewTimer: ReturnType<typeof setTimeout> | null = null
+
+const HELD_LABELS: Record<string, string> = {
+  acknowledged: 'acknowledged - the receipt owns this stint',
+  too_soon: 'too soon - the cadence holds the next knock',
+  episode_complete: 'episode complete - the cap was reached',
+  already_escalated_this_stint: 'already escalated this stint',
+}
+
+function schedulePreview() {
+  if (previewTimer) clearTimeout(previewTimer)
+  previewTimer = setTimeout(() => { previewTimer = null; loadPreview() }, 400)
+}
+
+async function loadPreview() {
+  if (!selected.value || !policyOpen.value) return
+  previewLoading.value = true
+  try {
+    preview.value = await api.post<any>(
+      `/processes/${selected.value.id}/escalation-preview`,
+      { policy: builtPolicy() })
+    previewError.value = ''
+  } catch (e: any) {
+    preview.value = null
+    previewError.value = e?.data?.detail || e?.message || 'the preview was refused'
+  } finally {
+    previewLoading.value = false
+  }
+}
+
+watch([polChannel, polTo, polMode, polCadence, polMaxRepeats, polTemplate],
+  () => { if (policyOpen.value) schedulePreview() })
 
 async function confirmPolicyReview() {
   if (!selected.value || !policyReview.value) return
@@ -530,6 +648,7 @@ onMounted(async () => {
     loading.value = false
   }
   await loadAttention()  // v91: the overdue view opens with the page
+  connectLiveTail()      // v93: and it refreshes ITSELF from here on
 })
 </script>
 
@@ -569,6 +688,14 @@ onMounted(async () => {
             {{ attention.length }} past SLA across {{ attentionMachines }} machine{{ attentionMachines === 1 ? '' : 's' }}
           </span>
           <span v-else class="text-[11px] text-emerald-300/80">all clear - nothing is past its SLA</span>
+          <!-- v93: the feed refreshes ITSELF - business.stuck rides the live tail -->
+          <span class="flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold"
+            :class="liveState === 'live' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'"
+            :title="liveState === 'live' ? 'the feed re-reads itself when the door emits business.stuck' : 'the live tail is down - the Refresh button still works'">
+            <Radio class="h-2.5 w-2.5" :class="liveState === 'live' ? 'animate-pulse' : ''" />
+            {{ liveState === 'live' ? 'live - refreshes on business.stuck' : liveState === 'reconnecting' ? 'reconnecting...' : 'connecting...' }}
+          </span>
+          <span v-if="lastStuckNote" class="w-full text-[10px] text-sky-300/80">{{ lastStuckNote }}</span>
           <Loader2 v-if="attentionLoading" class="h-3 w-3 animate-spin text-zinc-600" />
         </div>
         <div v-if="attention.length" class="mt-3 space-y-1.5">
@@ -783,6 +910,73 @@ onMounted(async () => {
               </div>
               <p class="mt-1.5 text-[9px] text-zinc-600">the door reads the policy fresh at every sweep - the new rhythm rules the NEXT tick; running instances and their episodes are untouched</p>
               <p v-if="policyError" class="mt-1 text-[10px] text-rose-300">{{ policyError }}</p>
+
+              <!-- v93: the SLA digest preview - the door's next move, typeset -->
+              <div class="mt-2 rounded-xl border border-cyan-500/30 bg-cyan-500/5 px-3 py-2.5">
+                <div class="flex flex-wrap items-center gap-2">
+                  <p class="flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-widest text-cyan-300">
+                    <Eye class="h-3 w-3" /> The door's next move - preview
+                  </p>
+                  <span v-if="preview" class="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[9px] font-bold uppercase text-cyan-300">{{ preview.mode }}</span>
+                  <span v-if="preview" class="text-[9px] text-zinc-500">{{ preview.policy_line }}</span>
+                  <Loader2 v-if="previewLoading" class="h-3 w-3 animate-spin text-zinc-600" />
+                </div>
+                <p v-if="previewError" class="mt-1.5 text-[10px] text-rose-300">the draft was refused: {{ previewError }}</p>
+                <template v-if="preview">
+                  <div class="mt-1.5 flex flex-wrap items-center gap-2 text-[10px]">
+                    <span class="rounded-full px-2 py-0.5 font-bold"
+                      :class="preview.overdue_count ? 'bg-rose-500/15 text-rose-300' : 'bg-emerald-500/15 text-emerald-300'">
+                      {{ preview.overdue_count }} past SLA right now
+                    </span>
+                    <span class="text-[10px]" :class="preview.would_deliver ? 'text-emerald-300/80' : 'text-amber-300/80'">{{ preview.delivery_note }}</span>
+                  </div>
+                  <!-- digest mode: the ONE summary -->
+                  <div v-if="preview.digest" class="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/70 px-2.5 py-2">
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-zinc-500">the next digest email</p>
+                    <p class="mt-1 font-mono text-[10px] font-bold text-zinc-200">{{ preview.digest.subject }}</p>
+                    <pre class="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-zinc-400">{{ preview.digest.body }}</pre>
+                    <p class="mt-1 text-[9px]" :class="preview.digest.due ? 'text-amber-300' : 'text-zinc-500'">
+                      {{ preview.digest.due
+                        ? 'the window has elapsed - the next sweep sends this summary'
+                        : preview.digest.candidates
+                          ? `the window elapses in ${fmtAge(preview.digest.next_in_seconds)} (one summary covers every listed item)`
+                          : 'nothing past SLA - the next window would say so' }}
+                    </p>
+                  </div>
+                  <!-- knock / event-only: the per-item messages or the record -->
+                  <div v-if="preview.messages?.length" class="mt-2 space-y-1">
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-zinc-500">
+                      {{ preview.mode === 'knock' ? 'the next knocks' : 'the escalation record (event-only)' }}
+                    </p>
+                    <div v-for="m in preview.messages" :key="m.instance_id" class="rounded-lg border border-zinc-800 bg-zinc-950/70 px-2.5 py-1.5">
+                      <div class="flex flex-wrap items-center gap-1.5 text-[9px] text-zinc-500">
+                        <span class="font-bold text-zinc-300">{{ m.ref }}</span>
+                        <span class="truncate">{{ m.title }}</span>
+                        <span class="rounded bg-zinc-800 px-1 py-0.5 text-zinc-400">{{ m.state }}</span>
+                        <span>attempt {{ m.attempt }}</span>
+                        <span v-if="m.to" class="text-cyan-300/80">→ {{ m.to }}</span>
+                      </div>
+                      <p v-if="m.subject" class="mt-0.5 font-mono text-[10px] font-bold text-zinc-300">{{ m.subject }}</p>
+                      <pre class="mt-0.5 whitespace-pre-wrap font-mono text-[10px] leading-relaxed text-zinc-500">{{ m.message }}</pre>
+                    </div>
+                  </div>
+                  <!-- the holds: why the quiet -->
+                  <div v-if="preview.held?.length" class="mt-2 space-y-1">
+                    <p class="text-[9px] font-bold uppercase tracking-widest text-zinc-500">held - why the quiet</p>
+                    <div v-for="x in preview.held" :key="x.instance_id" class="flex flex-wrap items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950/70 px-2.5 py-1 text-[9px]">
+                      <span class="font-bold text-zinc-300">{{ x.ref }}</span>
+                      <span class="truncate text-zinc-500">{{ x.title }}</span>
+                      <span class="rounded px-1.5 py-0.5 font-semibold"
+                        :class="x.reason === 'acknowledged' ? 'bg-emerald-500/15 text-emerald-300' : x.reason === 'too_soon' ? 'bg-amber-500/15 text-amber-300' : 'bg-zinc-800 text-zinc-400'">
+                        {{ HELD_LABELS[x.reason] || x.reason }}
+                      </span>
+                      <span v-if="x.acked_by" class="text-emerald-300/80">by {{ x.acked_by }}</span>
+                      <span v-if="x.snooze_remaining_seconds" class="text-sky-300/80">snooze {{ fmtAge(x.snooze_remaining_seconds) }} left</span>
+                      <span v-if="x.next_in_seconds" class="text-amber-300/80">next in {{ fmtAge(x.next_in_seconds) }}</span>
+                    </div>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
 

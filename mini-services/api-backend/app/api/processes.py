@@ -17,8 +17,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
-    attention_feed, create_process, get_instance, get_process, list_instances,
-    list_processes, process_analytics, start_instance, update_escalation_policy,
+    attention_feed, create_process, escalation_preview, get_instance,
+    get_process, list_instances, list_processes, process_analytics,
+    start_instance, update_escalation_policy,
 )
 from .auth import get_optional_user
 
@@ -191,6 +192,36 @@ class PolicyUpdate(BaseModel):
         "the new escalation_policy (channel, to|handlers, mode, cadence, "
         "max_repeats, message_template) - null removes it"))
     actor: str = Field(default="", description="who changed the rhythm")
+
+
+class PolicyPreview(BaseModel):
+    """v93: the DRAFT policy the board's editor is holding - the preview
+    renders the door's next move under these rules without saving them
+    (the same validator a save runs, so a broken draft refuses here
+    first)."""
+
+    policy: dict | None = Field(default=None, description=(
+        "the draft escalation_policy to preview (channel, to|handlers, mode, "
+        "cadence, max_repeats, message_template) - null previews the v85 "
+        "no-policy semantics"))
+
+
+@router.post("/{process_id}/escalation-preview")
+async def preview_policy(process_id: str, body: PolicyPreview,
+                         user=Depends(get_optional_user),
+                         db: AsyncSession = Depends(get_db)):
+    """v93: the SLA digest preview - what the door would do RIGHT NOW
+    under the draft policy, rendered over the machine's LIVE overdue
+    items: the digest's subject + body (or the per-item knock messages),
+    the held episodes (acked / snoozed / capped) and the honest delivery
+    note (event-only / no target / no endpoint bound). Nothing is saved,
+    sent or recorded - the door's next move, typeset for the editor."""
+    try:
+        return await escalation_preview(
+            db, process_id, owner_id=getattr(user, "id", None),
+            policy=body.policy)
+    except ProcessError as exc:
+        raise _http(exc) from exc
 
 
 @router.patch("/{process_id}/escalation-policy")

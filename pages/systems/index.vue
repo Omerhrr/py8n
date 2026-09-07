@@ -4,7 +4,7 @@ import {
   Loader2, Boxes, Plus, CheckCircle2, XCircle, AlertTriangle, X,
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
-  Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video,
+  Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video, GitBranch,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -28,6 +28,7 @@ interface SystemCard {
 interface SystemDetail extends SystemCard {
   grouped: Record<string, { component_id: string; kind: string; ref_id: string; name: string; added_at: string | null }[]>
   architecture: { layers: { layer: string; dataset: string; mode: string; workflow: string }[]; staging: boolean; dead_letter: boolean }
+  chains?: SystemChainView[]
   health: {
     verdict: string
     workflows: { bound: number; runs_7d: number; failures_7d: number; failure_rate_7d: number; failing_workflows: { workflow_id: string; name: string; failures: number; last_error: string | null }[] }
@@ -44,6 +45,28 @@ interface MemberRow { user_id: string; email: string | null; name: string | null
 interface DepNode { id: string; name: string; icon: string; color: string; total_components: number; verdict: string; owner: string | null }
 interface DepEdge { from: string; to: string; type: string; weight: number; evidence: any[] }
 interface DepGraph { nodes: DepNode[]; edges: DepEdge[]; summary: { systems: number; edges: number; by_type: Record<string, number> } }
+
+// v93: the chains LIVE on the installed system - the drawn walk with the
+// real instance counts underneath it (the operator detail page's drawing,
+// re-rendered after the install against real rows)
+interface SystemChainLeg {
+  from_process: string; on_state: string; opens: string
+  due_in_seconds?: number | null
+  from_operator: string; opens_operator: string
+  bound_from: boolean; bound_opens: boolean
+  counts: { in_state: number; fired: number; overdue: number }
+}
+interface SystemChainNode {
+  process: string; operator: string; bound: boolean
+  open: number; overdue: number
+}
+interface SystemChainView {
+  slug: string; name: string; story: string
+  operators: { slug: string; name: string; icon: string; color: string }[]
+  legs: SystemChainLeg[]
+  nodes: SystemChainNode[]
+  complete: boolean
+}
 
 const { api } = useApi()
 const loading = ref(true)
@@ -360,6 +383,34 @@ const boundIds = computed(() => {
   return ids
 })
 
+// ---- v93: the drawn chain view - geometry + honest helpers ----------------
+const CH_NODE_W = 148
+const CH_NODE_H = 60
+const CH_GAP = 96
+const CH_PAD = 8
+
+function chainWidth(n: number): number {
+  return CH_PAD * 2 + n * CH_NODE_W + (n - 1) * CH_GAP
+}
+function chainNodeX(i: number): number {
+  return CH_PAD + i * (CH_NODE_W + CH_GAP)
+}
+function slaText(d?: number | null): string {
+  if (!d) return 'no leg SLA'
+  if (d % 86400 === 0) return `leg SLA ${d / 86400}d`
+  if (d % 3600 === 0) return `leg SLA ${d / 3600}h`
+  return `leg SLA ${Math.round(d / 60)}m`
+}
+function legArmed(leg: SystemChainLeg): boolean {
+  return leg.bound_from && leg.bound_opens
+}
+function missingEnds(chain: SystemChainView): string[] {
+  return chain.nodes.filter(n => !n.bound).map(n => n.process)
+}
+function shortName(name: string): string {
+  return name.length > 19 ? name.slice(0, 18) + '…' : name
+}
+
 onMounted(async () => {
   await Promise.all([loadSystems(), loadTemplates(), loadDeps()])
   loading.value = false
@@ -673,6 +724,100 @@ onMounted(async () => {
               <p class="text-[10px] uppercase tracking-wide text-zinc-500">Report deliveries (7d)</p>
               <p class="mt-1 text-xl font-bold">{{ detail.health.reports.ok_7d }} <span class="text-xs font-normal text-emerald-400">ok</span></p>
               <p class="text-[10px]" :class="detail.health.reports.error_7d ? 'text-rose-300' : 'text-zinc-500'">{{ detail.health.reports.error_7d }} errors</p>
+            </div>
+          </div>
+
+          <!-- v93: the journey chains LIVE on this system - drawn, with the real counts -->
+          <div v-if="detail.chains?.length" class="mb-5">
+            <div class="mb-2 flex flex-wrap items-center gap-2">
+              <GitBranch class="h-4 w-4 text-fuchsia-400" />
+              <h3 class="text-xs font-bold text-fuchsia-200">Journey chains</h3>
+              <span class="text-[10px] text-zinc-600">the cross-department walks this system's machines sit in - counts are the LIVE instances right now</span>
+            </div>
+            <div class="space-y-3">
+              <div v-for="chain in detail.chains" :key="chain.slug" class="rounded-2xl border border-fuchsia-900/50 bg-zinc-900/40 p-4">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-bold text-fuchsia-300">{{ chain.name }} chain</span>
+                  <p class="text-[11px] text-zinc-500">{{ chain.story }}</p>
+                  <span v-if="chain.complete" class="ml-auto flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[9px] font-bold text-emerald-300">
+                    <CheckCircle2 class="h-2.5 w-2.5" /> live end to end
+                  </span>
+                  <span v-else class="ml-auto rounded-full bg-amber-500/15 px-2 py-0.5 text-[9px] font-bold text-amber-300" title="the named machines are not bound to this system - the leg skips honestly until they are">
+                    waiting on {{ missingEnds(chain).join(', ') }}
+                  </span>
+                </div>
+                <svg :viewBox="`0 0 ${chainWidth(chain.nodes.length)} 150`"
+                  class="mt-2 w-full" style="max-width: 720px"
+                  role="img" :aria-label="`the ${chain.name} chain on this system`">
+                  <defs>
+                    <marker :id="`sarr-${chain.slug}`" viewBox="0 0 10 10" refX="9" refY="5"
+                      markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                      <path d="M 0 0 L 10 5 L 0 10 z" :fill="chain.legs.some(l => legArmed(l)) ? '#e879f9' : '#52525b'" />
+                    </marker>
+                  </defs>
+                  <!-- the walk: one node per machine in the chain, live counts underneath -->
+                  <g v-for="(n, i) in chain.nodes" :key="n.process">
+                    <rect :x="chainNodeX(i)" y="8" :width="CH_NODE_W" :height="CH_NODE_H" rx="14"
+                      :fill="n.bound ? '#131316' : '#0c0c0e'"
+                      :stroke="n.bound ? (n.overdue ? '#f43f5e' : '#3f3f46') : '#27272a'"
+                      :stroke-width="n.bound && n.overdue ? 1.6 : 1"
+                      :stroke-dasharray="n.bound ? undefined : '4 3'"
+                      :opacity="n.bound ? 1 : 0.55" />
+                    <circle :cx="chainNodeX(i) + 16" cy="24" r="4"
+                      :fill="n.bound ? '#e879f9' : '#3f3f46'" />
+                    <text :x="chainNodeX(i) + 26" y="28" font-size="11" font-weight="700"
+                      :fill="n.bound ? '#fafafa' : '#52525b'">{{ shortName(n.process) }}</text>
+                    <template v-if="n.bound">
+                      <text :x="chainNodeX(i) + 26" y="44" font-size="9.5" font-weight="600"
+                        :fill="n.overdue ? '#fb7185' : '#67e8f9'">
+                        {{ n.open }} open{{ n.overdue ? ` · ${n.overdue} past SLA` : '' }}
+                      </text>
+                      <text :x="chainNodeX(i) + 26" y="58" font-size="8" fill="#71717a">
+                        {{ n.operator.replace('-operator', '') }}
+                      </text>
+                    </template>
+                    <text v-else :x="chainNodeX(i) + CH_NODE_W / 2" y="44"
+                      text-anchor="middle" font-size="8.5" font-weight="700" letter-spacing="1"
+                      fill="#52525b">NOT INSTALLED</text>
+                  </g>
+                  <!-- the legs: fire state, what opens, the leg's own SLA, the live hand-off counts -->
+                  <g v-for="(leg, i) in chain.legs" :key="`${leg.from_process}-${leg.on_state}`">
+                    <line :x1="chainNodeX(i) + CH_NODE_W" y1="38" :x2="chainNodeX(i + 1) - 6" y2="38"
+                      :stroke="legArmed(leg) ? '#e879f9' : '#52525b'" stroke-width="1.6"
+                      :stroke-dasharray="legArmed(leg) ? undefined : '4 3'"
+                      :marker-end="`url(#sarr-${chain.slug})`" />
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="86" text-anchor="middle"
+                      font-size="9.5" font-weight="700" fill="#67e8f9">{{ leg.on_state }}</text>
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="100" text-anchor="middle"
+                      font-size="9" fill="#a1a1aa">opens {{ leg.opens }}</text>
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="114" text-anchor="middle"
+                      font-size="8.5" font-weight="600"
+                      :fill="legArmed(leg) ? '#e879f9' : '#71717a'">{{ slaText(leg.due_in_seconds) }}</text>
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="132" text-anchor="middle"
+                      font-size="8.5" :fill="leg.counts.overdue ? '#fb7185' : '#a1a1aa'">
+                      {{ leg.counts.in_state }} in state · {{ leg.counts.fired }} fired{{ leg.counts.overdue ? ` · ${leg.counts.overdue} late` : '' }}
+                    </text>
+                  </g>
+                </svg>
+                <div class="mt-1 space-y-0.5">
+                  <p v-for="leg in chain.legs" :key="`row-${leg.from_process}-${leg.on_state}`" class="text-[10px] text-zinc-600">
+                    <template v-if="legArmed(leg)">
+                      <span class="font-semibold text-fuchsia-300">armed</span> - when {{ leg.from_process }} lands on
+                      <span class="text-zinc-400">{{ leg.on_state }}</span>, {{ leg.opens }} opens itself:
+                      {{ leg.counts.in_state }} sitting in {{ leg.on_state }} now, {{ leg.counts.fired }} case{{ leg.counts.fired === 1 ? '' : 's' }} opened by this leg<template v-if="leg.counts.overdue">,
+                        <span class="text-rose-300">{{ leg.counts.overdue }} past the leg's own SLA</span></template>.
+                    </template>
+                    <template v-else-if="leg.bound_from">
+                      <span class="font-semibold text-amber-300">half-wired</span> - {{ leg.from_process }} arms the leg
+                      ({{ leg.counts.in_state }} sitting in {{ leg.on_state }}), but {{ leg.opens }} is not installed -
+                      the hand-off skips honestly until it is.
+                    </template>
+                    <template v-else>
+                      {{ leg.from_process }} is not installed - nothing arms this leg yet.
+                    </template>
+                  </p>
+                </div>
+              </div>
             </div>
           </div>
 

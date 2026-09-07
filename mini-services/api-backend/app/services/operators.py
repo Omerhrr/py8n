@@ -2017,6 +2017,135 @@ def operator_detail(slug: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# v93: the chains LIVE on the installed system - the drawn walk with the
+# real instance counts underneath it
+# ---------------------------------------------------------------------------
+
+async def chains_for_system(db: AsyncSession, system, *,
+                            now: datetime | None = None) -> list[dict]:
+    """The chains this system's bound processes actually sit in, with the
+    LIVE counts per node and per leg - the operator detail page's drawn
+    walk, re-rendered after the install against real rows.
+
+    The chain walks resolve by PROCESS NAME against the system's bound
+    kind="process" components (the same name-resolution the journeys
+    themselves use at fire time), so a system that binds only part of a
+    chain still shows it - honestly: a leg with a missing end is drawn
+    dashed (``bound_from``/``bound_opens`` name who is absent) and the
+    chain carries ``complete``. Counts are computed in PYTHON per the
+    house SQLite naive/aware discipline:
+
+    * per NODE (a bound process in the walk): open instances + how many
+      are past their SLA (terminal states skipped - a closed entity does
+      not count as late);
+    * per LEG: ``in_state`` = the source process's open instances sitting
+      in the fire state right now (the hand-off is armed), ``fired`` =
+      the target process's OPEN instances this leg opened itself (they
+      carry the journey link in their context), ``overdue`` = the fired
+      ones past the leg's own SLA promise.
+
+    A system that binds no processes draws no chains - the section is
+    simply absent, never an empty lie."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from ..models import BusinessProcess, BusinessProcessInstance
+    from . import business_processes as process_svc
+
+    if now is None:
+        now = _dt.now(_tz.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=_tz.utc)  # SQLite returns naive - normalize
+    ref_ids = [c.ref_id for c in (system.components or [])
+               if c.kind == "process"]
+    if not ref_ids:
+        return []
+    procs = (await db.execute(
+        select(BusinessProcess).where(BusinessProcess.id.in_(ref_ids)))).scalars().all()
+    if not procs:
+        return []
+    bound: dict[str, BusinessProcess] = {p.name: p for p in procs}
+    terminal_of: dict[str, set[str]] = {
+        p.name: process_svc._terminal_states(p.definition or {}) for p in procs}
+
+    open_rows = (await db.execute(
+        select(BusinessProcessInstance)
+        .where(BusinessProcessInstance.process_id.in_([p.id for p in procs]),
+               BusinessProcessInstance.ended_at.is_(None)))).scalars().all()
+
+    def _late(row) -> bool:
+        due = row.due_at
+        if due is None:
+            return False
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=_tz.utc)
+        return now >= due
+
+    nodes_stat: dict[str, dict] = {}
+    for name, proc in bound.items():
+        rows = [r for r in open_rows if r.process_id == proc.id]
+        term = terminal_of.get(name) or set()
+        nodes_stat[name] = {
+            "open": len(rows),
+            "overdue": len([r for r in rows
+                            if r.due_at is not None and r.state not in term
+                            and _late(r)]),
+        }
+
+    # the legs' fired children: open instances carrying the journey link
+    fired_index: dict[tuple[str, str], list] = {}
+    for r in open_rows:
+        link = (r.context or {}).get("journey")
+        if isinstance(link, dict) and link.get("from_process"):
+            key = (str(link["from_process"]), str(link.get("from_state") or ""))
+            fired_index.setdefault(key, []).append(r)
+
+    owner_of = _journey_owner_of()
+    out: list[dict] = []
+    for chain in _RESOLVED_CHAINS:
+        legs = chain["legs"]
+        walk = [legs[0]["from_process"]] + [leg["opens"] for leg in legs]
+        if not any(pr in bound for pr in walk):
+            continue  # none of this chain lives on this system
+        leg_out: list[dict] = []
+        for leg in legs:
+            src, dst = leg["from_process"], leg["opens"]
+            bound_from, bound_opens = src in bound, dst in bound
+            in_state = 0
+            if bound_from:
+                in_state = len([r for r in open_rows
+                                if r.process_id == bound[src].id
+                                and r.state == leg["on_state"]])
+            children = [r for r in fired_index.get((src, leg["on_state"]), [])
+                        if bound_opens and r.process_id == bound[dst].id]
+            leg_out.append({
+                "from_process": src, "on_state": leg["on_state"],
+                "opens": dst,
+                "due_in_seconds": leg.get("due_in_seconds"),
+                "from_operator": owner_of.get(src, ""),
+                "opens_operator": owner_of.get(dst, ""),
+                "bound_from": bound_from, "bound_opens": bound_opens,
+                "counts": {"in_state": in_state, "fired": len(children),
+                           "overdue": len([r for r in children if _late(r)])},
+            })
+        ops_order: list[str] = []
+        for pr in walk:
+            s = owner_of.get(pr, "")
+            if s and s not in ops_order:
+                ops_order.append(s)
+        out.append({
+            "slug": chain["slug"], "name": chain["name"], "story": chain["story"],
+            "operators": [_operator_brief(s) for s in ops_order],
+            "legs": leg_out,
+            "nodes": [{"process": pr, "operator": owner_of.get(pr, ""),
+                       "bound": pr in bound,
+                       **nodes_stat.get(pr, {"open": 0, "overdue": 0})}
+                      for pr in walk],
+            "complete": all(l["bound_from"] and l["bound_opens"] for l in leg_out),
+        })
+    return out
+
+
+# ---------------------------------------------------------------------------
 # The install - compose the business into real primitives, bind it RUNNING
 # ---------------------------------------------------------------------------
 

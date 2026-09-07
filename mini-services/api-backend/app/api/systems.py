@@ -59,6 +59,7 @@ from ..services.py8n_systems import (
 )
 from ..services.solutions import finalize_pack_dataset_names
 from ..services import system_runtime
+from ..services.operators import chains_for_system  # v93: the chains LIVE on the installed system
 from ..services.system_governance import (
     RoleDenied,
     get_template,
@@ -256,6 +257,9 @@ async def system_detail(system_id: str, user=Depends(get_optional_user), db: Asy
         "grouped": grouped,
         "architecture": architecture_layers(s, wf_rows),
         "health": await system_health(db, s),
+        # v93: the cross-department chains this system's machines sit in,
+        # drawn with the LIVE instance counts per node and per leg
+        "chains": await chains_for_system(db, s),
     }
 
 

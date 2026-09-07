@@ -580,4 +580,4 @@ def test_v89_won_deal_opens_onboarding_case():
 # ---------------------------------------------------------------------------
 
 def test_v89_version_pin():
-    assert settings.version == "1.92.0"
+    assert settings.version == "1.93.0"
