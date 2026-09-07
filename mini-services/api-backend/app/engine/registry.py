@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
-from .nodes.business import (  # v85 + v86: workflows move AND open the business
+from .nodes.business import (  # v85 + v86 + v87: move, open, READ the business
     BusinessAdvanceNode,
     BusinessStartNode,
+    BusinessQueryNode,
 )
 from .nodes.data import (
     AggregateNode,
@@ -123,6 +124,7 @@ for _cls in (
     AgentNode,
     BusinessAdvanceNode,  # v85: advance a business process instance (by id or ref)
     BusinessStartNode,    # v86: start a tracked instance (the operators' intake wiring)
+    BusinessQueryNode,    # v87: read the running entities (the agents' door)
     EmailSendNode,
     RespondToWebhookNode,
     WaitForResumeNode,

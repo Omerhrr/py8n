@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (BusinessProcess, BusinessProcessInstance,
                       BusinessProcessTransitionLog)
+from . import escalations as escalations_svc  # v87: the channel + repeat policy layer
 
 
 class ProcessError(ValueError):
@@ -79,8 +80,18 @@ def validate_definition(definition: dict | None) -> dict:
         seen.add((name, frm))
         clean_transitions.append({"name": name, "from": frm, "to": to,
                                   "description": str(t.get("description") or "")})
-    return {"states": clean_states, "initial": initial,
-            "transitions": clean_transitions}
+    out = {"states": clean_states, "initial": initial,
+           "transitions": clean_transitions}
+    # v87: an optional escalation policy rides the definition (channel +
+    # repeat) - validated here so it cannot be smuggled in behind the
+    # machine's back
+    try:
+        policy = escalations_svc.validate_escalation_policy(d.get("escalation_policy"))
+    except escalations_svc.EscalationPolicyError as exc:
+        raise ProcessError(str(exc)) from exc
+    if policy:
+        out["escalation_policy"] = policy
+    return out
 
 
 def _terminal_states(definition: dict) -> set[str]:
@@ -102,6 +113,9 @@ def process_out(p: BusinessProcess, *, instance_counts: dict | None = None) -> d
             "definition": d, "states": d.get("states", []),
             "initial": d.get("initial"),
             "transitions": d.get("transitions", []),
+            "escalation_policy": d.get("escalation_policy"),
+            "escalation_summary": escalations_svc.describe_policy(
+                escalations_svc.policy_from_definition(d)),
             "terminal_states": sorted(_terminal_states(d)) if d else [],
             "instance_counts": instance_counts or {},
             "created_at": p.created_at.isoformat() if p.created_at else None}
@@ -349,6 +363,72 @@ async def list_instances(db: AsyncSession, process_id: str, owner_id: str | None
     return [instance_out(r, definition=p_def) for r in rows]
 
 
+async def query_instances(db: AsyncSession, *, owner_id: str | None,
+                          process: str | None = None, state: str | None = None,
+                          ref: str | None = None, stuck_only: bool = False,
+                          open_only: bool = True, limit: int = 50) -> dict:
+    """Read the RUNNING entities across processes (v87) - the agents' door
+    onto the operation. Resolve the process by id or case-insensitive name
+    (most recent wins), filter by state / ref / stuck-ness, derive the
+    per-instance view. Owner-scoped like every read: a NAMED query on
+    another owner's process refuses loud (404-grade hiding), an unnamed
+    one simply reads an empty operation."""
+    limit = max(1, min(int(limit or 50), 500))
+    process_name: str | None = None
+    definitions: dict[str, dict] = {}
+    names: dict[str, str] = {}
+
+    q = select(BusinessProcessInstance)
+    if process and str(process).strip():
+        want = str(process).strip()
+        prow = (await db.execute(
+            select(BusinessProcess).where(BusinessProcess.id == want))).scalars().first()
+        if prow is None:
+            prow = (await db.execute(
+                select(BusinessProcess)
+                .where(func.lower(BusinessProcess.name) == want.lower())
+                .order_by(BusinessProcess.created_at.desc()))).scalars().first()
+        if prow is None or (owner_id is not None and prow.owner_id not in (owner_id, None)):
+            raise ProcessError(f"process {process!r} not found")
+        q = q.where(BusinessProcessInstance.process_id == prow.id)
+        process_name = prow.name
+        definitions[prow.id] = prow.definition or {}
+        names[prow.id] = prow.name
+    else:
+        procs = (await db.execute(select(BusinessProcess))).scalars().all()
+        for prow in procs:
+            if owner_id is not None and prow.owner_id not in (owner_id, None):
+                continue
+            definitions[prow.id] = prow.definition or {}
+            names[prow.id] = prow.name
+
+    if owner_id is not None:
+        q = q.where(BusinessProcessInstance.owner_id.in_((owner_id, None)))
+    if state and str(state).strip():
+        q = q.where(BusinessProcessInstance.state == str(state).strip())
+    if ref and str(ref).strip():
+        q = q.where(BusinessProcessInstance.ref == str(ref).strip())
+    q = (q.order_by(BusinessProcessInstance.entered_state_at.desc())
+          .limit(limit))
+    rows = (await db.execute(q)).scalars().all()
+
+    out = []
+    for r in rows:
+        if r.process_id not in definitions:
+            continue  # another owner's process - never leak it
+        o = instance_out(r, definition=definitions[r.process_id])
+        o["process_name"] = names.get(r.process_id, "")
+        if open_only and o["is_terminal"]:
+            continue
+        if stuck_only and not o["is_stuck"]:
+            continue
+        out.append(o)
+    return {"instances": out, "count": len(out), "process": process_name,
+            "filters": {"state": (state or "").strip(), "ref": (ref or "").strip(),
+                        "stuck_only": bool(stuck_only), "open_only": bool(open_only),
+                        "limit": limit}}
+
+
 # ---------------------------------------------------------------------------
 # the process, measured - all derived, nothing stored twice
 # ---------------------------------------------------------------------------
@@ -465,10 +545,10 @@ async def _escalated_this_stint(db: AsyncSession, instance_id: str,
 
 
 async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
-                         actor: str = "scheduler") -> dict:
+                         actor: str = "scheduler",
+                         now: datetime | None = None) -> dict:
     """The scheduler DOOR: sweep the open instances whose SLA promise
-    (due_at) has passed while still open, and escalate each once per
-    state stint.
+    (due_at) has passed while still open, and escalate each.
 
     A machine that wants to be escalated defines its own ``escalate``
     move (a self-loop re-arms the stint; a real move walks the entity to
@@ -479,10 +559,20 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
     react to the breach itself (nudge the owner, ping the channel,
     start the recovery workflow).
 
+    v87: the escalation POLICY (channel + repeat) rides the definition.
+    A machine carrying one gates its repeats through the episode
+    bookkeeping (attempt 1, then one attempt per repeat_every_seconds
+    until 1 + max_repeats, a state change starting a fresh episode) and
+    every attempt DELIVERS over the policy's channel + lands
+    ``business.escalated`` on the instance's correlation thread. A
+    machine without a policy keeps the v85 semantics exactly: one knock
+    per state stint, on the record, no channel.
+
     The v81 lifecycle gate holds the door for processes bound to a
-    paused/stopped system; unbound processes always sweep.
+    paused/stopped system; unbound processes always sweep. The clock is
+    injectable (now=) for tests and replay tools.
     """
-    now = _now()
+    now = _aware(now) or _now()
     q = (select(BusinessProcessInstance)
          .where(BusinessProcessInstance.ended_at.is_(None),
                 BusinessProcessInstance.due_at.is_not(None)))
@@ -523,7 +613,23 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                          "process_id": row.process_id,
                          "note": "bound system is not running - the door holds"})
             continue
-        if await _escalated_this_stint(db, row.id, row.entered_state_at):
+
+        # v87: a policy-carrying machine gates its repeats through the
+        # episode bookkeeping (cadence + cap); a machine without one keeps
+        # the v85 semantics - one knock per state stint
+        policy = escalations_svc.policy_from_definition(definition)
+        attempt = 1
+        if policy is not None:
+            gate = escalations_svc.episode_gate(row, policy, now)
+            if gate["action"] == "hold":
+                held.append({"instance_id": row.id, "ref": row.ref,
+                             "process_id": row.process_id,
+                             "reason": gate["reason"],
+                             **({k: gate[k] for k in ("attempts", "next_in_seconds")
+                                 if k in gate})})
+                continue
+            attempt = gate["attempt"]
+        elif await _escalated_this_stint(db, row.id, row.entered_state_at):
             already += 1
             continue
 
@@ -576,6 +682,20 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
             payload={**breach_payload, "escalated": moved_to is not None,
                      "moved_to": moved_to},
             correlation_id=row.id)
+
+        # v87: a policy-carrying machine also TELLS someone - deliver over
+        # the policy's channel + business.escalated on the correlation
+        # thread (an honest skip IS a result), and remember the attempt
+        if policy is not None:
+            delivery = await escalations_svc.deliver_escalation(
+                db, row, policy, process_name=names.get(row.process_id, ""),
+                overdue_seconds=overdue, attempt=attempt, moved_to=moved_to,
+                actor=actor, now=now)
+            escalations_svc.record_episode(db, row, attempt, delivery, now)
+            entry = (escalated[-1] if moved_to is not None else recorded[-1])
+            entry["attempt"] = attempt
+            entry["delivery"] = delivery.get("delivery", "")
+            entry["delivery_detail"] = (delivery.get("detail") or "")[:300]
 
     return {"scanned": len(open_rows), "stuck": len(escalated) + len(recorded) + already,
             "escalated": escalated, "recorded": recorded,

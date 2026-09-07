@@ -24,7 +24,8 @@ interface OperatorSummary {
   slug: string; name: string; tagline: string; category: string
   icon: string; color: string; outcomes: string[]
   topology: { datasets: number; workflows: number; agents: number
-    rooms: number; queues: number; campaign: number; dashboard: number }
+    rooms: number; queues: number; campaign: number; dashboard: number
+    processes: number }
 }
 interface OperatorResult {
   datasets: any[]; workflows: any[]; agents: any[]; rooms: any[]
@@ -244,6 +245,7 @@ onMounted(async () => {
                 <span v-if="op.topology.rooms" class="rounded-full bg-sky-500/10 px-2 py-0.5 text-[9px] font-semibold text-sky-300">{{ op.topology.rooms }} room{{ op.topology.rooms === 1 ? '' : 's' }}</span>
                 <span v-if="op.topology.queues" class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[9px] font-semibold text-cyan-300">waiting queue</span>
                 <span v-if="op.topology.campaign" class="rounded-full bg-violet-500/10 px-2 py-0.5 text-[9px] font-semibold text-violet-300">campaign</span>
+                <span v-if="op.topology.processes" class="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[9px] font-semibold text-indigo-300">{{ op.topology.processes }} pre-wired process{{ op.topology.processes === 1 ? '' : 'es' }}</span>
                 <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-300">staff dashboard</span>
               </div>
               <div class="mt-3 space-y-1">

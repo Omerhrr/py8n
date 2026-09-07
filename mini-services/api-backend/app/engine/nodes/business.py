@@ -253,3 +253,43 @@ class BusinessStartNode(BaseNode):
             "process": proc.name,
             "is_terminal": out["is_terminal"],
         })
+
+
+class BusinessQueryNode(BaseNode):
+    """Read the running business entities into the flow (v87)."""
+
+    type = "business_query"
+    name = "Business Query"
+    description = (
+        "Reads the running business entities (BusinessProcess instances) into the "
+        "flow - filter by process (name or id), current state, external ref, or "
+        "stuck-ness (past due_at while still open). Chain into an AI Agent node so "
+        "the agent reasons over the live operation instead of a stale copy; the "
+        "read side of the business_advance / business_start loop."
+    )
+    category = "actions"
+    icon = "scan-search"
+    color = "#818cf8"
+
+    class ParamsModel(BaseModel):
+        process: str = Field(default="", description="Process name or id (empty = all processes)")
+        state: str = Field(default="", description="Only instances currently in this state")
+        ref: str = Field(default="", description="Only instances with this external ref (exact match)")
+        stuck_only: bool = Field(default=False, description="Only instances past their SLA (due_at passed, still open)")
+        open_only: bool = Field(default=True, description="Exclude instances in terminal states (the journey is complete)")
+        limit: int = Field(default=50, ge=1, le=500, description="Max instances returned (hard cap 500)")
+
+    async def execute(self, context) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import business_processes as bp_svc
+
+        p = self.params  # type: BusinessQueryNode.ParamsModel
+        async with AsyncSessionLocal() as session:
+            try:
+                out = await bp_svc.query_instances(
+                    session, owner_id=context.owner_id,
+                    process=p.process, state=p.state, ref=p.ref,
+                    stuck_only=p.stuck_only, open_only=p.open_only, limit=p.limit)
+            except bp_svc.ProcessError as exc:
+                raise NodeExecutionError(str(exc)) from exc
+        return self._single(out)

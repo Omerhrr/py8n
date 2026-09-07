@@ -18,6 +18,9 @@ interface ProcessDef {
   states: string[]; initial: string
   transitions: { name: string; from: string; to: string; description?: string }[]
   terminal_states: string[]
+  escalation_policy: { channel: string; to: string; repeat_every_seconds: number
+    max_repeats: number; message_template: string } | null
+  escalation_summary: string
   instance_counts: Record<string, number>
   created_at: string
 }
@@ -84,6 +87,12 @@ function fmtAge(sec: number): string {
   if (sec < 3600) return `${Math.floor(sec / 60)}m`
   if (sec < 86400) return `${Math.floor(sec / 3600)}h`
   return `${Math.floor(sec / 86400)}d`
+}
+
+// v87: the episode bookkeeping the door keeps on the instance's memory
+function escBook(inst: Instance): { count: number; last_delivery: string } | null {
+  const b = inst.context?.escalations
+  return b && typeof b === 'object' ? { count: b.count || 0, last_delivery: b.last_delivery || '' } : null
 }
 
 function allowedFrom(state: string) {
@@ -261,6 +270,13 @@ onMounted(async () => {
               <span v-for="t in selected.terminal_states" :key="t" class="rounded-full bg-zinc-700/60 px-2 py-0.5 text-[9px] font-semibold text-zinc-300">terminal: {{ t }}</span>
             </div>
             <p class="mt-1 text-[11px] text-zinc-500">{{ selected.description || 'the business state machine' }}</p>
+            <!-- v87: the escalation policy - who gets told, how often -->
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <span v-if="selected.escalation_summary && selected.escalation_summary !== 'no escalation policy'" class="flex items-center gap-1 rounded-full bg-indigo-500/10 px-2 py-0.5 text-[9px] font-semibold text-indigo-300">
+                <BellRing class="h-2.5 w-2.5" /> {{ selected.escalation_summary }}
+              </span>
+              <span v-if="selected.escalation_policy && !selected.escalation_policy.to" class="text-[9px] text-zinc-600">bind escalation_policy.to + a channel endpoint to deliver</span>
+            </div>
             <!-- the pipeline -->
             <div class="mt-4 flex flex-wrap items-center gap-1.5">
               <template v-for="(s, i) in selected.states" :key="s">
@@ -345,6 +361,7 @@ onMounted(async () => {
                   <span class="truncate text-[10px] text-zinc-500">{{ inst.title }}</span>
                   <span class="ml-auto flex items-center gap-1 text-[10px] text-zinc-600"><Clock class="h-3 w-3" /> {{ fmtAge(inst.age_in_state_seconds) }} in state</span>
                   <span v-if="inst.is_stuck" class="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300">stuck</span>
+                  <span v-if="escBook(inst)" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="`last delivery: ${escBook(inst)!.last_delivery || 'n/a'}`">escalated ×{{ escBook(inst)!.count }}</span>
                   <span v-if="inst.is_terminal" class="flex items-center gap-1 text-[10px] text-zinc-500"><CheckCircle2 class="h-3 w-3" /> closed</span>
                 </div>
                 <div class="mt-2 flex flex-wrap items-center gap-2">

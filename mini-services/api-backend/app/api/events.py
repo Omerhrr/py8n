@@ -117,7 +117,8 @@ async def event_contracts():
                        "system.built"],  # v82: the AI composer builds a system
             # v84: the business state machines move - long-running autonomy
             # v85: the scheduler door's escalations are facts too
-            "business": ["business.state_changed", "business.stuck"],
+            "business": ["business.state_changed", "business.stuck",
+                         "business.escalated"],  # v87: the policy delivery
         },
         "trigger_node": {
             "type": "event_trigger",

@@ -58,6 +58,7 @@ _MEETING_OPERATOR = {
         "Meeting concierge AI agent",
         "Waiting-room queue (announce + SMS + callback wired)",
         "meeting.ended -> scribe workflow (event-reactive)",
+        "Meeting lifecycle process (pre-wired, email escalations)",
         "Meeting notes dataset",
         "Staff dashboard over the notes",
     ],
@@ -65,12 +66,14 @@ _MEETING_OPERATOR = {
         {"name": "Meeting notes",
          "description": "One row per ended meeting (written by the scribe workflow "
                         "the moment the room ends; recording_id points at the archive)",
-         "columns": ["meeting_id", "title", "recording_id", "hung_up_legs", "ended_at"],
+         "columns": ["meeting_id", "title", "recording_id", "hung_up_legs", "ended_at", "stage"],
          "rows": [
-             {"meeting_id": "seed", "title": "Weekly standup", "recording_id": "",
-              "hung_up_legs": 4, "ended_at": "2026-01-05T09:31:00+00:00"},
-             {"meeting_id": "seed", "title": "Design review", "recording_id": "",
-              "hung_up_legs": 2, "ended_at": "2026-01-06T15:02:00+00:00"},
+             {"meeting_id": "MTG-1001", "title": "Weekly standup", "recording_id": "",
+              "hung_up_legs": 4, "ended_at": "2026-01-05T09:31:00+00:00",
+              "stage": "notes_logged"},
+             {"meeting_id": "MTG-1002", "title": "Design review", "recording_id": "",
+              "hung_up_legs": 2, "ended_at": "2026-01-06T15:02:00+00:00",
+              "stage": "notes_logged"},
          ]},
     ],
     "workflows": [
@@ -104,6 +107,49 @@ _MEETING_OPERATOR = {
                            "sms": {"enabled": True, "channel_id": "", "template": ""},
                            "callback": {"enabled": True, "endpoint_id": ""}}}],
     "campaign": None,
+    "processes": [
+        {"name": "Meeting lifecycle",
+         "description": ("The meeting business's state machine - every tracked meeting "
+                         "from invite to follow-up; a meeting stuck past its SLA escalates "
+                         "over email and the door walks it through the machine's own "
+                         "escalate moves."),
+         "definition": {
+             "states": ["scheduled", "invited", "confirmed", "in_progress",
+                        "held", "notes_logged", "followed_up", "cancelled"],
+             "initial": "scheduled",
+             "transitions": [
+                 {"name": "invite", "from": "scheduled", "to": "invited"},
+                 {"name": "confirm", "from": "invited", "to": "confirmed"},
+                 {"name": "start", "from": "confirmed", "to": "in_progress"},
+                 {"name": "end", "from": "in_progress", "to": "held"},
+                 {"name": "log_notes", "from": "held", "to": "notes_logged"},
+                 {"name": "follow_up", "from": "notes_logged", "to": "followed_up"},
+                 {"name": "cancel", "from": "scheduled", "to": "cancelled"},
+                 {"name": "cancel", "from": "invited", "to": "cancelled"},
+                 {"name": "cancel", "from": "confirmed", "to": "cancelled"},
+                 # the escalation door's move - a meeting can go stale at
+                 # ANY working stage
+                 {"name": "escalate", "from": "scheduled", "to": "scheduled",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "invited", "to": "invited",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "confirmed", "to": "confirmed",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "in_progress", "to": "in_progress",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "held", "to": "held",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "notes_logged", "to": "notes_logged",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Meeting notes",
+         "ref_column": "meeting_id",
+         "title_from": ["title"],
+         "state_column": "stage",
+         "due_in_seconds": 24 * 3600,
+        },
+    ],
     "dashboard": {"name": "Meeting Operator Board",
                   "description": "The meeting business at a glance - ended-meeting volume, "
                                  "room sizes, archive pointers."},
@@ -115,6 +161,10 @@ _MEETING_OPERATOR = {
         "queue when those credentials exist (until then the passes skip honestly).",
         "The scribe workflow reacts to the meeting.ended event - it installs INACTIVE; "
         "Boot the system (start with activate_workflows) to open the reactive path.",
+        "The Meeting lifecycle machine ships pre-wired (seeded at the ended-meeting "
+        "stage from the notes) and its escalation policy tells the desk over EMAIL - "
+        "bind escalation_policy.to + a channel endpoint (channels page); until then "
+        "the escalations land on the event timeline only.",
     ],
 }
 
@@ -285,6 +335,7 @@ _CLINIC_OPERATOR = {
         "AI receptionist grounded in the clinic FAQ",
         "Consult room + walk-in queue (SMS backchannel on)",
         "sms.received -> appointment intake workflow (event-reactive)",
+        "Appointment journey process (pre-wired, SMS escalations)",
         "Clinic appointments dataset",
         "Staff dashboard over the front desk",
     ],
@@ -352,6 +403,44 @@ _CLINIC_OPERATOR = {
                            "sms": {"enabled": True, "channel_id": "", "template": ""},
                            "callback": {"enabled": True, "endpoint_id": ""}}}],
     "campaign": None,
+    "processes": [
+        {"name": "Appointment journey",
+         "description": ("The front desk's state machine - every tracked appointment "
+                         "from request to completion; an unconfirmed request stuck past "
+                         "its SLA escalates over SMS and the door walks it through the "
+                         "machine's own escalate moves."),
+         "definition": {
+             "states": ["requested", "confirmed", "checked_in", "in_consult",
+                        "billed", "completed", "no_show"],
+             "initial": "requested",
+             "transitions": [
+                 {"name": "confirm", "from": "requested", "to": "confirmed"},
+                 {"name": "check_in", "from": "confirmed", "to": "checked_in"},
+                 {"name": "begin_consult", "from": "checked_in", "to": "in_consult"},
+                 {"name": "bill", "from": "in_consult", "to": "billed"},
+                 {"name": "complete", "from": "billed", "to": "completed"},
+                 {"name": "no_show", "from": "confirmed", "to": "no_show"},
+                 {"name": "no_show", "from": "checked_in", "to": "no_show"},
+                 # the escalation door's move - an appointment can go
+                 # stale at ANY working stage
+                 {"name": "escalate", "from": "requested", "to": "requested",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "confirmed", "to": "confirmed",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "checked_in", "to": "checked_in",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "in_consult", "to": "in_consult",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "billed", "to": "billed",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Clinic patients",
+         "ref_column": "phone",
+         "title_from": ["patient"],
+         "due_in_seconds": 12 * 3600,
+        },
+    ],
     "dashboard": {"name": "Clinic Operator Board",
                   "description": "The front desk at a glance - appointment requests, patient "
                                  "records, walk-in pressure."},
@@ -361,6 +450,10 @@ _CLINIC_OPERATOR = {
         "callbacks - the auto-answer keyword pass answers inbound texts either way.",
         "The intake workflow reacts to the sms.received event - it installs INACTIVE; "
         "Boot the system (start with activate_workflows) to open the reactive path.",
+        "The Appointment journey ships pre-wired (seeded per patient, ref = the "
+        "phone the clinic texts) and its escalation policy tells the desk over SMS "
+        "- bind escalation_policy.to + a channel endpoint; until then the "
+        "escalations land on the event timeline only.",
     ],
 }
 
@@ -1462,6 +1555,58 @@ _LOGISTICS_OPERATOR = {
     ],
 }
 
+
+# ---------------------------------------------------------------------------
+# v87: the escalation POLICY per operator machine - the door's channel +
+# repeat dimension. The machines above define the escalate move (the door
+# takes it); these policies say WHO GETS TOLD (the channel, through the
+# owner's channel endpoints - provider-agnostic) and HOW OFTEN the door
+# knocks again (repeat_every_seconds, until 1 + max_repeats attempts; a
+# state change starts a fresh episode). `to` stays empty on the shelf: the
+# installer binds the target, the passes skip honestly until then.
+# ---------------------------------------------------------------------------
+_ESCALATION_POLICIES: dict[str, dict] = {
+    "Lead pipeline":       {"channel": "email", "to": "", "repeat_every_seconds": 3600,  "max_repeats": 3},
+    "Meeting lifecycle":   {"channel": "email", "to": "", "repeat_every_seconds": 1800,  "max_repeats": 2,
+                            "message_template": ("[Meeting Operator] '{title}' (ref {ref}) is still "
+                                                 "'{state}' after {overdue_minutes} minutes - please "
+                                                 "confirm or cancel it (escalation {attempt}).")},
+    "Appointment journey": {"channel": "sms",   "to": "", "repeat_every_seconds": 900,   "max_repeats": 3,
+                            "message_template": ("[Clinic Operator] Appointment {ref} ('{title}') is "
+                                                 "still '{state}' after {overdue_minutes} minutes - "
+                                                 "confirm or call the patient (escalation {attempt}).")},
+    "Case lifecycle":      {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
+    "Request lifecycle":   {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
+    "Leave pipeline":      {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
+    "Onboarding pipeline": {"channel": "email", "to": "", "repeat_every_seconds": 86400, "max_repeats": 2},
+    "Invoice lifecycle":   {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
+    "Purchase lifecycle":  {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
+    "Delivery pipeline":   {"channel": "sms",   "to": "", "repeat_every_seconds": 21600, "max_repeats": 3},
+}
+
+
+def _policy_for(pspec: dict) -> dict | None:
+    """The shelf policy for a pack's process, applied into the definition
+    at install time (validate_definition re-validates it loudly)."""
+    name = str(pspec.get("name") or "").strip()
+    policy = _ESCALATION_POLICIES.get(name)
+    if policy is None:
+        # any machine the table does not name still gets a sane default:
+        # event-only, hourly, three repeats
+        return {"channel": "", "to": "", "repeat_every_seconds": 3600,
+                "max_repeats": 3}
+    return dict(policy)
+
+
+
+
+def _describe_pack_policy(pspec: dict) -> str:
+    """The shelf's one-line escalation summary for a pack's process."""
+    from . import escalations as escalations_svc
+
+    return escalations_svc.describe_policy(_policy_for(pspec))
+
+
 OPERATORS: list[dict] = [
     _MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR,
     _SUPPORT_OPERATOR, _OPERATIONS_OPERATOR, _HR_OPERATOR,
@@ -1511,7 +1656,8 @@ def operator_detail(slug: str) -> dict:
                            "states": p["definition"]["states"],
                            "seeded_from": p.get("seed_from_dataset"),
                            "escalates": any(t.get("name") == "escalate"
-                                            for t in p["definition"]["transitions"])}
+                                            for t in p["definition"]["transitions"]),
+                           "escalation": _describe_pack_policy(p)}
                           for p in (op.get("processes") or [])],
             "agent": {"name": op["agent"]["name"],
                       "knowledge": (op["agent"]["knowledge"] or {}).get("dataset")},
@@ -1652,10 +1798,14 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
     # external key the business already tracks (the phone a call can match)
     proc_by_name: dict[str, dict] = {}
     for pspec in op.get("processes") or []:
+        definition = dict(pspec.get("definition") or {})
+        policy = _policy_for(pspec)  # v87: the channel + repeat policy rides the definition
+        if policy:
+            definition["escalation_policy"] = policy
         proc = await process_svc.create_process(
             db, owner_id=owner_id, name=str(pspec["name"])[:140],
             description=str(pspec.get("description") or "")[:500],
-            definition=pspec.get("definition"))
+            definition=definition)
         seeded = 0
         skipped_seed = 0
         src_name = str(pspec.get("seed_from_dataset") or "").strip()
