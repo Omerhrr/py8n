@@ -115,15 +115,16 @@ _SALES_OPERATOR = {
     "name": "Sales Operator",
     "tagline": ("A selling business in one click: a CRM, an SDR phone agent grounded in "
                 "the sales FAQ, an outbound campaign ready for your dialing endpoint, "
-                "leads that score themselves when calls end, and the pipeline board."),
+                "a lead pipeline that calls move by themselves, and the staff board."),
     "category": "Sales",
     "icon": "trending-up",
     "color": "#34d399",
     "outcomes": [
         "CRM leads dataset (stages + scores)",
+        "Lead pipeline business process (pre-wired, seeded from the CRM)",
         "SDR phone agent grounded in the sales FAQ",
         "Outbound campaign (retry schedule + AMD defaults)",
-        "call.ended -> lead scorer workflow (event-reactive)",
+        "call.ended -> lead scorer + pipeline advancer (event-reactive)",
         "Lead events dataset (every scored call)",
         "Staff dashboard over the pipeline",
     ],
@@ -179,6 +180,19 @@ _SALES_OPERATOR = {
              {"type": "dataset_write", "name": "Append the lead event",
               "params": {"dataset": "Lead events", "mode": "append"}},
          ]},
+        {"name": "Pipeline advancer",
+         "description": "call.ended -> business_advance: a completed call moves the caller's "
+                        "pipeline instance forward (lead -> contacted). Callers the pipeline "
+                        "does not track, and leads already past the move, skip honestly - "
+                        "the call is evidence, not a forced move.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the caller's lead",
+              "params": {"process": "Lead pipeline", "ref": "{{ input.actor }}",
+                         "transition": "reach_out", "actor": "sales-operator",
+                         "note": "a real call ended - the pipeline moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
     ],
     "agent": {"name": "Sales development rep",
               "greeting": "Hi! Calling about the trial you started - got two minutes?",
@@ -191,6 +205,44 @@ _SALES_OPERATOR = {
     "queues": [],
     "campaign": {"name": "Sales follow-up campaign",
                  "config": {}},
+    "processes": [
+        {"name": "Lead pipeline",
+         "description": ("The selling journey as a state machine - one tracked instance per "
+                         "lead remembering stage and context across weeks; calls move it, "
+                         "the escalation door nudges it when it goes stale."),
+         "definition": {
+             "states": ["lead", "contacted", "interested", "demo_booked",
+                        "demo_completed", "proposal_sent", "negotiating", "won", "lost"],
+             "initial": "lead",
+             "transitions": [
+                 {"name": "reach_out", "from": "lead", "to": "contacted"},
+                 {"name": "qualify", "from": "contacted", "to": "interested"},
+                 {"name": "book_demo", "from": "interested", "to": "demo_booked"},
+                 {"name": "run_demo", "from": "demo_booked", "to": "demo_completed"},
+                 {"name": "send_proposal", "from": "demo_completed", "to": "proposal_sent"},
+                 {"name": "negotiate", "from": "proposal_sent", "to": "negotiating"},
+                 {"name": "win", "from": "negotiating", "to": "won"},
+                 {"name": "lose", "from": "contacted", "to": "lost"},
+                 {"name": "lose", "from": "interested", "to": "lost"},
+                 {"name": "lose", "from": "proposal_sent", "to": "lost"},
+                 {"name": "lose", "from": "negotiating", "to": "lost"},
+                 # the escalation door's move: a stale deal re-enters its state
+                 # (a fresh stint, on the record) so the team sees the nudge
+                 {"name": "escalate", "from": "interested", "to": "interested",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "proposal_sent", "to": "proposal_sent",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "negotiating", "to": "negotiating",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "CRM leads",
+         "ref_column": "phone",
+         "title_from": ["name", "company"],
+         "state_column": "stage",
+         "due_in_seconds": 7 * 24 * 3600,
+        },
+    ],
     "dashboard": {"name": "Sales Operator Board",
                   "description": "The pipeline at a glance - leads by stage, scored calls, "
                                  "average lead score."},
@@ -198,8 +250,14 @@ _SALES_OPERATOR = {
         "The campaign installs EMPTY on purpose: add targets from the CRM (POST "
         "/voice/campaigns/{id}/targets) and bind a telnyx voice endpoint when your "
         "dialing credentials exist - until then dials skip honestly.",
-        "The scorer reacts to the call.ended event - it installs INACTIVE; Boot the "
-        "system (start with activate_workflows) to open the reactive path.",
+        "The lead pipeline installs SEEDED from the CRM (one instance per lead, at its "
+        "CRM stage, ref = the phone) and the advancer reacts to call.ended: a completed "
+        "call from a tracked number moves the lead forward by itself.",
+        "The scorer + advancer react to the call.ended event - they install INACTIVE; "
+        "Boot the system (start with activate_workflows) to open the reactive path.",
+        "Stale deals: the machine defines escalate self-loops on interested / "
+        "proposal_sent / negotiating - the scheduler door (POST "
+        "/scheduler/escalations/tick) walks past-SLA instances through them.",
         "WhatsApp/Email channels are the installer's endpoints to bind (channels page) - "
         "the operator is the system underneath them, channels stay interchangeable.",
     ],
@@ -316,6 +374,7 @@ def operator_catalog() -> dict:
                  "rooms": len(op["rooms"]),
                  "queues": len(op["queues"]),
                  "campaign": 1 if op.get("campaign") else 0,
+                 "processes": len(op.get("processes") or []),
                  "dashboard": 1,
              }}
             for op in OPERATORS
@@ -338,6 +397,12 @@ def operator_detail(slug: str) -> dict:
             "workflows": [{"name": w["name"], "description": w["description"],
                            "trigger": w["trigger"]["params"].get("event_type", "")}
                           for w in op["workflows"]],
+            "processes": [{"name": p["name"],
+                           "states": p["definition"]["states"],
+                           "seeded_from": p.get("seed_from_dataset"),
+                           "escalates": any(t.get("name") == "escalate"
+                                            for t in p["definition"]["transitions"])}
+                          for p in (op.get("processes") or [])],
             "agent": {"name": op["agent"]["name"],
                       "knowledge": (op["agent"]["knowledge"] or {}).get("dataset")},
             "rooms": [{"name": r["name"], "modality": r["modality"]} for r in op["rooms"]],
@@ -414,11 +479,14 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
     a RUNNING Py8nSystem. The caller owns the commit.
 
     Order matters: datasets first (knowledge + writes land on them), then
-    workflows (inactive - the boot door opens them), the agent (rooms and
-    queues bind it), rooms, queues, the campaign (composed directly -
-    create_campaign refuses empty target lists by design), the dashboard
-    (generated over the BUILT datasets), and finally the system with the
-    durable installed operation + the system.installed event.
+    the PROCESSES (v85: seeded from the datasets just built - the business
+    state machine arrives pre-wired), then workflows (inactive - the boot
+    door opens them; business_advance refs resolve to the BUILT process
+    ids), the agent (rooms and queues bind it), rooms, queues, the
+    campaign (composed directly - create_campaign refuses empty target
+    lists by design), the dashboard (generated over the BUILT datasets),
+    and finally the system with the durable installed operation + the
+    system.installed event.
     """
     import pandas as pd
 
@@ -426,6 +494,7 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
                           Workflow)
     from . import dashboards as dash_svc
     from . import datasets as ds_svc
+    from . import business_processes as process_svc
     from . import system_runtime
     from . import voice_agents as va_svc
     from . import voice_campaigns as campaigns_svc
@@ -443,11 +512,13 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
         raise OperatorError("brain=ai_agent needs llm_credential_id "
                             "(the brain routes through a real provider credential)")
 
-    built: dict = {"datasets": [], "workflows": [], "agents": [], "rooms": [],
-                   "queues": [], "campaign": None, "dashboard": None, "system": None}
+    built: dict = {"datasets": [], "processes": [], "workflows": [], "agents": [],
+                   "rooms": [], "queues": [], "campaign": None, "dashboard": None,
+                   "system": None}
     wiring_notes = list(op["notes"])
     ds_rows: list[tuple[object, object]] = []  # (Dataset, DataFrame) for the board
     ds_by_name: dict[str, dict] = {}
+    ds_seed_rows: dict[str, list[dict]] = {}
 
     # ---- 1) datasets first (knowledge bindings and writes land on them) ---
     for d in op["datasets"]:
@@ -461,8 +532,50 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
             owner_id=owner_id)
         ds_by_name[d["name"]] = {"id": ds.id, "name": ds.name}
         ds_rows.append((ds, df))
+        ds_seed_rows[d["name"]] = rows
         built["datasets"].append({"id": ds.id, "name": ds.name,
                                   "columns": cols, "rows": len(rows)})
+
+    # ---- 1.5) the PROCESSES (v85) - the machine arrives pre-wired and ----
+    # SEEDED: one instance per seed row of the named dataset, starting at
+    # the row's own stage (the CRM is imported, not rewound), ref = the
+    # external key the business already tracks (the phone a call can match)
+    proc_by_name: dict[str, dict] = {}
+    for pspec in op.get("processes") or []:
+        proc = await process_svc.create_process(
+            db, owner_id=owner_id, name=str(pspec["name"])[:140],
+            description=str(pspec.get("description") or "")[:500],
+            definition=pspec.get("definition"))
+        seeded = 0
+        skipped_seed = 0
+        src_name = str(pspec.get("seed_from_dataset") or "").strip()
+        ref_col = str(pspec.get("ref_column") or "").strip()
+        state_col = str(pspec.get("state_column") or "").strip()
+        title_cols = [str(c) for c in (pspec.get("title_from") or [])]
+        due_s = pspec.get("due_in_seconds")
+        for row in ds_seed_rows.get(src_name, []):
+            if not isinstance(row, dict):
+                continue
+            ref = str(row.get(ref_col) or "").strip() if ref_col else ""
+            if not ref:
+                skipped_seed += 1
+                continue
+            title = " - ".join(str(row.get(c) or "").strip()
+                               for c in title_cols if str(row.get(c) or "").strip())
+            begin = (str(row.get(state_col) or "").strip() if state_col else "") or None
+            await process_svc.start_instance(
+                db, proc["id"], owner_id=owner_id, ref=ref,
+                title=title[:200], context=dict(row),
+                due_in_seconds=int(due_s) if due_s else None,
+                state=begin, actor="operator-install")
+            seeded += 1
+        if skipped_seed:
+            wiring_notes.append(f"process {proc['name']!r}: {skipped_seed} seed row(s) "
+                                "had no ref and were skipped honestly.")
+        proc_by_name[pspec["name"]] = {"id": proc["id"], "name": proc["name"]}
+        built["processes"].append({"id": proc["id"], "name": proc["name"],
+                                   "states": proc["states"],
+                                   "seeded_instances": seeded})
 
     # ---- 2) workflows (event-reactive, installed INACTIVE - honest) -------
     # dataset names wired into step params resolve to the BUILT names (a
@@ -475,6 +588,16 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
             ref = str(params.get("dataset") or "").strip()
             if ref in ds_by_name:
                 params["dataset"] = ds_by_name[ref]["name"]
+            # v85: business_advance steps resolve the process by NAME in the
+            # spec, but bind to the BUILT process id (a second install of
+            # the same operator must move ITS pipeline, never the first's)
+            proc_ref = str(params.get("process") or "").strip()
+            if proc_ref and str(s.get("type") or "") == "business_advance":
+                hit = proc_by_name.get(proc_ref)
+                if not hit:
+                    raise OperatorError(
+                        f"workflow {w['name']!r}: process {proc_ref!r} did not build")
+                params["process"] = hit["id"]
             steps.append({**s, "params": params})
         graph = validate_graph_document(_workflow_graph({**w, "steps": steps})).model_dump()
         wf = Workflow(name=str(w["name"])[:200],
@@ -606,6 +729,8 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
         db.add(SystemComponent(system_id=sys_row.id, kind="dataset", ref_id=ds["id"]))
     for wf in built["workflows"]:
         db.add(SystemComponent(system_id=sys_row.id, kind="workflow", ref_id=wf["id"]))
+    for pr in built["processes"]:
+        db.add(SystemComponent(system_id=sys_row.id, kind="process", ref_id=pr["id"]))
     for a in built["agents"]:
         db.add(SystemComponent(system_id=sys_row.id, kind="voice_agent", ref_id=a["id"]))
         if a.get("handler_workflow_id"):

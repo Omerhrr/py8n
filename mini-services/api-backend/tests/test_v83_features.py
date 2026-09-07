@@ -121,10 +121,11 @@ def test_v83_catalog_and_detail():
             meeting = shelf[0]
             assert meeting["topology"] == {"datasets": 1, "workflows": 1, "agents": 1,
                                            "rooms": 1, "queues": 1, "campaign": 0,
-                                           "dashboard": 1}
+                                           "processes": 0, "dashboard": 1}
             sales = shelf[1]
             assert sales["topology"]["campaign"] == 1
             assert sales["topology"]["datasets"] == 3  # CRM + Lead events + Sales FAQ
+            assert sales["topology"]["processes"] == 1  # v85: the lead pipeline ships bound
             clinic = shelf[2]
             assert clinic["topology"]["queues"] == 1 and clinic["topology"]["campaign"] == 0
 
@@ -415,4 +416,4 @@ def test_v83_install_refusals_and_double_install():
 # ---------------------------------------------------------------------------
 
 def test_v83_version_pin():
-    assert settings.version == "1.84.0"
+    assert settings.version == "1.85.0"

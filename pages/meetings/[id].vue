@@ -35,6 +35,14 @@ const lastTurn = ref<any>(null)
 const recordings = ref<any[]>([])
 const recordingBusy = ref(false)
 
+// v85 deepening: device pickers + the room's waiting room
+const micDevices = ref<MediaDeviceInfo[]>([])
+const camDevices = ref<MediaDeviceInfo[]>([])
+const micDeviceId = ref('')
+const camDeviceId = ref('')
+const roomQueue = ref<any>(null)
+const seatingBusy = ref(false)
+
 // media + video internals (not rendered directly)
 let ws: WebSocket | null = null
 let audioCtx: AudioContext | null = null
@@ -82,6 +90,11 @@ async function refresh(full: boolean) {
       if (!chat.value.length || full) chat.value = msgs.messages || []
       recordings.value = (await api(`/voice/meetings/${meetingId.value}/recordings`).catch(() => ({ recordings: [] }))).recordings || []
     }
+    // v85 deepening: keep the video mesh honest - pull offers for tracks
+    // published before (or while) we joined, and push ours to newcomers
+    helloPublishers()
+    offerToNewcomers()
+    await refreshRoomQueue()
     error.value = ''
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -141,6 +154,10 @@ function connectMedia(): Promise<void> {
           customParameters: { encoding: 'linear16', sample_rate: 16000 },
         },
       }))
+      // v85: joined AFTER a publisher? say hello - publishers answer with
+      // their offer (the mesh stays one-directional, glare-free)
+      helloPublishers()
+      refreshDevices()
       resolve()
     }
     ws.onmessage = (ev) => {
@@ -177,8 +194,16 @@ function handleFrame(f: any) {
       handleSignal(String(f.from || ''), f.data).catch(() => {})
       break
     case 'video_track':
-      // another leg published/unpublished - the publisher offers to us; the
-      // picture itself refreshes through the room poll
+      // v85: the room's video picture changed - a newly published track
+      // gets our hello (its publisher offers); an unpublished one drops
+      // its tile instead of freezing on the last frame
+      if (f.meeting_id && f.meeting_id !== meetingId.value) break
+      if (f.participant_id && f.participant_id === me.value?.participantId) break
+      if (f.action === 'unpublished') {
+        remoteVideos.value = remoteVideos.value.filter((v) => v.pid !== f.participant_id)
+      } else if (f.participant_id && wsOpen.value) {
+        sendSignal(String(f.participant_id), { type: 'hello' })
+      }
       break
     default:
       break
@@ -187,6 +212,42 @@ function handleFrame(f: any) {
 
 function sendSignal(toPid: string, data: any) {
   ws?.send(JSON.stringify({ event: 'video_signal', to: toPid, data }))
+}
+
+// ------------------------------------------------- the video mesh sweep
+// v85 deepening: the mesh's one rule is "the publisher offers". These two
+// sweeps keep it true across time, not just at publish-instant:
+//  - helloPublishers: I joined late (or a track went live while my socket
+//    was rebinding) - I say hello to every other joined leg with a live
+//    track, and each answers with its offer.
+//  - offerToNewcomers: I am publishing and a new leg joined after my
+//    publish instant - I offer to it directly.
+function liveTrackPids(): Set<string> {
+  const out = new Set<string>()
+  for (const t of (meeting.value?.video?.tracks || []) as any[]) {
+    if (t?.participant_id && !t.unpublished_at) out.add(String(t.participant_id))
+  }
+  return out
+}
+
+function helloPublishers() {
+  if (!me.value || !wsOpen.value) return
+  const joined = new Set((meeting.value?.participants || [])
+    .filter((p: any) => p.state === 'joined').map((p: any) => String(p.id)))
+  for (const pid of liveTrackPids()) {
+    if (pid !== me.value.participantId && joined.has(pid) && !peers.has(pid)) {
+      sendSignal(pid, { type: 'hello' })
+    }
+  }
+}
+
+function offerToNewcomers() {
+  if (!me.value || !(camOn.value || screenOn.value) || !localStream) return
+  for (const p of (meeting.value?.participants || []) as any[]) {
+    if (p.id !== me.value.participantId && p.state === 'joined' && !peers.has(String(p.id))) {
+      offerTo(String(p.id), localStream)
+    }
+  }
 }
 
 function sendMediaFrame(pcm: Int16Array) {
@@ -207,7 +268,11 @@ async function toggleMic() {
       return
     }
     micStream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true },
+      audio: {
+        ...(micDeviceId.value ? { deviceId: { exact: micDeviceId.value } } : {}),
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
     })
     audioCtx = new AudioContext()
     micSource = audioCtx.createMediaStreamSource(micStream)
@@ -223,8 +288,55 @@ async function toggleMic() {
     micProcessor.connect(micGain)
     micGain.connect(audioCtx.destination)
     micOn.value = true
+    refreshDevices()
   } catch (e: any) {
     error.value = `mic: ${e?.message || e}`
+  }
+}
+
+// v85 deepening: enumerate - labels only appear once a permission was
+// granted at least once, so this is called after mic/camera open too
+async function refreshDevices() {
+  try {
+    const devs = await navigator.mediaDevices.enumerateDevices()
+    micDevices.value = devs.filter((d) => d.kind === 'audioinput')
+    camDevices.value = devs.filter((d) => d.kind === 'videoinput')
+  } catch {}
+}
+
+async function switchMic() {
+  // live switch: tear the pipeline down and reopen on the chosen device
+  // (the stream's 'start' frame already declared the encoding - only the
+  // capture device changes)
+  if (!micOn.value || !me.value) return
+  teardownMedia()
+  await toggleMic()
+}
+
+async function switchCamera() {
+  // live switch: replaceTrack keeps every peer connection and the track
+  // registry entry untouched - only the pixels change
+  if (!camOn.value || !localStream || !me.value) return
+  error.value = ''
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({
+      video: camDeviceId.value ? { deviceId: { exact: camDeviceId.value } } : true,
+    })
+    const next = s.getVideoTracks()[0]
+    const old = localStream.getVideoTracks()[0]
+    if (old) { localStream.removeTrack(old); old.stop() }
+    localStream.addTrack(next)
+    if (localVideo.value) localVideo.srcObject = localStream
+    for (const pc of peers.values()) {
+      for (const sender of pc.getSenders()) {
+        if (sender.track?.kind === 'video') {
+          try { await sender.replaceTrack(next) } catch {}
+        }
+      }
+    }
+    refreshDevices()
+  } catch (e: any) {
+    error.value = `camera: ${e?.message || e}`
   }
 }
 
@@ -278,8 +390,11 @@ async function toggleCamera() {
       await unpublishLocal()
       return
     }
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true })
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: camDeviceId.value ? { deviceId: { exact: camDeviceId.value } } : true,
+    })
     await publishLocal('camera')
+    refreshDevices()
   } catch (e: any) {
     error.value = `camera: ${e?.message || e}`
   }
@@ -360,6 +475,14 @@ function ensurePc(pid: string): RTCPeerConnection {
 
 async function handleSignal(fromPid: string, data: any) {
   if (!data || typeof data !== 'object') return
+  if (data.type === 'hello') {
+    // v85: a leg (re)joined after my publish instant - answer with my offer
+    if (localStream && (camOn.value || screenOn.value)) {
+      peers.delete(fromPid) // a re-hello is a fresh negotiation
+      await offerTo(fromPid, localStream)
+    }
+    return
+  }
   if (data.type === 'offer') {
     // we are the answerer: remote video comes in, nothing of ours goes out
     const pc = ensurePc(fromPid)
@@ -412,6 +535,34 @@ async function sendChat() {
     chat.value.push(out.message)
   } catch (e: any) {
     error.value = e?.message || String(e)
+  }
+}
+
+// ------------------------------------------------- the room's waiting room
+// v85 deepening: the queue bound to THIS room, readable from the meeting
+// client - the moderator seats the next waiting caller without leaving
+// the room (the head releases and lands here as a leg, v76 machinery).
+async function refreshRoomQueue() {
+  try {
+    const all = (await api('/voice/queues').catch(() => ({ queues: [] }))).queues || []
+    const hit = all.find((q: any) => q.meeting_id === meetingId.value)
+    roomQueue.value = hit ? await api(`/voice/queues/${hit.id}`) : null
+  } catch {
+    roomQueue.value = null
+  }
+}
+
+async function seatNext() {
+  if (!roomQueue.value) return
+  seatingBusy.value = true
+  error.value = ''
+  try {
+    await api(`/voice/queues/${roomQueue.value.id}/next`, { method: 'POST' })
+    await Promise.all([refresh(false), refreshRoomQueue()])
+  } catch (e: any) {
+    error.value = e?.message || String(e)
+  } finally {
+    seatingBusy.value = false
   }
 }
 
@@ -523,12 +674,28 @@ function dt(s?: string | null) {
           @click="toggleMic">
           {{ micOn ? 'Mic on' : 'Mic off' }}
         </button>
+        <select
+          v-if="micDevices.length > 1"
+          v-model="micDeviceId"
+          class="px-2 py-1.5 rounded-lg border border-slate-300 text-xs max-w-28"
+          @change="switchMic">
+          <option value="">default mic</option>
+          <option v-for="d in micDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || 'mic' }}</option>
+        </select>
         <button
           :class="camOn ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
           @click="toggleCamera">
           {{ camOn ? 'Camera on' : 'Camera off' }}
         </button>
+        <select
+          v-if="camDevices.length > 1"
+          v-model="camDeviceId"
+          class="px-2 py-1.5 rounded-lg border border-slate-300 text-xs max-w-28"
+          @change="switchCamera">
+          <option value="">default camera</option>
+          <option v-for="d in camDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || 'camera' }}</option>
+        </select>
         <button
           :class="screenOn ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
@@ -596,6 +763,13 @@ function dt(s?: string | null) {
               autoplay playsinline class="w-full aspect-video object-cover" />
             <p class="text-xs text-slate-300 px-2 py-1">{{ v.label }} ({{ v.kind }})</p>
           </div>
+          <div
+            v-if="!(camOn || screenOn) && !remoteVideos.length"
+            class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-xs text-slate-400 sm:col-span-2">
+            No cameras live in this room yet. Publish yours and everyone joined -
+            now or later - is pulled in automatically: the publisher offers, the
+            late joiner says hello, py8n relays the handshake (never the pixels).
+          </div>
         </div>
 
         <!-- participants -->
@@ -642,8 +816,32 @@ function dt(s?: string | null) {
         </div>
       </section>
 
-      <!-- the side panel: chat + recordings -->
+      <!-- the side panel: waiting room + chat + recordings -->
       <section class="space-y-4">
+        <div v-if="roomQueue" class="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm space-y-2">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-semibold text-amber-800">
+              Waiting room: {{ roomQueue.name }}
+              <span class="ml-1 text-xs font-normal text-amber-600">{{ roomQueue.counts?.waiting ?? (roomQueue.entries || []).length }} waiting</span>
+            </h2>
+            <button
+              :disabled="seatingBusy || !(roomQueue.entries || []).length"
+              class="px-3 py-1.5 rounded-lg bg-amber-600 text-white text-xs hover:bg-amber-700 disabled:opacity-50"
+              @click="seatNext">
+              Seat next
+            </button>
+          </div>
+          <ul class="space-y-1 text-xs text-amber-900">
+            <li v-for="e in (roomQueue.entries || []).slice(0, 8)" :key="e.id" class="flex items-center gap-2">
+              <span class="inline-block w-2 h-2 rounded-full"
+                :class="e.status === 'waiting' ? 'bg-amber-500' : 'bg-slate-300'" />
+              #{{ e.position }} {{ e.label || e.session_id?.slice(0, 8) }}
+              <span class="text-amber-600">[{{ e.status }} · waited {{ Math.round(e.waited_seconds || 0) }}s]</span>
+            </li>
+          </ul>
+          <p v-if="!(roomQueue.entries || []).length" class="text-xs text-amber-600">nobody waiting - the line is clear.</p>
+        </div>
+
         <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col max-h-96">
           <h2 class="text-sm font-semibold text-slate-700 mb-2">Room chat</h2>
           <div class="flex-1 overflow-y-auto space-y-2 mb-2">

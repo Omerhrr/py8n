@@ -113,6 +113,7 @@ from .api.registries import router as registries_router  # noqa: E402 (v43)
 from .api.ai_composer import router as ai_composer_router  # noqa: E402 (v82)
 from .api.operators import router as operators_router  # noqa: E402 (v83 operators)
 from .api.processes import router as processes_router  # noqa: E402 (v84 business processes)
+from .api.scheduler import router as scheduler_router  # noqa: E402 (v85 scheduler doors)
 from .api.reports import router as reports_router  # noqa: E402 (v48)
 from .api.tags import router as tags_router  # noqa: E402 (v44)
 from .api.schedules import router as schedules_router  # noqa: E402
@@ -139,6 +140,7 @@ app.include_router(workflows_router, prefix=API, dependencies=ENFORCED)
 app.include_router(agents_router, prefix=API, dependencies=ENFORCED)  # v34
 app.include_router(executions_router, prefix=API, dependencies=ENFORCED)
 app.include_router(schedules_router, prefix=API, dependencies=ENFORCED)
+app.include_router(scheduler_router, prefix=API, dependencies=ENFORCED)  # v85: the escalation door
 app.include_router(webhooks_router, prefix=API)
 app.include_router(chat_router, prefix=API, dependencies=[Depends(enforce_key_scopes)])  # v43: chat runs workflows, so read-only keys are gated
 app.include_router(auth_router, prefix=API)  # v37: register/login/me/status

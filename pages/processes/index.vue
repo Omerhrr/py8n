@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
-  Flag, RefreshCw, ChevronRight, ListChecks,
+  Flag, RefreshCw, ChevronRight, ListChecks, BellRing,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -30,7 +30,7 @@ interface Instance {
 }
 interface Analytics {
   instances: number; open: number; by_state: Record<string, number>
-  stuck: string[]; stuck_count: number
+  stuck: string[]; stuck_count: number; escalations: number
   mean_time_in_state_seconds: Record<string, number>
   advance_counts: Record<string, number>
   terminal_states: string[]
@@ -56,6 +56,28 @@ const advanceNote = ref('')
 const advancing = ref(false)
 const advanceError = ref('')
 const advanceForId = ref('')
+const sweeping = ref(false)
+const sweepNote = ref('')
+
+// v85: the scheduler door, run by hand - the same sweep the APScheduler
+// loop ticks on its interval, on demand, for the operator who just fixed
+// a process and wants to see the door move now.
+async function runEscalationSweep() {
+  sweeping.value = true
+  sweepNote.value = ''
+  pageError.value = ''
+  try {
+    const out = await api.post<{ stuck: number; escalated: any[]; recorded: any[]; held: any[]; already: number }>(
+      '/scheduler/escalations/tick', {})
+    sweepNote.value = `swept: ${out.stuck} stuck - ${out.escalated.length} moved through the machine, ` +
+      `${out.recorded.length} recorded, ${out.held.length} held, ${out.already} already escalated this stint`
+    await refreshAll()
+  } catch (e: any) {
+    pageError.value = e?.data?.detail || e?.message || 'The escalation sweep failed'
+  } finally {
+    sweeping.value = false
+  }
+}
 
 function fmtAge(sec: number): string {
   if (sec < 60) return `${sec}s`
@@ -256,7 +278,7 @@ onMounted(async () => {
                 </div>
               </template>
             </div>
-            <div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div class="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-5">
               <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                 <p class="text-[9px] uppercase tracking-widest text-zinc-600">instances</p>
                 <p class="text-sm font-bold text-zinc-200">{{ analytics?.instances ?? '-' }}</p>
@@ -270,9 +292,23 @@ onMounted(async () => {
                 <p class="text-sm font-bold" :class="(analytics?.stuck_count || 0) > 0 ? 'text-rose-300' : 'text-zinc-200'">{{ analytics?.stuck_count ?? '-' }}</p>
               </div>
               <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                <p class="text-[9px] uppercase tracking-widest text-zinc-600">escalations</p>
+                <p class="text-sm font-bold" :class="(analytics?.escalations || 0) > 0 ? 'text-amber-300' : 'text-zinc-200'">{{ analytics?.escalations ?? '-' }}</p>
+              </div>
+              <div class="rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
                 <p class="text-[9px] uppercase tracking-widest text-zinc-600">moves on record</p>
                 <p class="text-sm font-bold text-zinc-200">{{ Object.values(analytics?.advance_counts || {}).reduce((a, b) => a + b, 0) }}</p>
               </div>
+            </div>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <button
+                class="flex items-center gap-1.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-[10px] font-bold text-amber-300 transition hover:bg-amber-500/20 disabled:opacity-50"
+                :disabled="sweeping"
+                @click="runEscalationSweep">
+                <Loader2 v-if="sweeping" class="h-3 w-3 animate-spin" />
+                <BellRing v-else class="h-3 w-3" /> Escalation sweep (the scheduler door, now)
+              </button>
+              <p v-if="sweepNote" class="text-[10px] text-amber-300/80">{{ sweepNote }}</p>
             </div>
           </div>
 

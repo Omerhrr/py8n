@@ -31,8 +31,53 @@ def start_scheduler() -> AsyncIOScheduler:
     if scheduler is None:
         scheduler = AsyncIOScheduler(timezone="UTC")
         scheduler.start()
+        _register_escalation_sweep(scheduler)
         logger.info("APScheduler started")
     return scheduler
+
+
+def _register_escalation_sweep(sched: AsyncIOScheduler) -> None:
+    """v85: the escalation door's automatic tick - every
+    PY8N_ESCALATION_TICK_SECONDS (default 300s) the sweep runs in its own
+    session: open business-process instances past their SLA get escalated
+    once per state stint (through the machine's own 'escalate' move when
+    it defines one) and business.stuck lands on the event door. The
+    manual door (POST /scheduler/escalations/tick) runs the same sweep
+    on demand."""
+    import os
+
+    try:
+        seconds = max(30, int(os.environ.get("PY8N_ESCALATION_TICK_SECONDS") or 300))
+    except (TypeError, ValueError):
+        seconds = 300
+    sched.add_job(
+        _tick_escalations,
+        trigger=IntervalTrigger(seconds=seconds),
+        id="escalations:tick",
+        replace_existing=True,
+        misfire_grace_time=60,
+    )
+    logger.info("Registered escalation sweep (every %ss)", seconds)
+
+
+async def _tick_escalations() -> None:
+    """Job callback: run the escalation sweep against the whole platform
+    (owner_id=None - the door serves every owner's stuck entities; the
+    v81 lifecycle gate holds the sweep for paused/stopped systems)."""
+    from . import business_processes
+
+    try:
+        async with AsyncSessionLocal() as session:
+            out = await business_processes.escalate_stuck(session, None)
+            await session.commit()
+        n = len(out.get("escalated") or []) + len(out.get("recorded") or [])
+        if n or out.get("held"):
+            logger.info(
+                "Escalation sweep: %s stuck (%s moved, %s recorded, %s held)",
+                out.get("stuck", 0), len(out.get("escalated") or []),
+                len(out.get("recorded") or []), len(out.get("held") or []))
+    except Exception:  # noqa: BLE001 - a sweep bug must never wedge the scheduler
+        logger.exception("Escalation sweep failed")
 
 
 async def shutdown_scheduler() -> None:

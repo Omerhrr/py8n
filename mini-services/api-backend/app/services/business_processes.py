@@ -205,16 +205,29 @@ async def _load_instance(db: AsyncSession, instance_id: str, owner_id: str | Non
 async def start_instance(db: AsyncSession, process_id: str, *, owner_id: str | None,
                          ref: str, title: str = "", context: dict | None = None,
                          due_in_seconds: int | None = None,
-                         actor: str = "") -> dict:
+                         actor: str = "",
+                         state: str | None = None) -> dict:
+    """Track a new entity. ``state`` optionally begins the journey at a
+    named state instead of the initial one - how businesses IMPORT the
+    entities they already track (a CRM lead imported as 'contacted' has
+    not travelled the machine's road; the started row says so honestly).
+    Everything else is validated like any other move."""
     p = await _load_process(db, process_id, owner_id)
     ref = str(ref or "").strip()
     if not ref:
         raise ProcessError("an instance needs a ref - the external key the "
                            "business already tracks (lead id, case number, phone)")
+    definition = p.definition or {}
+    begin = (definition.get("initial") or "")
+    if state is not None:
+        begin = str(state).strip()
+        if begin not in (definition.get("states") or []):
+            raise ProcessError(f"cannot start at {begin!r} - not a state of this "
+                               f"machine (states: {definition.get('states')})")
     now = _now()
     row = BusinessProcessInstance(
         process_id=p.id, ref=ref[:180], title=(title or "").strip()[:200],
-        state=(p.definition or {}).get("initial") or "",
+        state=begin,
         context=dict(context or {}),
         due_at=(now + timedelta(seconds=max(1, int(due_in_seconds))))
                if due_in_seconds else None)
@@ -226,7 +239,9 @@ async def start_instance(db: AsyncSession, process_id: str, *, owner_id: str | N
     db.add(BusinessProcessTransitionLog(
         process_id=p.id, instance_id=row.id, from_state=None,
         to_state=row.state, transition="started", actor=(actor or "system")[:140],
-        note="instance started", payload={"ref": row.ref}))
+        note="instance started (imported mid-machine)" if state is not None
+             else "instance started",
+        payload={"ref": row.ref}))
     return instance_out(row, definition=p.definition)
 
 
@@ -380,15 +395,185 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
     mean_time_in_state = {
         s: round(sum(v) / len(v)) for s, v in durations.items() if v}
     advance_counts: dict[str, int] = {}
+    escalations = 0
     for t in logs:
         if t.from_state is not None:
             advance_counts[t.transition] = advance_counts.get(t.transition, 0) + 1
+        if t.transition == "escalated":
+            escalations += 1
     return {
         "process_id": p.id, "name": p.name,
         "instances": len(instances), "open": open_count,
         "by_state": by_state,
         "stuck": stuck, "stuck_count": len(stuck),
+        "escalations": escalations,
         "mean_time_in_state_seconds": mean_time_in_state,
         "advance_counts": advance_counts,
         "terminal_states": sorted(terminal),
     }
+
+
+# ---------------------------------------------------------------------------
+# the escalation door (v85) - the scheduler's sweep over stuck instances
+# ---------------------------------------------------------------------------
+
+ESCALATION_TRANSITION = "escalate"   # the move a machine may define for the door
+
+
+async def _systems_holding(db: AsyncSession, process_ids: set[str]) -> dict[str, list[str]]:
+    """process_id -> the lifecycles of the systems that bind it (v81 gate)."""
+    if not process_ids:
+        return {}
+    from ..models import Py8nSystem, SystemComponent
+
+    rows = (await db.execute(
+        select(SystemComponent, Py8nSystem.lifecycle)
+        .join(Py8nSystem, Py8nSystem.id == SystemComponent.system_id)
+        .where(SystemComponent.kind == "process",
+               SystemComponent.ref_id.in_(process_ids)))).all()
+    out: dict[str, list[str]] = {}
+    for comp, lifecycle in rows:
+        out.setdefault(comp.ref_id, []).append(str(lifecycle or ""))
+    return out
+
+
+async def _escalated_this_stint(db: AsyncSession, instance_id: str,
+                                entered_state_at: datetime | None) -> bool:
+    """One escalation per state stint: an escalation marker on the log
+    after the instance entered its current state means the door already
+    knocked. Both paths mark: the machine's own ``escalate`` move (the
+    advance row) and the no-move ``escalated`` record. When the team (or
+    a workflow) moves the instance onward, entered_state_at advances and
+    the door may knock again."""
+    q = (select(BusinessProcessTransitionLog)
+         .where(BusinessProcessTransitionLog.instance_id == instance_id,
+                BusinessProcessTransitionLog.transition.in_(
+                    ("escalated", ESCALATION_TRANSITION)))
+         .order_by(BusinessProcessTransitionLog.created_at.desc())
+         .limit(1))
+    last = (await db.execute(q)).scalar_one_or_none()
+    if last is None:
+        return False
+    at = _aware(last.created_at)
+    entered = _aware(entered_state_at)
+    if at is None or entered is None:
+        return False
+    return at >= entered
+
+
+async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
+                         actor: str = "scheduler") -> dict:
+    """The scheduler DOOR: sweep the open instances whose SLA promise
+    (due_at) has passed while still open, and escalate each once per
+    state stint.
+
+    A machine that wants to be escalated defines its own ``escalate``
+    move (a self-loop re-arms the stint; a real move walks the entity to
+    an at-risk state) - the door takes the machine's move. A machine
+    without one still gets the escalation ON THE RECORD: a no-move
+    'escalated' log row naming the breach. Either way the door emits
+    ``business.stuck`` through the v80 event door, so workflows can
+    react to the breach itself (nudge the owner, ping the channel,
+    start the recovery workflow).
+
+    The v81 lifecycle gate holds the door for processes bound to a
+    paused/stopped system; unbound processes always sweep.
+    """
+    now = _now()
+    q = (select(BusinessProcessInstance)
+         .where(BusinessProcessInstance.ended_at.is_(None),
+                BusinessProcessInstance.due_at.is_not(None)))
+    if owner_id is not None:
+        q = q.where(BusinessProcessInstance.owner_id.in_((owner_id, None)))
+    open_rows = (await db.execute(q)).scalars().all()
+    if not open_rows:
+        return {"scanned": 0, "stuck": 0, "escalated": [], "recorded": [],
+                "held": [], "already": 0}
+
+    # terminal states per process + the lifecycle gate
+    process_ids = {r.process_id for r in open_rows}
+    definitions: dict[str, dict] = {}
+    names: dict[str, str] = {}
+    for pid in process_ids:
+        p = await db.get(BusinessProcess, pid)
+        if p is not None:
+            definitions[pid] = p.definition or {}
+            names[pid] = p.name
+    lifecycles = await _systems_holding(db, process_ids)
+
+    escalated: list[dict] = []
+    recorded: list[dict] = []
+    held: list[dict] = []
+    already = 0
+    for row in open_rows:
+        definition = definitions.get(row.process_id) or {}
+        terminal = _terminal_states(definition) if definition else set()
+        if terminal and row.state in terminal:
+            continue  # ended in spirit - ended_at will land on the next move
+        overdue_raw = (now - _aware(row.due_at)).total_seconds()
+        if overdue_raw <= 0:
+            continue  # the SLA still holds
+        overdue = round(overdue_raw)
+        cycles = lifecycles.get(row.process_id) or []
+        if cycles and not any(c == "running" for c in cycles):
+            held.append({"instance_id": row.id, "ref": row.ref,
+                         "process_id": row.process_id,
+                         "note": "bound system is not running - the door holds"})
+            continue
+        if await _escalated_this_stint(db, row.id, row.entered_state_at):
+            already += 1
+            continue
+
+        breach_payload = {"process_id": row.process_id,
+                          "process_name": names.get(row.process_id, ""),
+                          "instance_id": row.id, "ref": row.ref,
+                          "title": row.title, "state": row.state,
+                          "due_at": _aware(row.due_at).isoformat() if row.due_at else None,
+                          "overdue_seconds": overdue}
+
+        # the machine's own move, when the machine defines one from here
+        move = next((t for t in definition.get("transitions", [])
+                     if t.get("name") == ESCALATION_TRANSITION
+                     and t.get("from") == row.state), None)
+        moved_to: str | None = None
+        if move is not None:
+            advanced = await advance_instance(
+                db, row.id, owner_id=owner_id,
+                transition=ESCALATION_TRANSITION,
+                actor=actor,
+                note=f"SLA breached by {overdue}s - the door escalated "
+                     f"through the machine's own move",
+                payload={"reason": "sla_breached", "overdue_seconds": overdue},
+                due_in_seconds=None)
+            moved_to = advanced["state"]
+            escalated.append({"instance_id": row.id, "ref": row.ref,
+                              "process_id": row.process_id,
+                              "state": row.state, "moved_to": moved_to,
+                              "overdue_seconds": overdue})
+        else:
+            db.add(BusinessProcessTransitionLog(
+                process_id=row.process_id, instance_id=row.id,
+                from_state=row.state, to_state=row.state,
+                transition="escalated", actor=(actor or "scheduler")[:140],
+                note=f"SLA breached by {overdue}s - recorded (the machine "
+                     f"defines no {ESCALATION_TRANSITION!r} move from "
+                     f"{row.state!r})",
+                payload={"reason": "sla_breached", "overdue_seconds": overdue}))
+            await db.flush()
+            recorded.append({"instance_id": row.id, "ref": row.ref,
+                             "process_id": row.process_id,
+                             "state": row.state, "overdue_seconds": overdue})
+
+        # the breach itself is a fact, independent of the move
+        from . import system_events as events_svc
+
+        await events_svc.emit(
+            db, row.owner_id, "business.stuck", source="business",
+            actor=actor, target_type="process_instance", target_id=row.id,
+            payload={**breach_payload, "escalated": moved_to is not None,
+                     "moved_to": moved_to},
+            correlation_id=row.id)
+
+    return {"scanned": len(open_rows), "stuck": len(escalated) + len(recorded) + already,
+            "escalated": escalated, "recorded": recorded,
+            "held": held, "already": already}
