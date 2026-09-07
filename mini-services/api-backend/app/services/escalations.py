@@ -76,6 +76,19 @@ DEFAULT_TEMPLATE = ("[py8n] {process}: '{title}' (ref {ref}) has been in state "
                     "'{state}' for {overdue_minutes} minutes past its SLA "
                     "(escalation attempt {attempt}).")
 
+# v90: email is a long-form channel - the subject line carries the scan
+# line (the body carries the detail). Other channels ignore it.
+def knock_subject(*, process_name: str, ref: str, title: str, state: str,
+                  attempt: int) -> str:
+    return (f"[py8n] {process_name}: '{title}' (ref {ref}) past SLA "
+            f"in '{state}' (attempt {attempt})")
+
+
+def digest_subject(*, process_name: str, item_count: int) -> str:
+    return (f"[py8n] Escalation digest - {process_name} "
+            f"({item_count} item(s) past SLA)")
+
+
 # v89: the digest mode - one summary per window instead of N knocks
 MODES = ("knock", "digest")
 MIN_DIGEST_SECONDS = 60
@@ -428,10 +441,15 @@ async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance
                                   process_name=process_name, ref=instance.ref,
                                   title=instance.title, state=instance.state,
                                   overdue_minutes=overdue_minutes, attempt=attempt)
-            result = await cep_svc.deliver_outbound(endpoint, target, text)
+            result = await cep_svc.deliver_outbound(
+                endpoint, target, text,
+                subject=knock_subject(process_name=process_name, ref=instance.ref,
+                                      title=instance.title, state=instance.state,
+                                      attempt=attempt))
             delivery = {"delivery": result.get("delivery", "failed"),
                         "detail": result.get("detail", ""),
-                        "endpoint": endpoint.name, "provider": endpoint.provider}
+                        "endpoint": endpoint.name, "provider": endpoint.provider,
+                        "subject": (result.get("request") or {}).get("subject")}
     await events_svc.emit(
         db, instance.owner_id, "business.escalated", source="business",
         actor=actor, target_type="process_instance", target_id=instance.id,
@@ -582,10 +600,14 @@ async def deliver_digest(db: AsyncSession, *, owner_id: str | None,
             from . import channel_endpoints as cep_svc
 
             text = render_digest(process_name=process_name, items=items)
-            result = await cep_svc.deliver_outbound(endpoint, target, text)
+            result = await cep_svc.deliver_outbound(
+                endpoint, target, text,
+                subject=digest_subject(process_name=process_name,
+                                       item_count=len(items)))
             delivery = {"delivery": result.get("delivery", "failed"),
                         "detail": result.get("detail", ""),
-                        "endpoint": endpoint.name, "provider": endpoint.provider}
+                        "endpoint": endpoint.name, "provider": endpoint.provider,
+                        "subject": (result.get("request") or {}).get("subject")}
     await events_svc.emit(
         db, owner_id, "business.escalation_digest", source="business",
         actor=actor, target_type="process", target_id=process_id,

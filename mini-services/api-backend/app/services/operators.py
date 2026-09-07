@@ -459,6 +459,10 @@ _CLINIC_OPERATOR = {
         "phone the clinic texts) and its escalation policy tells the desk over SMS "
         "- bind escalation_policy.to + a channel endpoint; until then the "
         "escalations land on the event timeline only.",
+        "Cross-operator journeys fire here: landing on 'billed' opens the visit's "
+        "invoice on the Finance operator's machine (ref = the patient's phone, "
+        "the leg carries its own SLA) - the visit is on the payable machine "
+        "before the patient reaches the parking lot.",
     ],
 }
 
@@ -862,8 +866,10 @@ _OPERATIONS_OPERATOR = {
         "/scheduler/escalations/tick).",
         "Cross-operator journeys land here: the Sales operator's lead pipeline "
         "fires a journey on 'won' that opens a Customer onboarding case at "
-        "kickoff (ref = the lead's phone) - install both operators and the "
-        "handoff between them is a state change, not a meeting.",
+        "kickoff (ref = the lead's phone), and the machine fires its own leg "
+        "on 'handed_off' - the Finance operator's invoice lifecycle opens the "
+        "billing instance by itself. Install all three and the handoff across "
+        "the departments is a chain of state changes, not meetings.",
         "The handbook is the concierge's knowledge - edit the dataset and the "
         "answers follow, no redeploy.",
     ],
@@ -1081,6 +1087,8 @@ _FINANCE_OPERATOR = {
     "outcomes": [
         "Invoices dataset (payables + statuses)",
         "Invoice lifecycle business process (pre-wired, seeded from the invoices)",
+        "The chains' landing leg - onboarding handoffs, delivered orders and "
+        "billed visits open their invoices here (cross-operator journeys)",
         "Finance clerk grounded in the finance policy",
         "Approvals queue (announce + SMS + callback wired)",
         "Collections campaign (empty dialer, targets from the invoices)",
@@ -1243,6 +1251,13 @@ _FINANCE_OPERATOR = {
         "The machine defines escalate self-loops on every working state - the "
         "scheduler door sweeps past-SLA invoices through them (POST "
         "/scheduler/escalations/tick).",
+        "The policy is the flagship DIGEST: one summary per day instead of N "
+        "knocks per invoice - bind escalation_policy.to + a channel endpoint "
+        "and the daily summary lands in the inbox.",
+        "Cross-operator journeys land here: a handed-off onboarding (Operations), "
+        "a delivered order (Logistics) and a billed visit (Clinic) each open an "
+        "invoice at 'received' with their own SLA - the payable machine never "
+        "waits for someone to type the bill.",
         "The policy dataset is the clerk's knowledge - edit it and the answers "
         "follow, no redeploy.",
     ],
@@ -1422,6 +1437,10 @@ _PROCUREMENT_OPERATOR = {
         "The machine defines escalate self-loops on every working state - the "
         "scheduler door sweeps past-SLA purchases through them (POST "
         "/scheduler/escalations/tick).",
+        "Cross-operator journeys fire here: landing on 'ordered' opens the "
+        "delivery on the Logistics operator's machine (ref = the phone on "
+        "file, the leg carries its own SLA) - the goods' journey starts as a "
+        "state change.",
         "The policy dataset is the assistant's knowledge - edit it and the "
         "answers follow, no redeploy.",
     ],
@@ -1605,6 +1624,11 @@ _LOGISTICS_OPERATOR = {
         "The machine defines escalate self-loops on every working state - the "
         "scheduler door sweeps past-SLA deliveries through them (POST "
         "/scheduler/escalations/tick).",
+        "Cross-operator journeys fire here: the Procurement operator's purchase "
+        "lifecycle opens the delivery on 'ordered', and the machine fires its "
+        "own leg on 'delivered' - the Finance operator's invoice lifecycle "
+        "opens the vendor's bill by itself (goods received -> payable, the "
+        "three-way match as state changes).",
         "The FAQ dataset is the agent's knowledge - edit it and the answers "
         "follow, no redeploy.",
     ],
@@ -1644,12 +1668,23 @@ _ESCALATION_POLICIES: dict[str, dict] = {
 }
 
 
-# v89: cross-operator JOURNEYS per operator machine - when the machine
-# lands on the fire-state, the next leg OPENS ITSELF on the target
-# machine (a won deal opening an onboarding case). The target is named
-# here and resolved at FIRE time by name - operators install
-# independently, so an uninstalled target skips honestly (the event
-# names it; install the second operator and the handoff becomes real).
+# v89/v90: cross-operator JOURNEYS per operator machine - when the machine
+# lands on the fire-state, the next leg OPENS ITSELF on the target machine
+# (a won deal opening an onboarding case). The target is named here and
+# resolved at FIRE time by name - operators install independently, so an
+# uninstalled target skips honestly (the event names it; install the
+# second operator and the handoff becomes real). v90 threads the legs into
+# CHAINS that span three departments, each opened leg carrying its own SLA
+# promise (due_in_seconds) so the door and its digests watch it from birth:
+#
+#   the REVENUE chain:  Sales (Lead pipeline) --won--> Operations (Customer
+#     onboarding) --handed_off--> Finance (Invoice lifecycle)
+#   the SUPPLY chain:   Procurement (Purchase lifecycle) --ordered-->
+#     Logistics (Delivery pipeline) --delivered--> Finance (Invoice)
+#   the CARE chain:     Clinic (Appointment journey) --billed--> Finance
+#
+# one ref (the phone the business already speaks in) rides every leg, so
+# the whole journey is greppable across departments.
 _JOURNEYS: dict[str, list[dict]] = {
     "Lead pipeline": [
         {"on_state": "won",
@@ -1657,6 +1692,42 @@ _JOURNEYS: dict[str, list[dict]] = {
                   "title_template": "Onboarding - {title}",
                   "memory": {"via": "won-deal journey",
                              "source_operator": "sales"}}},
+    ],
+    "Customer onboarding": [
+        {"on_state": "handed_off",
+         "open": {"process": "Invoice lifecycle",
+                  "title_template": "Billing - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "handed-off journey",
+                             "source_operator": "operations"},
+                  "due_in_seconds": 5 * 24 * 3600}},
+    ],
+    "Purchase lifecycle": [
+        {"on_state": "ordered",
+         "open": {"process": "Delivery pipeline",
+                  "title_template": "Delivery - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "ordered journey",
+                             "source_operator": "procurement"},
+                  "due_in_seconds": 2 * 24 * 3600}},
+    ],
+    "Delivery pipeline": [
+        {"on_state": "delivered",
+         "open": {"process": "Invoice lifecycle",
+                  "title_template": "Bill - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "delivered journey",
+                             "source_operator": "logistics"},
+                  "due_in_seconds": 5 * 24 * 3600}},
+    ],
+    "Appointment journey": [
+        {"on_state": "billed",
+         "open": {"process": "Invoice lifecycle",
+                  "title_template": "Visit - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "billed visit journey",
+                             "source_operator": "clinic"},
+                  "due_in_seconds": 5 * 24 * 3600}},
     ],
 }
 

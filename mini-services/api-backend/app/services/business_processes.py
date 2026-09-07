@@ -141,16 +141,29 @@ def validate_definition(definition: dict | None) -> dict:
                                    "'open' object naming the target machine")
             unknown_o = sorted(set(open_spec) - {"process", "state",
                                                  "title_template",
-                                                 "ref_template", "memory"})
+                                                 "ref_template", "memory",
+                                                 "due_in_seconds"})
             if unknown_o:
                 raise ProcessError(f"journey open has unknown key(s) {unknown_o} - "
                                    "allowed: ['process', 'state', 'title_template', "
-                                   "'ref_template', 'memory']")
+                                   "'ref_template', 'memory', 'due_in_seconds']")
             target = str(open_spec.get("process") or "").strip()
             if not target:
                 raise ProcessError(f"the journey on {on_state!r} opens nothing - "
                                    "open.process is required (which machine opens "
                                    "the next leg?)")
+            # v90: the opened leg can carry its own SLA promise - the door
+            # (and its digests) watch the leg from the day it opens
+            due_s = open_spec.get("due_in_seconds")
+            if due_s is not None:
+                try:
+                    due_s = int(due_s)
+                except (TypeError, ValueError):
+                    raise ProcessError("journey open.due_in_seconds must be an "
+                                       "integer of seconds") from None
+                if due_s <= 0:
+                    raise ProcessError("journey open.due_in_seconds must be > 0 "
+                                       "(the SLA promise the opened leg starts with)")
             memory = open_spec.get("memory")
             if memory is not None and not isinstance(memory, dict):
                 raise ProcessError("journey open.memory must be an object of "
@@ -161,7 +174,8 @@ def validate_definition(definition: dict | None) -> dict:
                          "state": (str(open_spec.get("state") or "").strip() or None),
                          "title_template": str(open_spec.get("title_template") or "").strip(),
                          "ref_template": str(open_spec.get("ref_template") or "").strip(),
-                         "memory": dict(memory or {})}})
+                         "memory": dict(memory or {}),
+                         "due_in_seconds": due_s}})
         out["journeys"] = clean_journeys
     return out
 
@@ -541,6 +555,7 @@ async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
                 db, target.id, owner_id=row.owner_id, ref=ref,
                 title=title[:200], context=context,
                 state=spec.get("state") or None,
+                due_in_seconds=spec.get("due_in_seconds"),
                 actor=actor or "journey")
         except ProcessError as exc:
             entry["opened"] = False
@@ -559,7 +574,8 @@ async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
         entry["opened"] = True
         entry["target"] = {"process_id": target.id, "process_name": target.name,
                            "instance_id": started["id"], "ref": started["ref"],
-                           "title": started["title"], "state": started["state"]}
+                           "title": started["title"], "state": started["state"],
+                           "due_at": started.get("due_at")}
         await events_svc.emit(
             db, row.owner_id, "business.journey_opened", source="business",
             actor=actor or "journey", target_type="process_instance",
