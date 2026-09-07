@@ -30,6 +30,18 @@ class ProcessError(ValueError):
     """Honest business-process failures."""
 
 
+# v88: the paperwork rows the journey carries but the machines' move
+# counts must not - annotations are memory writes, acknowledgements are
+# the human's receipt; the door's own no-move 'escalated' stays counted
+# beside the machine's 'escalate' move (the v86 fix, untouched)
+PAPERWORK_TRANSITIONS = frozenset({"annotate", "escalation_acknowledged"})
+ANNOTATE_TRANSITION = "annotate"
+ACK_TRANSITION = "escalation_acknowledged"
+# the escalation door's episode bookkeeping lives at context.escalations -
+# the annotate door (the AGENTS' write path) refuses to write under it
+RESERVED_CONTEXT_KEYS = frozenset({"escalations"})
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -430,6 +442,131 @@ async def query_instances(db: AsyncSession, *, owner_id: str | None,
 
 
 # ---------------------------------------------------------------------------
+# the agents' write door (v88) - annotate the entity's memory, move nothing
+# ---------------------------------------------------------------------------
+
+async def annotate_instance(db: AsyncSession, process_id: str, instance_id: str,
+                            *, owner_id: str | None, context_patch: dict,
+                            actor: str = "", note: str = "") -> dict:
+    """Write facts DIRECTLY into a tracked entity's running memory - no
+    state change, no move, the machine untouched.
+
+    business_query (v87) is the read door; business_advance (v85) moves
+    the machine; THIS is the memory door: an agent that learned something
+    mid-flight (the budget number from a call, the new address from a
+    text, the sentiment from a transcript) lands it on the entity the
+    whole operation reads. The patch MERGES like every context write
+    (fresh dicts - the JSON column is never mutated in place); the write
+    is ON THE RECORD (an 'annotate' journey row naming the keys) and
+    emits ``business.annotated`` on the instance's correlation thread -
+    so a workflow can react to a FACT landing (annotate -> the reactive
+    advance that the fact justifies).
+
+    Loud refusals: an empty or non-object patch, and any write under the
+    reserved ``escalations`` key - that corner of the memory is the
+    escalation door's episode bookkeeping, not the agents' scratch space.
+    Terminal instances still accept annotations: the journey may be
+    complete, but facts keep landing (the real contract value arrives
+    after the deal is won)."""
+    row = await _load_instance(db, instance_id, owner_id)
+    if row.process_id != process_id:
+        raise ProcessError(f"instance {instance_id!r} is not in process {process_id!r}")
+    p = await _load_process(db, process_id, owner_id)
+    if not isinstance(context_patch, dict) or not context_patch:
+        raise ProcessError("annotate needs facts: context_patch must be a "
+                           "non-empty object of {key: value}")
+    clash = sorted(str(k) for k in context_patch if str(k) in RESERVED_CONTEXT_KEYS)
+    if clash:
+        raise ProcessError(f"context key(s) {clash} are reserved (the escalation "
+                           "door's episode bookkeeping) - annotate facts under "
+                           "other keys")
+    new_ctx = dict(row.context or {})
+    new_ctx.update(context_patch)
+    row.context = new_ctx
+    db.add(row)
+    who = (actor or "agent").strip() or "agent"
+    keys = sorted(str(k) for k in context_patch)
+    db.add(BusinessProcessTransitionLog(
+        process_id=p.id, instance_id=row.id, from_state=row.state,
+        to_state=row.state, transition=ANNOTATE_TRANSITION,
+        actor=who[:140],
+        note=(note or "").strip()[:500] or f"facts annotated: {keys}",
+        payload={"keys": keys}))
+    await db.flush()
+
+    from . import system_events as events_svc
+
+    await events_svc.emit(
+        db, row.owner_id, "business.annotated", source="business",
+        actor=who, target_type="process_instance", target_id=row.id,
+        payload={"process_id": p.id, "process_name": p.name,
+                 "instance_id": row.id, "ref": row.ref, "title": row.title,
+                 "state": row.state, "keys": keys, "note": (note or "")[:200]},
+        correlation_id=row.id)
+    return instance_out(row, definition=p.definition,
+                        journey=await instance_journey(db, row.id))
+
+
+# ---------------------------------------------------------------------------
+# the human's receipt (v88) - acknowledge the escalation, the door goes quiet
+# ---------------------------------------------------------------------------
+
+async def acknowledge_escalation(db: AsyncSession, process_id: str,
+                                 instance_id: str, *, owner_id: str | None,
+                                 by: str, note: str = "") -> dict:
+    """A human takes the escalation: the episode goes quiet for the rest
+    of this state stint (episode_gate holds with reason 'acknowledged'),
+    the receipt is ON THE RECORD (an 'escalation_acknowledged' journey
+    row naming who) and ``business.escalation_acknowledged`` lands on the
+    instance's correlation thread - so a workflow can react to the take
+    (ack -> open the follow-up task, post to the channel).
+
+    The door has to have knocked first: an episode bookkeeping with at
+    least one attempt in the current stint, or an escalation marker on
+    the journey this stint - acknowledging silence is a loud refusal.
+    A state change starts a fresh episode and the door may knock again."""
+    row = await _load_instance(db, instance_id, owner_id)
+    if row.process_id != process_id:
+        raise ProcessError(f"instance {instance_id!r} is not in process {process_id!r}")
+    p = await _load_process(db, process_id, owner_id)
+    who = (by or "").strip()
+    if not who:
+        raise ProcessError("an acknowledgement names who acknowledged (by) - "
+                           "a receipt without a name is not a receipt")
+    book = escalations_svc.episode_book(row)
+    has_episode = (int(book.get("count") or 0) >= 1
+                   and book.get("state") == row.state)
+    if not has_episode:
+        has_episode = await _escalated_this_stint(db, row.id, row.entered_state_at)
+    if not has_episode:
+        raise ProcessError("no escalation episode to acknowledge - the door "
+                           "has not knocked for this stint (state "
+                           f"{row.state!r})")
+    ack = escalations_svc.record_ack(db, row, by=who, note=note, now=_now())
+    db.add(BusinessProcessTransitionLog(
+        process_id=p.id, instance_id=row.id, from_state=row.state,
+        to_state=row.state, transition=ACK_TRANSITION,
+        actor=who[:140], note=(note or "").strip()[:500]
+        or "escalation acknowledged - the episode goes quiet",
+        payload={"attempt": int(book.get("count") or 0)}))
+    await db.flush()
+
+    from . import system_events as events_svc
+
+    await events_svc.emit(
+        db, row.owner_id, "business.escalation_acknowledged", source="business",
+        actor=who, target_type="process_instance", target_id=row.id,
+        payload={"process_id": p.id, "process_name": p.name,
+                 "instance_id": row.id, "ref": row.ref, "title": row.title,
+                 "state": row.state, "acknowledged_by": who,
+                 "note": (note or "")[:200]},
+        correlation_id=row.id)
+    return {"instance": instance_out(row, definition=p.definition,
+                                     journey=await instance_journey(db, row.id)),
+            "ack": ack}
+
+
+# ---------------------------------------------------------------------------
 # the process, measured - all derived, nothing stored twice
 # ---------------------------------------------------------------------------
 
@@ -476,20 +613,33 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
         s: round(sum(v) / len(v)) for s, v in durations.items() if v}
     advance_counts: dict[str, int] = {}
     escalations = 0
+    annotations = 0
+    acknowledgements = 0
     for t in logs:
         if t.from_state is not None:
             advance_counts[t.transition] = advance_counts.get(t.transition, 0) + 1
         # v86 fix found live: the door's nudge lands BOTH ways - the
-        # no-move 'escalated' log row AND the machine's own 'escalate'
+        # no-move 'escalated' rows AND the machine's own 'escalate'
         # move. The metric counts the nudge, not the paperwork.
         if t.transition in ("escalated", "escalate"):
             escalations += 1
+        # v88: the agents' annotations and the team's acknowledgements
+        # are counted on their own - they are facts and receipts, not
+        # moves, so they leave advance_counts (see PAPERWORK_TRANSITIONS)
+        if t.transition == ANNOTATE_TRANSITION:
+            annotations += 1
+        if t.transition == ACK_TRANSITION:
+            acknowledgements += 1
+    for name in PAPERWORK_TRANSITIONS:
+        advance_counts.pop(name, None)
     return {
         "process_id": p.id, "name": p.name,
         "instances": len(instances), "open": open_count,
         "by_state": by_state,
         "stuck": stuck, "stuck_count": len(stuck),
         "escalations": escalations,
+        "annotations": annotations,
+        "acknowledgements": acknowledgements,
         "mean_time_in_state_seconds": mean_time_in_state,
         "advance_counts": advance_counts,
         "terminal_states": sorted(terminal),
@@ -625,13 +775,27 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                 held.append({"instance_id": row.id, "ref": row.ref,
                              "process_id": row.process_id,
                              "reason": gate["reason"],
-                             **({k: gate[k] for k in ("attempts", "next_in_seconds")
+                             **({k: gate[k] for k in ("attempts", "next_in_seconds",
+                                                      "acked_by")
                                  if k in gate})})
                 continue
             attempt = gate["attempt"]
         elif await _escalated_this_stint(db, row.id, row.entered_state_at):
             already += 1
             continue
+        if policy is None:
+            # v88: a no-policy machine may still have been ACKNOWLEDGED -
+            # the ack lives on the instance's memory; the door respects it
+            # for the rest of the stint (one knock per stint either way -
+            # this keeps the receipt visible in the door's held list)
+            book = escalations_svc.episode_book(row)
+            if isinstance(book.get("acked"), dict) and \
+                    book.get("state") == row.state:
+                held.append({"instance_id": row.id, "ref": row.ref,
+                             "process_id": row.process_id,
+                             "reason": "acknowledged",
+                             "acked_by": str(book["acked"].get("by") or "")})
+                continue
 
         breach_payload = {"process_id": row.process_id,
                           "process_name": names.get(row.process_id, ""),

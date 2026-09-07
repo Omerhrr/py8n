@@ -16,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..services.business_processes import (
-    ProcessError, create_process, get_instance, get_process,
-    advance_instance, list_instances, list_processes, process_analytics,
-    start_instance,
+    ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
+    create_process, get_instance, get_process, list_instances, list_processes,
+    process_analytics, start_instance,
 )
 from .auth import get_optional_user
 
@@ -136,6 +136,59 @@ async def advance(process_id: str, instance_id: str, body: InstanceAdvance,
             actor=body.actor or (getattr(user, "id", None) or "api"),
             note=body.note, context_patch=body.context_patch,
             payload=body.payload, due_in_seconds=body.due_in_seconds)
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
+
+
+class InstanceAnnotate(BaseModel):
+    """v88: facts land on the entity's memory - the machine does not move."""
+
+    context_patch: dict = Field(..., description=(
+        "the facts to remember, {key: value} - merged into the instance's "
+        "running memory; the reserved 'escalations' key refuses loud"))
+    actor: str = Field(default="", description="who learned this (agent name, staff id)")
+    note: str = Field(default="", description="why these facts landed (journey log)")
+
+
+@router.post("/{process_id}/instances/{instance_id}/annotate")
+async def annotate(process_id: str, instance_id: str, body: InstanceAnnotate,
+                   user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v88: the agents' memory door - write facts DIRECTLY into the
+    entity's running context without moving the machine. On the record
+    (an 'annotate' journey row naming the keys) + business.annotated on
+    the correlation thread, so a workflow can react to a FACT landing."""
+    try:
+        out = await annotate_instance(
+            db, process_id, instance_id, owner_id=getattr(user, "id", None),
+            context_patch=body.context_patch,
+            actor=body.actor or (getattr(user, "id", None) or "api"),
+            note=body.note)
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
+
+
+class EscalationAck(BaseModel):
+    """v88: the human's receipt - a named take of the escalation."""
+
+    by: str = Field(..., min_length=1, description="who acknowledged (the receipt's name)")
+    note: str = Field(default="", description="the handler's own words")
+
+
+@router.post("/{process_id}/instances/{instance_id}/escalations/ack")
+async def ack_escalation(process_id: str, instance_id: str, body: EscalationAck,
+                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v88: acknowledge the instance's escalation episode - the door goes
+    quiet for the rest of this state stint (the handler who said 'I have
+    this' owns it); the receipt is on the record and
+    business.escalation_acknowledged lands on the correlation thread."""
+    try:
+        out = await acknowledge_escalation(
+            db, process_id, instance_id, owner_id=getattr(user, "id", None),
+            by=body.by, note=body.note)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

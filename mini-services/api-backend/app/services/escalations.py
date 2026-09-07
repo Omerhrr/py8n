@@ -8,11 +8,16 @@ declares the rest:
 
     escalation_policy = {
         "channel": "email" | "sms" | "whatsapp" | "telegram" | "discord" | "",
-        "to": "ops@acme.com",            # the target - installer's to bind
+        "to": "ops@acme.com",            # the pinned target - installer's to bind
+        "handlers": ["a@x.com", "b@x.com"],  # v88: the rotation - attempt N rides handlers[(N-1) % len]
         "repeat_every_seconds": 3600,    # re-escalate cadence (>= 60)
         "max_repeats": 3,                # repeats AFTER the first attempt
         "message_template": "...",       # {process} {ref} {title} {state} {overdue_minutes} {attempt}
     }
+
+    v88: an episode a human ACKNOWLEDGES goes quiet - the door holds for
+    the rest of the stint (the person who said "I have this" owns it); a
+    state change starts a fresh episode and the door may knock again.
 
 The door (business_processes.escalate_stuck - the APScheduler sweep and
 POST /scheduler/escalations/tick) consults the policy per stuck instance:
@@ -55,8 +60,9 @@ DEFAULT_TEMPLATE = ("[py8n] {process}: '{title}' (ref {ref}) has been in state "
                     "'{state}' for {overdue_minutes} minutes past its SLA "
                     "(escalation attempt {attempt}).")
 
-_POLICY_KEYS = {"channel", "to", "repeat_every_seconds", "max_repeats",
-                "message_template"}
+_POLICY_KEYS = {"channel", "to", "handlers", "repeat_every_seconds",
+                "max_repeats", "message_template"}
+MAX_HANDLERS = 10
 
 
 class EscalationPolicyError(ValueError):
@@ -100,6 +106,23 @@ def validate_escalation_policy(policy: dict | None) -> dict | None:
             f"escalation channel {channel!r} is not a deliverable channel "
             f"(known: {', '.join(ESCALATION_CHANNELS)}; empty = event-only escalation)")
     to = str(policy.get("to") or "").strip()
+    # v88: the rotation - a roster of handlers the attempts walk through
+    raw_handlers = policy.get("handlers")
+    handlers: list[str] = []
+    if raw_handlers not in (None, "", []):
+        if not isinstance(raw_handlers, list):
+            raise EscalationPolicyError("escalation_policy.handlers must be a list of targets")
+        handlers = [str(h).strip() for h in raw_handlers]
+        if not all(handlers):
+            raise EscalationPolicyError("every handler in escalation_policy.handlers "
+                                        "must be a non-empty target")
+        if len(handlers) > MAX_HANDLERS:
+            raise EscalationPolicyError(
+                f"escalation_policy.handlers caps at {MAX_HANDLERS} - got {len(handlers)}")
+    if handlers and to:
+        raise EscalationPolicyError(
+            "set escalation_policy.handlers (rotation) OR 'to' (pinned target), "
+            "not both - the door refuses to guess which promise is real")
     try:
         repeat = int(policy.get("repeat_every_seconds") or DEFAULT_REPEAT_SECONDS)
     except (TypeError, ValueError):
@@ -116,7 +139,7 @@ def validate_escalation_policy(policy: dict | None) -> dict | None:
     if max_repeats < 0:
         raise EscalationPolicyError("max_repeats must be >= 0 (0 = escalate once, never repeat)")
     template = str(policy.get("message_template") or "").strip() or DEFAULT_TEMPLATE
-    return {"channel": channel, "to": to,
+    return {"channel": channel, "to": to, "handlers": handlers,
             "repeat_every_seconds": repeat, "max_repeats": max_repeats,
             "message_template": template}
 
@@ -152,15 +175,30 @@ def describe_policy(policy: dict | None) -> str:
         return "no escalation policy"
     cadence = f"every {policy['repeat_every_seconds']}s"
     channel = policy["channel"] or "event-only"
+    if policy.get("handlers"):
+        roster = " -> ".join(policy["handlers"])
+        return (f"stuck -> {channel} (x{1 + policy['max_repeats']}, {cadence})"
+                f" rotate {len(policy['handlers'])}: {roster}")
     return (f"stuck -> {channel} (x{1 + policy['max_repeats']}, {cadence})"
             + (f" -> {policy['to']}" if policy["to"] else ""))
+
+
+def rotation_target(policy: dict, attempt: int) -> str:
+    """v88: who attempt N is delivered to - the roster round-robins by
+    attempt number (the on-call rotation); a pinned 'to' ignores it."""
+    handlers = policy.get("handlers") or []
+    if handlers:
+        return handlers[(max(1, int(attempt)) - 1) % len(handlers)]
+    return policy.get("to") or ""
 
 
 # ---------------------------------------------------------------------------
 # the episode - bookkeeping on the instance's running memory
 # ---------------------------------------------------------------------------
 
-def _episode_book(instance: BusinessProcessInstance) -> dict:
+def episode_book(instance: BusinessProcessInstance) -> dict:
+    """The door's episode bookkeeping on the instance's running memory
+    (context.escalations) - {} when the door has never knocked here."""
     book = (instance.context or {}).get("escalations")
     return book if isinstance(book, dict) else {}
 
@@ -171,13 +209,20 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
     instance RIGHT NOW: escalate (with the attempt number) or hold.
 
     An episode belongs to ONE stuck stint: the bookkeeping remembers the
-    state it started in - the instance moving states starts fresh. Past
-    1 + max_repeats the episode is complete; before repeat_every_seconds
-    has elapsed since the last attempt the door holds (too_soon)."""
+    state it started in - the instance moving states starts fresh. An
+    ACKNOWLEDGED episode goes quiet for the rest of the stint (v88 - the
+    human who said "I have this" owns it; a state change starts fresh).
+    Past 1 + max_repeats the episode is complete; before
+    repeat_every_seconds has elapsed since the last attempt the door
+    holds (too_soon)."""
     now = _aware(now) or _now()
-    book = _episode_book(instance)
+    book = episode_book(instance)
     fresh = book.get("state") != instance.state
     count = 0 if fresh else int(book.get("count") or 0)
+    # the human's acknowledgement outranks the cadence and the cap
+    if not fresh and isinstance(book.get("acked"), dict):
+        return {"action": "hold", "reason": "acknowledged", "attempts": count,
+                "acked_by": str(book["acked"].get("by") or "")}
     if count >= 1 + policy["max_repeats"]:
         return {"action": "hold", "reason": "episode_complete", "attempts": count}
     last = _parse_iso(book.get("last_at")) if not fresh else None
@@ -191,15 +236,49 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
 def record_episode(db: AsyncSession, instance: BusinessProcessInstance,
                    attempt: int, delivery: dict, now: datetime) -> None:
     """Remember the attempt on the instance's running memory (fresh-dict
-    discipline - the JSON column is never mutated in place)."""
+    discipline - the JSON column is never mutated in place). An ack that
+    already landed in THIS episode rides along (the door holds acked
+    episodes anyway - this is race-safety, not a second opinion)."""
     now = _aware(now) or _now()
+    book = episode_book(instance)
+    acked = (book.get("acked")
+             if book.get("state") == instance.state
+             and isinstance(book.get("acked"), dict) else None)
+    entry = {"count": attempt, "last_at": now.isoformat(),
+             "state": instance.state,
+             "last_delivery": delivery.get("delivery", ""),
+             "last_detail": (delivery.get("detail") or "")[:300]}
+    if acked:
+        entry["acked"] = acked
     new_ctx = dict(instance.context or {})
-    new_ctx["escalations"] = {"count": attempt, "last_at": now.isoformat(),
-                              "state": instance.state,
-                              "last_delivery": delivery.get("delivery", ""),
-                              "last_detail": (delivery.get("detail") or "")[:300]}
+    new_ctx["escalations"] = entry
     instance.context = new_ctx
     db.add(instance)
+
+
+def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
+               *, by: str, note: str = "",
+               now: datetime | None = None) -> dict:
+    """v88: write the acknowledgement onto the episode's bookkeeping -
+    the door reads it through episode_gate and holds the episode. The
+    rest of the book (count, last delivery) rides along untouched."""
+    now = _aware(now) or _now()
+    book = episode_book(instance)
+    ack = {"by": (by or "").strip()[:140], "at": now.isoformat(),
+           "note": (note or "").strip()[:500]}
+    entry = {"count": int(book.get("count") or 0),
+             "last_at": book.get("last_at"),
+             "state": instance.state,
+             "last_delivery": book.get("last_delivery", ""),
+             "last_detail": book.get("last_detail", ""),
+             "acked": ack}
+    if entry["last_at"] is None:
+        entry.pop("last_at")
+    new_ctx = dict(instance.context or {})
+    new_ctx["escalations"] = entry
+    instance.context = new_ctx
+    db.add(instance)
+    return ack
 
 
 # ---------------------------------------------------------------------------
@@ -226,25 +305,32 @@ async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance
                              now: datetime | None = None) -> dict:
     """Deliver the escalation over the policy's channel and put it on the
     record: one ``business.escalated`` event on the instance's correlation
-    thread carrying the delivery result (an honest skip IS a result)."""
+    thread carrying the delivery result (an honest skip IS a result).
+
+    v88: the target comes from the rotation when the policy carries a
+    handlers roster (attempt N -> handlers[(N-1) % len]) or the pinned
+    'to' otherwise; the event payload names WHO attempt N went to."""
     from . import system_events as events_svc
 
     now = _aware(now) or _now()
     overdue_minutes = max(0, overdue_seconds // 60)
+    target = rotation_target(policy, attempt)
     base = {"process_id": instance.process_id, "process_name": process_name,
             "instance_id": instance.id, "ref": instance.ref,
             "title": instance.title, "state": instance.state,
             "overdue_seconds": overdue_seconds,
             "overdue_minutes": overdue_minutes, "attempt": attempt,
-            "max_repeats": policy["max_repeats"], "moved_to": moved_to}
+            "max_repeats": policy["max_repeats"], "moved_to": moved_to,
+            "to": target or None,
+            "rotated": bool(policy.get("handlers"))}
     if not policy["channel"]:
         delivery = {"delivery": "skipped",
                     "detail": "policy is event-only (no channel configured) - "
                               "the escalation is on the event timeline"}
-    elif not policy["to"]:
+    elif not target:
         delivery = {"delivery": "skipped",
                     "detail": f"no target configured - bind escalation_policy.to "
-                              f"to deliver over {policy['channel']}"}
+                              f"(or a handlers roster) to deliver over {policy['channel']}"}
     else:
         endpoint = await _resolve_endpoint(db, instance.owner_id, policy["channel"])
         if endpoint is None:
@@ -259,7 +345,7 @@ async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance
                                   process_name=process_name, ref=instance.ref,
                                   title=instance.title, state=instance.state,
                                   overdue_minutes=overdue_minutes, attempt=attempt)
-            result = await cep_svc.deliver_outbound(endpoint, policy["to"], text)
+            result = await cep_svc.deliver_outbound(endpoint, target, text)
             delivery = {"delivery": result.get("delivery", "failed"),
                         "detail": result.get("detail", ""),
                         "endpoint": endpoint.name, "provider": endpoint.provider}
@@ -267,7 +353,7 @@ async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance
         db, instance.owner_id, "business.escalated", source="business",
         actor=actor, target_type="process_instance", target_id=instance.id,
         payload={**base, "channel": policy["channel"] or None,
-                 "to": policy["to"] or None, **delivery},
+                 **delivery},
         correlation_id=instance.id)
     return delivery
 

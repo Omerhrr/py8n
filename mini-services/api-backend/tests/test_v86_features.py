@@ -116,7 +116,7 @@ def test_v86_catalog_shows_nine_operators():
 
             # the topology counts are the truth of what an install builds
             assert ops["support-operator"]["topology"]["processes"] == 1
-            assert ops["support-operator"]["topology"]["workflows"] == 3
+            assert ops["support-operator"]["topology"]["workflows"] == 4  # v88: + the generated onboarding loop
             assert ops["hr-operator"]["topology"]["processes"] == 2
             assert ops["finance-operator"]["topology"]["campaign"] == 1
             assert ops["logistics-operator"]["topology"]["campaign"] == 1
@@ -150,23 +150,23 @@ def test_v86_six_operators_install_bound_and_seeded():
             expectations = {
                 "support-operator": ("Case lifecycle",
                                      {"opened": 1, "assigned": 1, "investigating": 1},
-                                     3, False),
+                                     4, False),
                 "operations-operator": ("Request lifecycle",
                                         {"submitted": 1, "in_review": 1, "approved": 1},
-                                        3, False),
+                                        4, False),
                 "hr-operator": (None,  # two machines - asserted separately
                                 {"Onboarding pipeline": {"day_one": 1, "accepted": 1, "buddied": 1},
                                  "Leave pipeline": {"requested": 1, "manager_review": 1, "approved": 1}},
-                                2, False),
+                                4, False),
                 "finance-operator": ("Invoice lifecycle",
                                      {"received": 1, "matched": 1, "approved": 1},
-                                     3, True),
+                                     4, True),
                 "procurement-operator": ("Purchase lifecycle",
                                          {"requested": 1, "quoted": 1, "approved": 1},
-                                         3, False),
+                                         4, False),
                 "logistics-operator": ("Delivery pipeline",
                                        {"placed": 1, "dispatched": 1, "in_transit": 1},
-                                       3, True),
+                                       4, True),
             }
 
             for slug, (pname, seed_counts, n_wfs, has_campaign) in expectations.items():
@@ -450,4 +450,4 @@ def test_v86_scheduler_door_escalates_the_new_machines():
 # ---------------------------------------------------------------------------
 
 def test_v86_version_pin():
-    assert settings.version == "1.87.0"
+    assert settings.version == "1.88.0"

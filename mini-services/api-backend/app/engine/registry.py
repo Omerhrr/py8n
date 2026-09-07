@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
-from .nodes.business import (  # v85 + v86 + v87: move, open, READ the business
+from .nodes.business import (  # v85-v88: move, open, read, annotate, ack, onboard
     BusinessAdvanceNode,
     BusinessStartNode,
     BusinessQueryNode,
+    BusinessAnnotateNode,
+    BusinessAckNode,
+    BusinessOnboardNode,
 )
 from .nodes.data import (
     AggregateNode,
@@ -125,6 +128,9 @@ for _cls in (
     BusinessAdvanceNode,  # v85: advance a business process instance (by id or ref)
     BusinessStartNode,    # v86: start a tracked instance (the operators' intake wiring)
     BusinessQueryNode,    # v87: read the running entities (the agents' door)
+    BusinessAnnotateNode,  # v88: write facts into an entity's memory (no move)
+    BusinessAckNode,      # v88: acknowledge the escalation episode (the door quiets)
+    BusinessOnboardNode,  # v88: bulk-onboard a dataset's rows as tracked instances
     EmailSendNode,
     RespondToWebhookNode,
     WaitForResumeNode,

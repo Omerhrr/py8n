@@ -2,7 +2,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
-  Flag, RefreshCw, ChevronRight, ListChecks, BellRing,
+  Flag, RefreshCw, ChevronRight, ListChecks, BellRing, PenLine, CheckCheck,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -12,6 +12,8 @@ import { useApi } from '~/composables/useApi'
 // claim). The machine = states + named transitions; instances = the
 // tracked entities that REMEMBER state + context; every advance is on
 // the record and emits business.state_changed (workflows react).
+// v88: the memory door (annotate - agents write facts without moving the
+// machine) and the receipt (acknowledge the escalation, the door quiets).
 
 interface ProcessDef {
   id: string; name: string; description: string
@@ -62,6 +64,19 @@ const advanceForId = ref('')
 const sweeping = ref(false)
 const sweepNote = ref('')
 
+// v88: the annotate form + the ack form (one open row at a time)
+const annotateForId = ref('')
+const annKey = ref('')
+const annValue = ref('')
+const annNote = ref('')
+const annotating = ref(false)
+const annotateError = ref('')
+const ackForId = ref('')
+const ackBy = ref('')
+const ackNote = ref('')
+const acking = ref(false)
+const ackError = ref('')
+
 // v85: the scheduler door, run by hand - the same sweep the APScheduler
 // loop ticks on its interval, on demand, for the operator who just fixed
 // a process and wants to see the door move now.
@@ -90,9 +105,23 @@ function fmtAge(sec: number): string {
 }
 
 // v87: the episode bookkeeping the door keeps on the instance's memory
-function escBook(inst: Instance): { count: number; last_delivery: string } | null {
+// v88: the ack rides the same book (the door holds acknowledged episodes)
+function escBook(inst: Instance): { count: number; last_delivery: string; acked: { by: string; at: string; note?: string } | null } | null {
   const b = inst.context?.escalations
-  return b && typeof b === 'object' ? { count: b.count || 0, last_delivery: b.last_delivery || '' } : null
+  if (!b || typeof b !== 'object') return null
+  return {
+    count: b.count || 0,
+    last_delivery: b.last_delivery || '',
+    acked: b.acked && typeof b.acked === 'object' ? b.acked : null,
+  }
+}
+
+// v88: journey rows carry paperwork too - color it by what it means
+function journeyChipClass(transition: string): string {
+  if (transition === 'annotate') return 'bg-violet-500/15 text-violet-300'
+  if (transition === 'escalation_acknowledged') return 'bg-emerald-500/15 text-emerald-300'
+  if (transition === 'escalated' || transition === 'escalate') return 'bg-amber-500/15 text-amber-300'
+  return 'bg-cyan-500/10 text-cyan-300'
 }
 
 function allowedFrom(state: string) {
@@ -162,6 +191,64 @@ function openAdvance(inst: Instance) {
   advanceTransition.value = ''
   advanceNote.value = ''
   advanceError.value = ''
+}
+
+// v88: the annotate door - facts land on the entity's memory
+function openAnnotate(inst: Instance) {
+  annotateForId.value = inst.id
+  annKey.value = ''
+  annValue.value = ''
+  annNote.value = ''
+  annotateError.value = ''
+}
+
+async function annotate(inst: Instance) {
+  if (!selected.value || !annKey.value.trim()) return
+  annotating.value = true
+  annotateError.value = ''
+  let value: any = annValue.value
+  try { value = JSON.parse(annValue.value) } catch { /* keep the raw string */ }
+  try {
+    await api.post(
+      `/processes/${selected.value.id}/instances/${inst.id}/annotate`,
+      { context_patch: { [annKey.value.trim()]: value }, note: annNote.value.trim(), actor: 'staff' })
+    annotateForId.value = ''
+    annKey.value = ''
+    annValue.value = ''
+    annNote.value = ''
+    await refreshAll()
+  } catch (e: any) {
+    annotateError.value = e?.data?.detail || e?.message || 'The annotation was refused'
+  } finally {
+    annotating.value = false
+  }
+}
+
+// v88: the receipt - acknowledge the escalation, the door quiets
+function openAck(inst: Instance) {
+  ackForId.value = inst.id
+  ackBy.value = ''
+  ackNote.value = ''
+  ackError.value = ''
+}
+
+async function ackEscalation(inst: Instance) {
+  if (!selected.value || !ackBy.value.trim()) return
+  acking.value = true
+  ackError.value = ''
+  try {
+    await api.post(
+      `/processes/${selected.value.id}/instances/${inst.id}/escalations/ack`,
+      { by: ackBy.value.trim(), note: ackNote.value.trim() })
+    ackForId.value = ''
+    ackBy.value = ''
+    ackNote.value = ''
+    await refreshAll()
+  } catch (e: any) {
+    ackError.value = e?.data?.detail || e?.message || 'The acknowledgement was refused'
+  } finally {
+    acking.value = false
+  }
 }
 
 async function advance(inst: Instance) {
@@ -361,7 +448,8 @@ onMounted(async () => {
                   <span class="truncate text-[10px] text-zinc-500">{{ inst.title }}</span>
                   <span class="ml-auto flex items-center gap-1 text-[10px] text-zinc-600"><Clock class="h-3 w-3" /> {{ fmtAge(inst.age_in_state_seconds) }} in state</span>
                   <span v-if="inst.is_stuck" class="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300">stuck</span>
-                  <span v-if="escBook(inst)" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="`last delivery: ${escBook(inst)!.last_delivery || 'n/a'}`">escalated ×{{ escBook(inst)!.count }}</span>
+                  <span v-if="escBook(inst)?.acked" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${escBook(inst)!.acked!.by}${escBook(inst)!.acked!.note ? ` - ${escBook(inst)!.acked!.note}` : ''}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack by {{ escBook(inst)!.acked!.by }}</span>
+                  <span v-else-if="escBook(inst)" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="`last delivery: ${escBook(inst)!.last_delivery || 'n/a'}`">escalated ×{{ escBook(inst)!.count }}</span>
                   <span v-if="inst.is_terminal" class="flex items-center gap-1 text-[10px] text-zinc-500"><CheckCircle2 class="h-3 w-3" /> closed</span>
                 </div>
                 <div class="mt-2 flex flex-wrap items-center gap-2">
@@ -381,7 +469,32 @@ onMounted(async () => {
                     </button>
                   </template>
                   <span v-else class="text-[10px] text-zinc-600">terminal - the machine has no outgoing moves</span>
+                  <button class="rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1 text-[10px] font-bold text-violet-300 transition hover:bg-violet-500/20" @click="annotateForId === inst.id ? (annotateForId = '') : openAnnotate(inst)">
+                    <PenLine class="mr-0.5 inline h-2.5 w-2.5" /> Annotate
+                  </button>
+                  <button v-if="escBook(inst) && !escBook(inst)!.acked" class="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-bold text-emerald-300 transition hover:bg-emerald-500/20" @click="ackForId === inst.id ? (ackForId = '') : openAck(inst)">
+                    <CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> Ack
+                  </button>
                   <button class="ml-auto text-[10px] text-cyan-400 transition hover:text-cyan-300" @click="openJourney(inst)">journey</button>
+                </div>
+                <!-- v88: the annotate form - a fact lands on the memory -->
+                <div v-if="annotateForId === inst.id" class="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-violet-500/30 bg-violet-500/5 px-2.5 py-2">
+                  <input v-model="annKey" placeholder="key (budget, address...)" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
+                  <input v-model="annValue" placeholder="value (json or text)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
+                  <input v-model="annNote" placeholder="note" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
+                  <button class="rounded-lg bg-violet-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-violet-400 disabled:opacity-50" :disabled="annotating || !annKey.trim()" @click="annotate(inst)">
+                    <Loader2 v-if="annotating" class="h-3 w-3 animate-spin" /> Remember
+                  </button>
+                  <p v-if="annotateError" class="w-full text-[10px] text-rose-300">{{ annotateError }}</p>
+                </div>
+                <!-- v88: the ack form - the handler takes it -->
+                <div v-if="ackForId === inst.id" class="mt-2 flex flex-wrap items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+                  <input v-model="ackBy" placeholder="acknowledged by" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                  <input v-model="ackNote" placeholder="note (on it, calling now...)" class="w-48 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                  <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="acking || !ackBy.trim()" @click="ackEscalation(inst)">
+                    <Loader2 v-if="acking" class="h-3 w-3 animate-spin" /> Acknowledge
+                  </button>
+                  <p v-if="ackError" class="w-full text-[10px] text-rose-300">{{ ackError }}</p>
                 </div>
                 <p v-if="advanceForId === inst.id && advanceError" class="mt-1.5 text-[10px] text-rose-300">{{ advanceError }}</p>
               </div>
@@ -399,7 +512,7 @@ onMounted(async () => {
             </div>
             <div class="mt-3 space-y-1.5">
               <div v-for="(j, i) in detail.journey || []" :key="i" class="flex items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
-                <span class="mt-0.5 rounded-full bg-cyan-500/10 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300">{{ j.transition }}</span>
+                <span class="mt-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-bold" :class="journeyChipClass(j.transition)">{{ j.transition }}</span>
                 <div class="min-w-0 flex-1">
                   <p class="text-[11px] text-zinc-300">
                     <span class="text-zinc-600">{{ j.from_state || 'start' }}</span> → <span class="font-semibold">{{ j.to_state }}</span>

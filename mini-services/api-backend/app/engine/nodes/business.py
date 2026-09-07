@@ -1,8 +1,9 @@
-"""Business nodes (v85 + v86) - workflows move the business state machine.
+"""Business nodes (v85 + v86 + v87 + v88) - workflows run the business.
 
 v84 made long-running entities first-class (BusinessProcess = the
 machine, instances = the tracked entities that remember). These nodes are
-how the rest of the platform MOVES and STARTS them:
+how the rest of the platform READS, MOVES, STARTS, ANNOTATES and
+ONBOARDS them:
 
 * business_advance (v85): a workflow reacting to a real event (call.
   ended, sms.received, form submitted, schedule tick) advances the
@@ -12,6 +13,22 @@ how the rest of the platform MOVES and STARTS them:
   instance (ref = the external key the business already tracks: the
   sender's phone, the case number, the order id). The machine watches
   the entity from the moment it exists; the escalation door inherits it.
+* business_query (v87): the read side - workflows and agents pull the
+  RUNNING entities into the flow (by process, state, ref, stuck-ness)
+  and reason over the live operation.
+* business_annotate (v88): the memory door - agents write facts DIRECTLY
+  into an entity's running context (a budget number from a call, a new
+  address from a text) without moving the machine; the write is on the
+  record and emits business.annotated so workflows can react to a FACT
+  landing (annotate -> the reactive advance the fact justifies).
+* business_ack (v88): the receipt - a workflow (usually reacting to the
+  handler's own reply: the "1" text, the "on it" email) acknowledges the
+  instance's escalation episode; the door goes quiet for the stint.
+* business_onboard (v88): the department's data on-ramp - a workflow
+  reads a dataset (the spreadsheet that just landed, the App Builder
+  rows the staff typed) and starts a tracked instance PER ROW at the
+  row's own stage, idempotently (an open instance already carrying the
+  ref skips). The machine watches the data, not just the channels.
 
 The killer wiring is ref-based: the workflow names the process and the
 external key it already tracks (the caller's number from the event's
@@ -293,3 +310,301 @@ class BusinessQueryNode(BaseNode):
             except bp_svc.ProcessError as exc:
                 raise NodeExecutionError(str(exc)) from exc
         return self._single(out)
+
+
+class BusinessAnnotateNode(BaseNode):
+    """Write facts directly into an entity's running memory (v88)."""
+
+    type = "business_annotate"
+    name = "Business Annotate"
+    description = (
+        "Writes facts DIRECTLY into a business process instance's running "
+        "memory (context) - no state change, the machine untouched. This is "
+        "the agents' memory door: what the agent learned mid-flight (a "
+        "budget number from the call, a new address from the text, a "
+        "sentiment from the transcript) lands on the entity the whole "
+        "operation reads. On the record (an 'annotate' journey row) and "
+        "emits business.annotated so workflows can react to a fact landing. "
+        "The read side is business_query; the move side is business_advance."
+    )
+    category = "actions"
+    icon = "pen-line"
+    color = "#a78bfa"
+
+    class ParamsModel(BaseModel):
+        process: str = Field(default="", description="Process name (or id) - the machine whose entity remembers")
+        instance_id: str = Field(default="", description="Direct instance id (wins over ref when set)")
+        ref: str = Field(default="", description="The external key of the instance to annotate - the most recent OPEN instance carrying this ref")
+        context_patch: dict = Field(default_factory=dict, description="The facts to merge into the entity's memory (required, non-empty)")
+        note: str = Field(default="", description="Why these facts landed (journey log)")
+        actor: str = Field(default="agent", description="Who annotated (journey log + event actor)")
+        on_missing: str = Field(
+            default="error",
+            json_schema_extra={"widget": "select", "options": list(_ON_MISSING)},
+            description="error = fail the run when no matching open instance exists; skip = continue with an honest miss",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import business_processes as bp_svc
+
+        p = self.params  # type: BusinessAnnotateNode.ParamsModel
+        process_ref = str(p.process or "").strip()
+        if not process_ref:
+            raise NodeExecutionError("a process name (or id) is required - which machine's entity remembers?")
+        if not p.instance_id.strip() and not str(p.ref).strip():
+            raise NodeExecutionError("name the instance: instance_id or ref (the external key the business tracks)")
+        if not isinstance(p.context_patch, dict) or not p.context_patch:
+            raise NodeExecutionError(
+                "context_patch is required - the facts to remember "
+                "(a non-empty object of {key: value})")
+        if p.on_missing not in _ON_MISSING:
+            raise NodeExecutionError(f"on_missing must be {'|'.join(_ON_MISSING)}")
+
+        async with AsyncSessionLocal() as session:
+            proc = await _resolve_process(session, process_ref, context.owner_id)
+            if proc is None:
+                raise NodeExecutionError(f"Process {process_ref!r} not found")
+            instance_id = p.instance_id.strip()
+            if not instance_id:
+                row = await _open_instance_by_ref(session, proc.id, str(p.ref).strip())
+                if row is None:
+                    if p.on_missing == "skip":
+                        return self._single({
+                            "annotated": False, "skipped": True,
+                            "reason": "no open instance carries this ref",
+                            "process": proc.name, "ref": str(p.ref).strip(),
+                        })
+                    raise NodeExecutionError(
+                        f"no open instance of {proc.name!r} carries ref "
+                        f"{str(p.ref).strip()!r} - start one first "
+                        "(business_start) or set on_missing=skip")
+                instance_id = row.id
+            try:
+                out = await bp_svc.annotate_instance(
+                    session, proc.id, instance_id, owner_id=context.owner_id,
+                    context_patch=dict(p.context_patch or {}),
+                    actor=p.actor or "agent", note=p.note)
+                await session.commit()  # nodes own their sessions (the dataset_write rule)
+            except bp_svc.ProcessError as exc:
+                raise NodeExecutionError(str(exc)) from exc
+        return self._single({
+            "annotated": True,
+            "instance_id": out["id"],
+            "ref": out["ref"],
+            "state": out["state"],
+            "keys": sorted(str(k) for k in (p.context_patch or {})),
+            "context": out["context"],
+            "process": proc.name,
+        })
+
+
+class BusinessAckNode(BaseNode):
+    """Acknowledge an escalation episode from a workflow (v88)."""
+
+    type = "business_ack"
+    name = "Business Acknowledge"
+    description = (
+        "Acknowledges an instance's escalation episode - the human's receipt "
+        "taken by a workflow. Usually reacts to the handler's own reply (the "
+        "'1' text, the 'on it' email): the workflow matches the replier to "
+        "the entity, acks, and the escalation door goes quiet for the rest "
+        "of that state stint. On the record (an 'escalation_acknowledged' "
+        "journey row naming who) and emits business.escalation_acknowledged. "
+        "The door must have knocked first - acknowledging silence refuses "
+        "loudly (or skips honestly with on_missing=skip)."
+    )
+    category = "actions"
+    icon = "check-check"
+    color = "#34d399"
+
+    class ParamsModel(BaseModel):
+        process: str = Field(default="", description="Process name (or id) - the machine whose escalation is acknowledged")
+        instance_id: str = Field(default="", description="Direct instance id (wins over ref when set)")
+        ref: str = Field(default="", description="The external key of the instance to acknowledge - the most recent OPEN instance carrying this ref")
+        by: str = Field(default="workflow", description="Who acknowledged (the receipt's name - journey log + event actor)")
+        note: str = Field(default="", description="The handler's own words (journey log)")
+        on_missing: str = Field(
+            default="error",
+            json_schema_extra={"widget": "select", "options": list(_ON_MISSING)},
+            description="error = fail the run when nothing matches or nothing escalated; skip = continue with an honest miss",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import business_processes as bp_svc
+
+        p = self.params  # type: BusinessAckNode.ParamsModel
+        process_ref = str(p.process or "").strip()
+        if not process_ref:
+            raise NodeExecutionError("a process name (or id) is required - which machine's escalation?")
+        if not p.instance_id.strip() and not str(p.ref).strip():
+            raise NodeExecutionError("name the instance: instance_id or ref (the external key the business tracks)")
+        if p.on_missing not in _ON_MISSING:
+            raise NodeExecutionError(f"on_missing must be {'|'.join(_ON_MISSING)}")
+
+        async with AsyncSessionLocal() as session:
+            proc = await _resolve_process(session, process_ref, context.owner_id)
+            if proc is None:
+                raise NodeExecutionError(f"Process {process_ref!r} not found")
+            instance_id = p.instance_id.strip()
+            if not instance_id:
+                row = await _open_instance_by_ref(session, proc.id, str(p.ref).strip())
+                if row is None:
+                    if p.on_missing == "skip":
+                        return self._single({
+                            "acknowledged": False, "skipped": True,
+                            "reason": "no open instance carries this ref",
+                            "process": proc.name, "ref": str(p.ref).strip(),
+                        })
+                    raise NodeExecutionError(
+                        f"no open instance of {proc.name!r} carries ref "
+                        f"{str(p.ref).strip()!r} - nothing to acknowledge")
+                instance_id = row.id
+            try:
+                out = await bp_svc.acknowledge_escalation(
+                    session, proc.id, instance_id, owner_id=context.owner_id,
+                    by=p.by or "workflow", note=p.note)
+                await session.commit()  # nodes own their sessions (the dataset_write rule)
+            except bp_svc.ProcessError as exc:
+                if p.on_missing == "skip" and "no escalation episode" in str(exc):
+                    return self._single({
+                        "acknowledged": False, "skipped": True,
+                        "reason": str(exc),
+                        "process": proc.name, "instance_id": instance_id,
+                    })
+                raise NodeExecutionError(str(exc)) from exc
+        return self._single({
+            "acknowledged": True,
+            "instance_id": out["instance"]["id"],
+            "ref": out["instance"]["ref"],
+            "state": out["instance"]["state"],
+            "acknowledged_by": out["ack"]["by"],
+            "attempt": ((out["instance"].get("context") or {})
+                        .get("escalations", {}).get("count")),
+            "process": proc.name,
+        })
+
+
+class BusinessOnboardNode(BaseNode):
+    """Bulk-onboard a dataset's rows as tracked instances (v88)."""
+
+    type = "business_onboard"
+    name = "Business Onboard"
+    description = (
+        "Starts a tracked business-process instance PER ROW of a dataset - "
+        "the department's data on-ramp. The spreadsheet that just landed "
+        "(CSV upload, API append, App Builder rows) flows into the machine: "
+        "each row's ref_column value becomes the external ref, an optional "
+        "state_column names the row's own stage (the department's data "
+        "arrives AS IT IS, not rewound to the start), title_columns build "
+        "the human title. IDEMPOTENT by design: an open instance already "
+        "carrying the ref skips (on_duplicate=skip) - re-runs and "
+        "dataset-trigger fires never double-track. Rows without a ref are "
+        "counted honestly, not silently dropped."
+    )
+    category = "actions"
+    icon = "users"
+    color = "#38bdf8"
+
+    class ParamsModel(BaseModel):
+        process: str = Field(default="", description="Process name (or id) - the machine that will track the rows")
+        dataset: str = Field(default="", description="Dataset name (or id) to onboard from")
+        ref_column: str = Field(default="", description="Column carrying the external key (phone, case number, order id)")
+        state_column: str = Field(default="", description="Optional column naming each row's own stage (must be a state of the machine)")
+        title_columns: list[str] = Field(default_factory=list, description="Columns joined into the human title (e.g. [name, company])")
+        due_in_seconds: int | None = Field(default=None, ge=1, description="The SLA promise set on every started instance")
+        limit: int = Field(default=200, ge=1, le=500, description="Max rows scanned per run (most recent first, hard cap 500)")
+        actor: str = Field(default="onboarding", description="Who onboarded (journey log)")
+        on_duplicate: str = Field(
+            default="skip",
+            json_schema_extra={"widget": "select", "options": list(_ON_MISSING)},
+            description="skip = an open instance already carrying the ref continues honestly (idempotent re-runs); error = fail the run loud",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import business_processes as bp_svc
+        from ...services import datasets as ds_svc
+
+        p = self.params  # type: BusinessOnboardNode.ParamsModel
+        process_ref = str(p.process or "").strip()
+        ds_ref = str(p.dataset or "").strip()
+        ref_col = str(p.ref_column or "").strip()
+        if not process_ref:
+            raise NodeExecutionError("a process name (or id) is required - which machine tracks?")
+        if not ds_ref:
+            raise NodeExecutionError("a dataset is required - which data onboards?")
+        if not ref_col:
+            raise NodeExecutionError("a ref_column is required - the column carrying the external key")
+        if p.on_duplicate not in _ON_MISSING:
+            raise NodeExecutionError(f"on_duplicate must be {'|'.join(_ON_MISSING)}")
+
+        async with AsyncSessionLocal() as session:
+            proc = await _resolve_process(session, process_ref, context.owner_id)
+            if proc is None:
+                raise NodeExecutionError(f"Process {process_ref!r} not found")
+            ds = await ds_svc.get_dataset(session, ds_ref, context.owner_id)
+            if ds is None:
+                raise NodeExecutionError(f"Dataset {ds_ref!r} not found")
+            if ds.row_count:
+                df = ds_svc.read_parquet_df(ds_svc.parquet_path(ds.id))
+                rows = ds_svc.jsonable_rows(df)
+            else:
+                rows = []
+            # most recent first - the rows that just landed onboard first
+            scanned = list(reversed(rows))[: max(1, min(int(p.limit), 500))]
+
+            definition = proc.definition or {}
+            states = definition.get("states") or []
+            started: list[dict] = []
+            refused: list[dict] = []
+            already: list[dict] = []
+            no_ref = 0
+            try:
+                for row in scanned:
+                    if not isinstance(row, dict):
+                        continue
+                    ref = str(row.get(ref_col) or "").strip()
+                    if not ref:
+                        no_ref += 1
+                        continue
+                    existing = await _open_instance_by_ref(session, proc.id, ref)
+                    if existing is not None:
+                        if p.on_duplicate == "error":
+                            raise NodeExecutionError(
+                                f"an open instance of {proc.name!r} already "
+                                f"carries ref {ref!r} (on_duplicate=error)")
+                        already.append({"ref": ref, "instance_id": existing.id,
+                                        "state": existing.state})
+                        continue
+                    title = " - ".join(str(row.get(c) or "").strip()
+                                       for c in (p.title_columns or [])
+                                       if str(row.get(c) or "").strip())
+                    begin = (str(row.get(p.state_column) or "").strip()
+                             if p.state_column else "") or None
+                    if begin is not None and begin not in states:
+                        # one bad row must not fail the batch - the row is
+                        # refused BY NAME, the rest onboard
+                        refused.append({"ref": ref,
+                                        "reason": f"stage {begin!r} is not a "
+                                                  f"state of this machine"})
+                        continue
+                    out = await bp_svc.start_instance(
+                        session, proc.id, owner_id=context.owner_id, ref=ref,
+                        title=title[:200], context=dict(row),
+                        due_in_seconds=p.due_in_seconds,
+                        state=begin, actor=p.actor or "onboarding")
+                    started.append({"id": out["id"], "ref": out["ref"],
+                                    "state": out["state"], "title": out["title"]})
+                await session.commit()  # nodes own their sessions (the dataset_write rule)
+            except bp_svc.ProcessError as exc:
+                raise NodeExecutionError(str(exc)) from exc
+        return self._single({
+            "process": proc.name, "dataset": ds.name,
+            "rows_scanned": len(scanned),
+            "started": len(started), "instances": started[:50],
+            "already_tracked": len(already),
+            "no_ref_rows": no_ref,
+            "refused": refused,
+        })

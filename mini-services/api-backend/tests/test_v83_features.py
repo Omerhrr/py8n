@@ -122,9 +122,9 @@ def test_v83_catalog_and_detail():
                                                       "clinic-operator"]
             assert len(shelf) == 9
             meeting = shelf[0]
-            assert meeting["topology"] == {"datasets": 1, "workflows": 1, "agents": 1,
+            assert meeting["topology"] == {"datasets": 1, "workflows": 2, "agents": 1,
                                            "rooms": 1, "queues": 1, "campaign": 0,
-                                           "processes": 1, "dashboard": 1}  # v87: the Meeting lifecycle ships pre-wired
+                                           "processes": 1, "dashboard": 1}  # v87: the machine ships pre-wired; v88: + the onboarding loop
             sales = shelf[1]
             assert sales["topology"]["campaign"] == 1
             assert sales["topology"]["datasets"] == 3  # CRM + Lead events + Sales FAQ
@@ -419,4 +419,4 @@ def test_v83_install_refusals_and_double_install():
 # ---------------------------------------------------------------------------
 
 def test_v83_version_pin():
-    assert settings.version == "1.87.0"
+    assert settings.version == "1.88.0"

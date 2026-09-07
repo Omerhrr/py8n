@@ -1607,12 +1607,65 @@ def _describe_pack_policy(pspec: dict) -> str:
     return escalations_svc.describe_policy(_policy_for(pspec))
 
 
+def _onboarding_loop(pspec: dict) -> dict | None:
+    """v88: the department's DATA on-ramp - one workflow per machine,
+    generated from the pack's own seed spec. The channel intakes
+    (sms.received, call.ended) onboard the entities that ARRIVE through a
+    channel; this loop onboards the entities that arrive as DATA: the
+    spreadsheet that just landed, the rows the staff typed in the App
+    Builder, the bulk import appended over the API. A dataset-trigger
+    watches the machine's own intake dataset; every new version wakes the
+    business_onboard step, which starts one tracked instance PER ROW at
+    the row's own stage - idempotently (an open instance already carrying
+    the ref skips, so the install-time seeding and the loop never fight).
+    """
+    ds = str(pspec.get("seed_from_dataset") or "").strip()
+    if not ds:
+        return None
+    machine = str(pspec.get("name") or "").strip()
+    due_s = pspec.get("due_in_seconds")
+    return {
+        "name": f"{machine} onboarding",
+        "description": (
+            f"The data on-ramp: new rows landing in {ds!r} onboard as tracked "
+            f"instances of {machine!r} at each row's own stage - idempotent "
+            "(already-tracked refs skip), so re-runs and trigger fires never "
+            "double-track. Fires on dataset versions; run it by hand after a "
+            "bulk import too."),
+        "trigger": {"type": "dataset_trigger",
+                    "params": {"dataset": ds, "poll_seconds": 60}},
+        "steps": [
+            {"type": "business_onboard",
+             "name": f"Onboard rows into {machine}",
+             "params": {"process": machine,
+                        "dataset": ds,
+                        "ref_column": str(pspec.get("ref_column") or ""),
+                        "state_column": str(pspec.get("state_column") or ""),
+                        "title_columns": [str(c) for c in (pspec.get("title_from") or [])],
+                        "due_in_seconds": int(due_s) if due_s else None,
+                        "on_duplicate": "skip",
+                        "actor": "onboarding-loop"}},
+        ],
+    }
+
+
 OPERATORS: list[dict] = [
     _MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR,
     _SUPPORT_OPERATOR, _OPERATIONS_OPERATOR, _HR_OPERATOR,
     _FINANCE_OPERATOR, _PROCUREMENT_OPERATOR, _LOGISTICS_OPERATOR,
 ]
 OPERATORS_BY_SLUG = {op["slug"]: op for op in OPERATORS}
+
+# v88: BROADENING THE DEPARTMENT ONBOARDING LOOPS - every machine gets its
+# data on-ramp beside the channel intakes (generated, never hand-copied:
+# the loop is built from the same seed spec the install seeds with, so
+# the two doors can never drift apart)
+for _op in OPERATORS:
+    for _pspec in (_op.get("processes") or []):
+        _loop = _onboarding_loop(_pspec)
+        if _loop is not None:
+            _op["workflows"].append(_loop)
+del _op, _pspec, _loop
 
 
 def operator_catalog() -> dict:
@@ -1650,7 +1703,9 @@ def operator_detail(slug: str) -> dict:
                           "columns": list(d["columns"]), "rows": len(d["rows"])}
                          for d in op["datasets"]],
             "workflows": [{"name": w["name"], "description": w["description"],
-                           "trigger": w["trigger"]["params"].get("event_type", "")}
+                           "trigger": (w["trigger"]["params"].get("event_type")
+                                       or (f"dataset:{w['trigger']['params'].get('dataset')}"
+                                           if w["trigger"]["type"] == "dataset_trigger" else ""))}
                           for w in op["workflows"]],
             "processes": [{"name": p["name"],
                            "states": p["definition"]["states"],
@@ -1848,13 +1903,14 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
             ref = str(params.get("dataset") or "").strip()
             if ref in ds_by_name:
                 params["dataset"] = ds_by_name[ref]["name"]
-            # v85 + v86: business_advance AND business_start steps resolve
-            # the process by NAME in the spec, but bind to the BUILT
-            # process id (a second install of the same operator must move
-            # and track ITS pipeline, never the first's)
+            # v85 + v86 + v88: business_advance, business_start AND
+            # business_onboard steps resolve the process by NAME in the
+            # spec, but bind to the BUILT process id (a second install of
+            # the same operator must move, track and onboard ITS pipeline,
+            # never the first's)
             proc_ref = str(params.get("process") or "").strip()
             if (proc_ref and str(s.get("type") or "")
-                    in ("business_advance", "business_start")):
+                    in ("business_advance", "business_start", "business_onboard")):
                 hit = proc_by_name.get(proc_ref)
                 if not hit:
                     raise OperatorError(
