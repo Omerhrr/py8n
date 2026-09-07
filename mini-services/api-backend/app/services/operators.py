@@ -1831,6 +1831,37 @@ for _op in OPERATORS:
 del _op, _pspec, _loop
 
 
+def _catalog_journeys(slug: str) -> list[dict]:
+    """v91: the journey legs ON the shelf card - what installing this
+    operator wires into the cross-department chains. Two directions,
+    both honest: 'out' = this operator's machine lands on a state and the
+    next department's leg opens ITSELF; 'in' = another operator's machine
+    hands work TO this one (the leg completes when BOTH are installed -
+    targets resolve by name at fire time, so a missing operator is an
+    honest skip, never a broken install)."""
+    own = {p["name"] for p in (OPERATORS_BY_SLUG[slug].get("processes") or [])}
+    owner_of: dict[str, str] = {}
+    for op in OPERATORS:
+        for p in (op.get("processes") or []):
+            owner_of[p["name"]] = op["slug"]
+    legs: list[dict] = []
+    for src_name, js in _JOURNEYS.items():
+        for j in js:
+            open_spec = j.get("open") or {}
+            target = str(open_spec.get("process") or "")
+            if src_name in own:
+                legs.append({"direction": "out", "from_process": src_name,
+                             "from_operator": owner_of.get(src_name, ""),
+                             "on_state": j["on_state"], "opens": target,
+                             "due_in_seconds": open_spec.get("due_in_seconds")})
+            elif target in own:
+                legs.append({"direction": "in", "from_process": src_name,
+                             "from_operator": owner_of.get(src_name, ""),
+                             "on_state": j["on_state"], "opens": target,
+                             "due_in_seconds": open_spec.get("due_in_seconds")})
+    return legs
+
+
 def operator_catalog() -> dict:
     """The operators shelf - what each install BUILDS, counted honestly."""
     return {
@@ -1838,6 +1869,7 @@ def operator_catalog() -> dict:
             {"slug": op["slug"], "name": op["name"], "tagline": op["tagline"],
              "category": op["category"], "icon": op["icon"], "color": op["color"],
              "outcomes": list(op["outcomes"]),
+             "journeys": _catalog_journeys(op["slug"]),
              "topology": {
                  "datasets": len(op["datasets"]),
                  "workflows": len(op["workflows"]),

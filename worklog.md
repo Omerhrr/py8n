@@ -1383,3 +1383,94 @@ Stage Summary:
 - Py8n v1.90.0 on origin/main: the escalation door's quiet rhythm now REACHES someone - the daily digest lands in a real inbox with a subject line worth scanning - and the departments form CHAINS: a deal won on Sales opens onboarding on Operations, a handoff there opens the invoice on Finance; an order placed on Procurement opens the delivery on Logistics, a delivery confirmed there opens the vendor's bill on Finance. One ref threads each chain; every leg carries its own SLA; every hop is business.journey_opened on the record. "A runtime for business systems" - the systems now hand work to each other and tell a human when they stall.
 - Deliverables: code + tests + dev sink + smoke pushed; repo worklog Task 75 + overview doc (download/py8n-overview.md) updated.
 - Next candidates: the overdue-attention view on the frontend (everything the door is holding, one board), escalation policy editing from /processes (the shelf shows policies; nothing edits them yet), or journey visibility on the marketplace shelf cards (the chains are honest in the API; the shelf could draw them).
+
+---
+Task 76 (v91 - the boards catch up with the door)
+
+"proceed with the overdue-attention view on the frontend, escalation-policy
+editing from /processes, and journey visibility on marketplace cards."
+
+THE OVERDUE-ATTENTION VIEW: attention_feed (business_processes.py) + GET
+/processes/attention (declared BEFORE /{process_id} so the word is never
+eaten as an id) - every OPEN instance past its SLA across ALL machines,
+most-overdue first, each row carrying the door's escalation book (count,
+last_delivery, last_detail, acked_by, snooze_until), the machine's policy
+line, and the journey_leg flag; terminal states skipped even when the clock
+ran on; owner-scoped like every read; the clock compared in PYTHON per the
+house SQLite naive/aware discipline (the door's pattern - a naive/aware
+comparison in a WHERE clause lies); the clock injectable (now=) for tests.
+Frontend: an always-on panel on /processes above the grid (rose when
+something is past SLA + the count across machines, emerald "all clear"
+otherwise), rows with state/ref/title/process/overdue + book chips
+(ack / digest xN / escalated xN) + the journey-leg chip + an "open machine"
+jump; the feed re-reads on every mutation (refreshAll) and on mount.
+
+ESCALATION-POLICY EDITING: update_escalation_policy + PATCH
+/processes/{id}/escalation-policy (PolicyUpdate body: policy + actor) - the
+same loud validation the definition carries (validate_escalation_policy:
+unknown keys, unknown channels, the two clocks, to-vs-handlers); policy=null
+removes it (v85 semantics return: one knock per stint, event-only); the
+stored definition is patched on a FRESH dict (the JSON column is never
+mutated in place) so journeys survive; business.policy_updated emitted
+(source business, target process, payload names the new policy + summary)
+and registered in the events contracts. The door reads the policy fresh at
+every sweep (policy_from_definition in escalate_stuck), so the new rhythm
+rules the NEXT tick - cadence changes AND knock->digest switches - while
+the running instances and their episodes are untouched.
+  THE V91 DIGEST_GATE FIX (found by the test, real bug): an item switching
+knock->digest mid-episode has a book WITHOUT first_at (its knocks kept
+last_at) - digest_gate re-anchored pending_since to now on every tick, so
+the window NEVER elapsed and the digest never sent. fresh is now about the
+DIGEST clock: state_fresh OR no first_at -> the door anchors the book at
+the switch (the window starts when the digest rhythm starts; the cap counts
+digest appearances - record_digest_book(count=0) preserves a riding ack),
+anchor_only marks that the breach was already announced (the knock
+episode's business.stuck) so the door does not emit it twice; a knock-era
+ack still holds through the switch (the receipt rides the same episode).
+Frontend: an Edit/Add policy button on the machine header (indigo) opening
+a form - channel select (event-only/email/sms/whatsapp/telegram/discord),
+deliver-to, mode select (knock/digest), cadence by mode (min 60s), max
+repeats, message template - Save + Remove, errors surfaced loud.
+
+JOURNEY VISIBILITY ON THE SHELF: _catalog_journeys + journeys on
+operator_catalog() - per operator, the cross-department legs as
+{direction: out|in, from_process, from_operator, on_state, opens,
+due_in_seconds}; out = this operator's machine fires the leg, in = another
+operator feeds this one; every leg appears exactly twice (out on the
+source's card, in on the target's card; 5 chains -> 10 legs). Frontend:
+fuchsia chips (out: "won -> Customer onboarding") and violet fed-by chips
+(in: "fed by Lead pipeline") on the operator cards, outbound first, capped
+at 3 with "+N more", tooltips naming the fire-state, the target and the
+leg's own SLA promise.
+
+SIDEBAR v1.91 (68 node types - no new nodes). config 1.91.0.
+
+TESTS: tests/test_v91_features.py (5 tests) - the policy edit round-trip
+(born without, gain one, persisted, the loud refusals including the
+two-clocks floor, knock->digest, remove with journeys surviving, the three
+policy_updated events naming each summary, unknown process refused); the
+edit ruling the next tick through the injectable clock (attempt 1, too_soon
+under the OLD 3600s cadence, re-tune to 60s, attempt 2 fires where the old
+cadence still held; then knock->digest mid-episode: anchor pending, window
+elapses, ONE summary, honest skip); the attention feed (two machines,
+most-overdue ordering, the book on the knocked row, escalation None on the
+unknocked one, the ack visible on the row while still on the feed, the
+closed entity dropped, limit=1, another owner's feed empty); the catalog
+legs (sales out, finance 3x in, operations in+out, logistics in+out with
+the 5-day SLA surfaced, 10 legs total); version pin. Version pins v79-v90
+bumped to 1.91.0. Fixed live during the run: the two-clocks assertion
+tripged the v89 default-tolerance (digest_every_seconds=86400 with mode
+knock is the OTHER clock's default, treated as unset - the refusal needs a
+non-default value); the door timeline anchored to the real clock
+(base=datetime.now, first knock at base+2 past the 1s SLA).
+
+VERIFIED: 518 passed + 7 deliberate skips (513 -> 518, no regressions -
+the digest_gate change re-ran v89+v90 digest tests green); Nuxt build
+green; scripts/smoke_v91_live.py 3/3 green on a real uvicorn :8218 + the
+dev SMTP sink - (1) the attention view listing two overdue instances
+across two machines with the journey-leg flag and the terminal drop, (2)
+the policy edit end to end on the REAL clock: attempt 1 delivered, the
+board re-tunes 3600s -> 60s, the door re-knocks attempt 2 over the actual
+SMTP wire, knock->digest mid-episode anchors the window and ONE digest
+crosses the wire with the scan-line subject, (3) the shelf legs (10 across
+the shelf, finance fed by three departments).

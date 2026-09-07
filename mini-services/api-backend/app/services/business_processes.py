@@ -248,6 +248,47 @@ async def get_process(db: AsyncSession, process_id: str, owner_id: str | None) -
     return process_out(p, instance_counts=counts)
 
 
+async def update_escalation_policy(db: AsyncSession, process_id: str, *,
+                                   owner_id: str | None, policy: dict | None,
+                                   actor: str = "") -> dict:
+    """v91: the policy is EDITABLE after install - the escalation door
+    reads it fresh from the definition at every sweep
+    (policy_from_definition inside escalate_stuck), so the new rhythm -
+    channel, target, cadence, cap, knock <-> digest - takes effect on the
+    NEXT tick with no restart and no migration. The instances and their
+    running episodes are untouched: an episode mid-flight continues under
+    the new rules (the same deal the door always offered hand-edited
+    definitions, now a first-class door with the same loud validation).
+
+    policy=None removes the policy - the machine falls back to the v85
+    semantics (one knock per state stint, event-only)."""
+    p = await _load_process(db, process_id, owner_id)
+    try:
+        clean = escalations_svc.validate_escalation_policy(policy)
+    except escalations_svc.EscalationPolicyError as exc:
+        raise ProcessError(str(exc)) from exc
+    d = dict(p.definition or {})
+    if clean:
+        d["escalation_policy"] = clean
+    else:
+        d.pop("escalation_policy", None)
+    # fresh dict - the JSON column is never mutated in place
+    p.definition = d
+    await db.flush()
+    await db.refresh(p)
+    from . import system_events as events_svc
+
+    await events_svc.emit(
+        db, p.owner_id, "business.policy_updated", source="business",
+        actor=(actor or "api")[:140], target_type="process", target_id=p.id,
+        payload={"process_id": p.id, "process_name": p.name,
+                 "escalation_policy": clean,
+                 "escalation_summary": escalations_svc.describe_policy(
+                     escalations_svc.policy_from_definition(d))})
+    counts = await _instance_counts(db, p.id)
+    return process_out(p, instance_counts=counts)
+
+
 async def _instance_counts(db: AsyncSession, process_id: str) -> dict:
     rows = (await db.execute(
         select(BusinessProcessInstance.state, func.count(BusinessProcessInstance.id))
@@ -910,6 +951,79 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
 
 
 # ---------------------------------------------------------------------------
+# the attention feed (v91) - the overdue-attention view across ALL machines
+# ---------------------------------------------------------------------------
+
+async def attention_feed(db: AsyncSession, owner_id: str | None, *,
+                         limit: int = 200,
+                         now: datetime | None = None) -> dict:
+    """One panel answering 'what needs a human today': every OPEN instance
+    past its SLA across ALL machines, most-overdue first, each row
+    carrying the escalation book the door keeps (attempts, last delivery,
+    the ack) + the machine's own policy line + whether the entity was
+    BORN from a cross-operator journey leg. Owner-scoped like every read;
+    terminal states are skipped even when the clock ran on (a closed
+    entity is not asking for attention)."""
+    now = _aware(now) or _now()
+    # the house pattern (same as the door): filter open + has-due-at in
+    # SQL, but compare the CLOCK in Python - SQLite returns naive
+    # datetimes and a naive/aware comparison in a WHERE clause lies
+    q = (select(BusinessProcessInstance, BusinessProcess)
+         .join(BusinessProcess,
+               BusinessProcessInstance.process_id == BusinessProcess.id)
+         .where(BusinessProcessInstance.ended_at.is_(None),
+                BusinessProcessInstance.due_at.is_not(None)))
+    if owner_id is not None:
+        q = q.where(BusinessProcessInstance.owner_id.in_((owner_id, None)),
+                    BusinessProcess.owner_id.in_((owner_id, None)))
+    rows = (await db.execute(q)).all()
+    picked: list[tuple[BusinessProcessInstance, BusinessProcess, float]] = []
+    for row, proc in rows:
+        due = _aware(row.due_at)
+        if due is None:
+            continue
+        overdue = (now - due).total_seconds()
+        if overdue <= 0:
+            continue  # the SLA still holds
+        definition = proc.definition or {}
+        if row.state in _terminal_states(definition):
+            continue  # a closed entity is not asking for attention
+        picked.append((row, proc, overdue))
+    picked.sort(key=lambda t: t[2], reverse=True)  # most overdue first
+    picked = picked[:max(1, min(int(limit or 200), 500))]
+    out: list[dict] = []
+    for row, proc, overdue in picked:
+        entered = _aware(row.entered_state_at)
+        book = escalations_svc.episode_book(row)
+        acked = book.get("acked") if isinstance(book.get("acked"), dict) else None
+        ctx = row.context or {}
+        out.append({
+            "process_id": proc.id, "process_name": proc.name,
+            "instance_id": row.id, "ref": row.ref, "title": row.title,
+            "state": row.state,
+            "entered_state_at": row.entered_state_at.isoformat()
+                                if row.entered_state_at else None,
+            "due_at": row.due_at.isoformat() if row.due_at else None,
+            "overdue_seconds": round(overdue),
+            "age_in_state_seconds":
+                round((now - entered).total_seconds()) if entered else 0,
+            "escalation": {
+                "count": int(book.get("count") or 0),
+                "last_delivery": str(book.get("last_delivery") or ""),
+                "last_detail": str(book.get("last_detail") or ""),
+                "acked_by": str((acked or {}).get("by") or ""),
+                "snooze_until": str((acked or {}).get("snooze_until") or ""),
+            } if book else None,
+            "escalation_summary": escalations_svc.describe_policy(
+                escalations_svc.policy_from_definition(proc.definition or {})),
+            "journey_leg": bool(ctx.get("journey")),
+        })
+    return {"attention": out, "count": len(out),
+            "machines": len({r["process_id"] for r in out}),
+            "now": now.isoformat()}
+
+
+# ---------------------------------------------------------------------------
 # the escalation door (v85) - the scheduler's sweep over stuck instances
 # ---------------------------------------------------------------------------
 
@@ -1067,16 +1181,21 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
             if gate.get("fresh"):
                 # first observation of THIS episode: the breach itself is
                 # a fact worth one event - after that the digest carries
-                # the beat (no per-tick noise; that is the whole point)
+                # the beat (no per-tick noise; that is the whole point).
+                # v91: an item that switched from knock mode mid-episode
+                # only anchors its digest CLOCK here (anchor_only) - the
+                # breach was already announced by the knock episode's
+                # business.stuck; announcing it twice is noise, not fact.
                 escalations_svc.record_digest_book(db, row, count=0, now=now)
-                from . import system_events as events_svc
+                if not gate.get("anchor_only"):
+                    from . import system_events as events_svc
 
-                await events_svc.emit(
-                    db, row.owner_id, "business.stuck", source="business",
-                    actor=actor, target_type="process_instance",
-                    target_id=row.id,
-                    payload={**breach_payload, "mode": "digest"},
-                    correlation_id=row.id)
+                    await events_svc.emit(
+                        db, row.owner_id, "business.stuck", source="business",
+                        actor=actor, target_type="process_instance",
+                        target_id=row.id,
+                        payload={**breach_payload, "mode": "digest"},
+                        correlation_id=row.id)
             buckets.setdefault((row.owner_id, row.process_id), []).append(
                 {"row": row, "policy": policy, "attempt": gate["attempt"],
                  "pending_since": gate["pending_since"], "overdue": overdue,

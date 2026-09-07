@@ -17,8 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
-    create_process, get_instance, get_process, list_instances, list_processes,
-    process_analytics, start_instance,
+    attention_feed, create_process, get_instance, get_process, list_instances,
+    list_processes, process_analytics, start_instance, update_escalation_policy,
 )
 from .auth import get_optional_user
 
@@ -71,6 +71,16 @@ async def create(body: ProcessCreate, user=Depends(get_optional_user),
 @router.get("")
 async def list_all(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     return {"processes": await list_processes(db, getattr(user, "id", None))}
+
+
+@router.get("/attention")
+async def attention(limit: int = 200, user=Depends(get_optional_user),
+                    db: AsyncSession = Depends(get_db)):
+    """v91: the overdue-attention view - every OPEN instance past its SLA
+    across ALL machines, most-overdue first, with the door's escalation
+    book per row. Declared BEFORE /{process_id} so the word 'attention'
+    is never eaten as a process id."""
+    return await attention_feed(db, getattr(user, "id", None), limit=limit)
 
 
 @router.get("/{process_id}")
@@ -165,6 +175,35 @@ async def annotate(process_id: str, instance_id: str, body: InstanceAnnotate,
             context_patch=body.context_patch,
             actor=body.actor or (getattr(user, "id", None) or "api"),
             note=body.note)
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
+
+
+class PolicyUpdate(BaseModel):
+    """v91: the escalation policy, edited from the board - the same loud
+    validation the definition carries (unknown keys / channels, the two
+    clocks, the to-vs-handlers mutex all refuse); null removes the policy
+    (the machine falls back to one knock per stint, event-only)."""
+
+    policy: dict | None = Field(default=None, description=(
+        "the new escalation_policy (channel, to|handlers, mode, cadence, "
+        "max_repeats, message_template) - null removes it"))
+    actor: str = Field(default="", description="who changed the rhythm")
+
+
+@router.patch("/{process_id}/escalation-policy")
+async def edit_policy(process_id: str, body: PolicyUpdate,
+                      user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    """v91: edit (or remove) the machine's escalation policy - the door
+    reads the policy fresh at every sweep, so the new rhythm takes effect
+    on the next tick without touching the running instances."""
+    try:
+        out = await update_escalation_policy(
+            db, process_id, owner_id=getattr(user, "id", None),
+            policy=body.policy, actor=body.actor)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

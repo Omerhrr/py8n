@@ -23,6 +23,11 @@ import { useApi } from '~/composables/useApi'
 interface OperatorSummary {
   slug: string; name: string; tagline: string; category: string
   icon: string; color: string; outcomes: string[]
+  // v91: the cross-department journey legs on the shelf card - 'out' =
+  // this operator's machine opens the next department's leg itself;
+  // 'in' = another operator hands work to this one
+  journeys: { direction: string; from_process: string; from_operator: string
+    on_state: string; opens: string; due_in_seconds?: number | null }[]
   topology: { datasets: number; workflows: number; agents: number
     rooms: number; queues: number; campaign: number; dashboard: number
     processes: number }
@@ -72,6 +77,20 @@ const OP_ICONS: Record<string, any> = {
 }
 function opIcon(icon: string) {
   return OP_ICONS[icon] || Building2
+}
+
+// v91: the journey legs shown on a card - outbound first (what installing
+// this operator HANDS OFF), then inbound (who feeds it), capped at 3
+function cardJourneys(op: OperatorSummary) {
+  const legs = [...(op.journeys || [])].sort(
+    (a, b) => (a.direction === 'out' ? 0 : 1) - (b.direction === 'out' ? 0 : 1))
+  return legs.slice(0, 3)
+}
+function cardJourneyTitle(j: { direction: string; from_process: string; on_state: string; opens: string; due_in_seconds?: number | null }): string {
+  const sla = j.due_in_seconds ? ` The opened leg carries its own ${Math.round(j.due_in_seconds / 3600)}h SLA.` : ''
+  return j.direction === 'out'
+    ? `when ${j.from_process} lands on '${j.on_state}', a case opens itself on ${j.opens}.${sla}`
+    : `when ${j.from_process} lands on '${j.on_state}', this operator's ${j.opens} opens itself - install both and the chain completes.${sla}`
 }
 
 async function loadOperators() {
@@ -247,6 +266,18 @@ onMounted(async () => {
                 <span v-if="op.topology.campaign" class="rounded-full bg-violet-500/10 px-2 py-0.5 text-[9px] font-semibold text-violet-300">campaign</span>
                 <span v-if="op.topology.processes" class="rounded-full bg-indigo-500/10 px-2 py-0.5 text-[9px] font-semibold text-indigo-300">{{ op.topology.processes }} pre-wired process{{ op.topology.processes === 1 ? '' : 'es' }}</span>
                 <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-[9px] font-semibold text-emerald-300">staff dashboard</span>
+              </div>
+              <!-- v91: the chains - this operator's legs in the cross-department journeys -->
+              <div v-if="cardJourneys(op).length" class="mt-2 flex flex-wrap items-center gap-1">
+                <span
+                  v-for="j in cardJourneys(op)" :key="`${j.direction}-${j.from_process}-${j.opens}`"
+                  class="flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-semibold"
+                  :class="j.direction === 'out' ? 'bg-fuchsia-500/10 text-fuchsia-300' : 'bg-violet-500/10 text-violet-300'"
+                  :title="cardJourneyTitle(j)">
+                  <template v-if="j.direction === 'out'">{{ j.on_state }} → {{ j.opens }}</template>
+                  <template v-else>fed by {{ j.from_process }}</template>
+                </span>
+                <span v-if="(op.journeys || []).length > 3" class="text-[9px] text-zinc-600">+{{ op.journeys.length - 3 }} more leg{{ op.journeys.length - 3 === 1 ? '' : 's' }}</span>
               </div>
               <div class="mt-3 space-y-1">
                 <span v-for="o in op.outcomes.slice(0, 4)" :key="o" class="flex items-center gap-1 text-[10px] text-zinc-400">

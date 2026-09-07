@@ -495,12 +495,23 @@ def digest_gate(instance: BusinessProcessInstance, policy: dict,
       listed it (digest_last_at). The bucket is due when its OLDEST
       pending_since has waited digest_every_seconds; a fresh candidate
       (``fresh``) must have its book written NOW or the window would
-      restart every tick and never elapse."""
+      restart every tick and never elapse.
+
+    v91: ``fresh`` is about the digest CLOCK - an item that arrived from
+    knock mode mid-episode (a live policy switch) has a book without
+    first_at, so it joins as fresh: the door anchors its book (the
+    window starts when the digest rhythm starts; the cap counts digest
+    appearances) with ``anchor_only`` naming the fact that the breach
+    itself was already announced by the knock episode."""
     now = _aware(now) or _now()
     book = episode_book(instance)
-    fresh = book.get("state") != instance.state
-    count = 0 if fresh else int(book.get("count") or 0)
-    if not fresh and isinstance(book.get("acked"), dict):
+    state_fresh = book.get("state") != instance.state
+    count = 0 if state_fresh else int(book.get("count") or 0)
+    # the human's acknowledgement outranks the cadence and the cap -
+    # until the snooze runs out (v89: the hold is a loan, not a pardon).
+    # v91: it survives a mid-episode knock -> digest switch too (the
+    # receipt rides the same episode - the switch does not un-take it).
+    if not state_fresh and isinstance(book.get("acked"), dict):
         acked = book["acked"]
         until = _parse_iso(acked.get("snooze_until"))
         if until is None or now < until:
@@ -513,12 +524,26 @@ def digest_gate(instance: BusinessProcessInstance, policy: dict,
                     (until - now).total_seconds())
             return hold
         # the snooze ran out - the item rides the next digest
+    # v91: ``fresh`` is about the DIGEST clock, not just the state - the
+    # anchor the window rides on is first_at, and an item switching from
+    # knock mode mid-episode has a book WITHOUT one (its knocks kept
+    # last_at). Treating it as fresh means the door anchors its book at
+    # the switch (the window starts when the digest rhythm starts) and
+    # the digest cap counts digest appearances - without this the
+    # pending_since re-anchored to now on every tick and the window
+    # NEVER elapsed. ``anchor_only`` says the breach was already
+    # announced (the knock episode's business.stuck) - only the clock is
+    # new, not the fact.
+    fresh = state_fresh or book.get("first_at") is None
+    anchor_only = fresh and not state_fresh
+    count = 0 if fresh else count
     if count >= 1 + policy["max_repeats"]:
         return {"action": "hold", "reason": "episode_complete", "attempts": count}
     pending_since = (None if fresh
                      else _parse_iso(book.get("digest_last_at"))
                      or _parse_iso(book.get("first_at")))
     return {"action": "candidate", "attempt": count + 1, "fresh": fresh,
+            **({"anchor_only": True} if anchor_only else {}),
             "pending_since": (pending_since or now).isoformat(),
             "waited_seconds": round((now - (pending_since or now)).total_seconds())}
 

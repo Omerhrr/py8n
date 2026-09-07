@@ -3,6 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import {
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
   Flag, RefreshCw, ChevronRight, ListChecks, BellRing, PenLine, CheckCheck,
+  Siren, SlidersHorizontal,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -14,13 +15,15 @@ import { useApi } from '~/composables/useApi'
 // the record and emits business.state_changed (workflows react).
 // v88: the memory door (annotate - agents write facts without moving the
 // machine) and the receipt (acknowledge the escalation, the door quiets).
+// v91: the attention view (everything past SLA across ALL machines) and
+// the policy editor (the door's rhythm is editable from the board).
 
 interface ProcessDef {
   id: string; name: string; description: string
   states: string[]; initial: string
   transitions: { name: string; from: string; to: string; description?: string }[]
   terminal_states: string[]
-  escalation_policy: { channel: string; to: string; mode?: string
+  escalation_policy: { channel: string; to: string; handlers?: string[]; mode?: string
     digest_every_seconds?: number; repeat_every_seconds: number
     max_repeats: number; message_template: string } | null
   escalation_summary: string
@@ -41,6 +44,19 @@ interface Analytics {
   mean_time_in_state_seconds: Record<string, number>
   advance_counts: Record<string, number>
   terminal_states: string[]
+}
+
+// v91: one row of the overdue-attention view - an open instance past its
+// SLA on ANY machine, with the door's escalation book attached
+interface AttentionRow {
+  process_id: string; process_name: string
+  instance_id: string; ref: string; title: string; state: string
+  due_at: string | null; overdue_seconds: number
+  age_in_state_seconds: number
+  escalation: { count: number; last_delivery: string; last_detail: string
+    acked_by: string; snooze_until: string } | null
+  escalation_summary: string
+  journey_leg: boolean
 }
 
 const { api } = useApi()
@@ -79,6 +95,104 @@ const ackNote = ref('')
 const ackSnooze = ref('')  // v89: hours - the hold is a loan, then the door re-knocks
 const acking = ref(false)
 const ackError = ref('')
+
+// v91: the attention view - everything past SLA across ALL machines,
+// most overdue first; loaded on mount and after every mutation
+const attention = ref<AttentionRow[]>([])
+const attentionMachines = ref(0)
+const attentionLoading = ref(false)
+
+async function loadAttention() {
+  attentionLoading.value = true
+  try {
+    const res = await api.get<{ attention: AttentionRow[]; count: number; machines: number }>(
+      '/processes/attention')
+    attention.value = res.attention
+    attentionMachines.value = res.machines
+  } catch {
+    // the panel stays honest - an unreachable feed is an empty one here,
+    // the page error line is reserved for the machines themselves
+  } finally {
+    attentionLoading.value = false
+  }
+}
+
+// jump from an attention row to its owning machine (and its tracked list)
+async function openAttentionMachine(row: AttentionRow) {
+  const p = processes.value.find(x => x.id === row.process_id)
+  if (p) await openProcess(p)
+}
+
+// v91: the policy editor - the door reads the policy fresh at every
+// sweep, so what is saved here rules the NEXT tick
+const policyOpen = ref(false)
+const polChannel = ref('')
+const polTo = ref('')
+const polMode = ref<'knock' | 'digest'>('knock')
+const polCadence = ref('')   // seconds - repeat_every_seconds or digest_every_seconds by mode
+const polMaxRepeats = ref('')
+const polTemplate = ref('')
+const policySaving = ref(false)
+const policyError = ref('')
+
+function openPolicyEditor() {
+  const pol = selected.value?.escalation_policy
+  polChannel.value = pol?.channel || ''
+  polTo.value = pol?.to || ''
+  polMode.value = (pol?.mode as 'knock' | 'digest') || 'knock'
+  polCadence.value = pol
+    ? String(pol.mode === 'digest'
+        ? (pol.digest_every_seconds ?? 86400)
+        : (pol.repeat_every_seconds ?? 3600))
+    : ''
+  polMaxRepeats.value = pol ? String(pol.max_repeats ?? 3) : ''
+  polTemplate.value = pol?.message_template || ''
+  policyError.value = ''
+  policyOpen.value = true
+}
+
+async function savePolicy() {
+  if (!selected.value) return
+  policySaving.value = true
+  policyError.value = ''
+  const cadence = polCadence.value.trim() ? Number(polCadence.value) : undefined
+  const policy: Record<string, any> = {
+    channel: polChannel.value,
+    to: polTo.value.trim(),
+    mode: polMode.value,
+    max_repeats: polMaxRepeats.value.trim() ? Number(polMaxRepeats.value) : undefined,
+  }
+  if (polMode.value === 'digest') policy.digest_every_seconds = cadence
+  else policy.repeat_every_seconds = cadence
+  if (polTemplate.value.trim()) policy.message_template = polTemplate.value.trim()
+  try {
+    await api.patch(`/processes/${selected.value.id}/escalation-policy`,
+      { policy, actor: 'staff' })
+    policyOpen.value = false
+    await refreshAll()
+    await loadAttention()
+  } catch (e: any) {
+    policyError.value = e?.data?.detail || e?.message || 'The policy was refused'
+  } finally {
+    policySaving.value = false
+  }
+}
+
+async function removePolicy() {
+  if (!selected.value) return
+  policySaving.value = true
+  policyError.value = ''
+  try {
+    await api.patch(`/processes/${selected.value.id}/escalation-policy`,
+      { policy: null, actor: 'staff' })
+    policyOpen.value = false
+    await refreshAll()
+  } catch (e: any) {
+    policyError.value = e?.data?.detail || e?.message || 'The policy could not be removed'
+  } finally {
+    policySaving.value = false
+  }
+}
 
 // v85: the scheduler door, run by hand - the same sweep the APScheduler
 // loop ticks on its interval, on demand, for the operator who just fixed
@@ -144,6 +258,7 @@ async function refreshAll() {
   selected.value = p
   instances.value = inst.instances
   analytics.value = a
+  await loadAttention()  // v91: any mutation re-reads the overdue view
 }
 
 const stateFilter = ref('')
@@ -298,6 +413,7 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  await loadAttention()  // v91: the overdue view opens with the page
 })
 </script>
 
@@ -323,6 +439,42 @@ onMounted(async () => {
     <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6">
       <div v-if="pageError" class="mb-4 flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
         <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" /> {{ pageError }}
+      </div>
+
+      <!-- v91: the overdue-attention view - everything past SLA across ALL machines -->
+      <div class="mb-5 rounded-2xl border px-5 py-4"
+        :class="attention.length ? 'border-rose-500/40 bg-rose-500/5' : 'border-emerald-500/30 bg-emerald-500/5'">
+        <div class="flex flex-wrap items-center gap-2">
+          <Siren class="h-4 w-4" :class="attention.length ? 'text-rose-300' : 'text-emerald-300'" />
+          <p class="text-xs font-bold uppercase tracking-widest" :class="attention.length ? 'text-rose-300' : 'text-emerald-300'">
+            Needs attention
+          </p>
+          <span v-if="attention.length" class="rounded-full bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300">
+            {{ attention.length }} past SLA across {{ attentionMachines }} machine{{ attentionMachines === 1 ? '' : 's' }}
+          </span>
+          <span v-else class="text-[11px] text-emerald-300/80">all clear - nothing is past its SLA</span>
+          <Loader2 v-if="attentionLoading" class="h-3 w-3 animate-spin text-zinc-600" />
+        </div>
+        <div v-if="attention.length" class="mt-3 space-y-1.5">
+          <div v-for="row in attention.slice(0, 8)" :key="row.instance_id"
+            class="flex flex-wrap items-center gap-2 rounded-xl border border-rose-500/20 bg-zinc-950/60 px-3 py-2">
+            <span class="rounded-lg bg-rose-500/15 px-2 py-0.5 text-[10px] font-bold text-rose-300">{{ row.state }}</span>
+            <span class="text-xs font-semibold text-zinc-200">{{ row.ref }}</span>
+            <span class="truncate text-[10px] text-zinc-500">{{ row.title }}</span>
+            <span class="text-[10px] text-zinc-500">on <span class="text-zinc-400">{{ row.process_name }}</span></span>
+            <span class="rounded-full bg-rose-500/10 px-1.5 py-0.5 text-[9px] font-bold text-rose-300" title="time past the SLA promise">
+              {{ fmtAge(row.overdue_seconds) }} overdue
+            </span>
+            <span v-if="row.escalation?.acked_by" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${row.escalation.acked_by}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack</span>
+            <span v-else-if="row.escalation?.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest">digest ×{{ row.escalation.count }}</span>
+            <span v-else-if="row.escalation" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="row.escalation.last_detail || row.escalation.last_delivery">escalated ×{{ row.escalation.count }}</span>
+            <span v-if="row.journey_leg" class="rounded-full bg-fuchsia-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-fuchsia-300" title="this entity opened itself from another department's hand-off">journey leg</span>
+            <button class="ml-auto flex items-center gap-1 text-[10px] font-bold text-cyan-400 transition hover:text-cyan-300" @click="openAttentionMachine(row)">
+              open machine <ChevronRight class="h-3 w-3" />
+            </button>
+          </div>
+          <p v-if="attention.length > 8" class="text-[10px] text-zinc-600">+ {{ attention.length - 8 }} more past SLA (the feed caps at 200, most overdue first)</p>
+        </div>
       </div>
 
       <div v-if="loading" class="grid place-items-center py-16 text-zinc-600">
@@ -372,6 +524,10 @@ onMounted(async () => {
                 <BellRing class="h-2.5 w-2.5" /> {{ selected.escalation_summary }}
               </span>
               <span v-if="selected.escalation_policy && !selected.escalation_policy.to && !(selected.escalation_policy as any).handlers?.length" class="text-[9px] text-zinc-600">bind escalation_policy.to + a channel endpoint to deliver</span>
+              <!-- v91: the door's rhythm is editable from the board -->
+              <button class="flex items-center gap-1 rounded-lg border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 text-[9px] font-bold text-indigo-300 transition hover:bg-indigo-500/20" @click="policyOpen ? (policyOpen = false) : openPolicyEditor()">
+                <SlidersHorizontal class="h-2.5 w-2.5" /> {{ selected.escalation_policy ? 'Edit policy' : 'Add policy' }}
+              </button>
               <!-- v89: cross-operator journeys - the legs this machine opens -->
               <span v-for="j in selected.journeys || []" :key="j.on_state" class="flex items-center gap-1 rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-semibold text-fuchsia-300" :title="`when this machine lands on ${j.on_state}, a case opens itself on ${j.open.process}`">
                 {{ j.on_state }} → {{ j.open.process }}
@@ -425,6 +581,41 @@ onMounted(async () => {
                 <BellRing v-else class="h-3 w-3" /> Escalation sweep (the scheduler door, now)
               </button>
               <p v-if="sweepNote" class="text-[10px] text-amber-300/80">{{ sweepNote }}</p>
+            </div>
+
+            <!-- v91: the policy editor - what is saved here rules the NEXT sweep -->
+            <div v-if="policyOpen" class="mt-3 rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3">
+              <p class="text-[10px] font-bold uppercase tracking-widest text-indigo-300">Escalation policy - the door's rhythm</p>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <select v-model="polChannel" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300" title="empty = event-only escalation (business.stuck fires, nobody is knocked)">
+                  <option value="">event-only</option>
+                  <option value="email">email</option>
+                  <option value="sms">sms</option>
+                  <option value="whatsapp">whatsapp</option>
+                  <option value="telegram">telegram</option>
+                  <option value="discord">discord</option>
+                </select>
+                <input v-model="polTo" placeholder="deliver to (ops@co.com, +1555...)" class="w-48 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60" />
+                <select v-model="polMode" class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300">
+                  <option value="knock">knock - a message per attempt</option>
+                  <option value="digest">digest - one summary per window</option>
+                </select>
+                <input v-model="polCadence" type="number" min="60" class="w-28 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60"
+                  :placeholder="polMode === 'digest' ? 'window s' : 'cadence s'"
+                  :title="polMode === 'digest' ? 'one summary per this many seconds (min 60)' : 'one knock per this many seconds (min 60)'" />
+                <input v-model="polMaxRepeats" type="number" min="0" placeholder="max repeats" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60" />
+              </div>
+              <div class="mt-2 flex flex-wrap items-center gap-2">
+                <input v-model="polTemplate" placeholder="custom message template ({process}, {ref}, {state}, {overdue_minutes}, {attempt})" class="min-w-64 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60" />
+                <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="savePolicy">
+                  <Loader2 v-if="policySaving" class="h-3 w-3 animate-spin" /> Save policy
+                </button>
+                <button v-if="selected.escalation_policy" class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-50" :disabled="policySaving" title="remove the policy - the machine falls back to one knock per stint, event-only" @click="removePolicy">
+                  Remove
+                </button>
+              </div>
+              <p class="mt-1.5 text-[9px] text-zinc-600">the door reads the policy fresh at every sweep - the new rhythm rules the NEXT tick; running instances and their episodes are untouched</p>
+              <p v-if="policyError" class="mt-1 text-[10px] text-rose-300">{{ policyError }}</p>
             </div>
           </div>
 
