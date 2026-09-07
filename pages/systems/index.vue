@@ -54,11 +54,24 @@ interface SystemChainLeg {
   due_in_seconds?: number | null
   from_operator: string; opens_operator: string
   bound_from: boolean; bound_opens: boolean
-  counts: { in_state: number; fired: number; overdue: number }
+  counts: { in_state: number; fired: number; overdue: number
+    acked: number; snoozed: number }
 }
 interface SystemChainNode {
   process: string; operator: string; bound: boolean
   open: number; overdue: number
+  acked: number; snoozed: number
+  overdue_instances?: ChainOverdueInstance[]
+}
+// v94: the ack/snooze surfacing on the chain nodes - the node names who
+// needs the human and who already took it, with the same receipt the
+// attention feed carries (the ack holds the DOOR, never the clock)
+interface ChainOverdueInstance {
+  process_id: string; instance_id: string
+  ref: string; title: string; state: string
+  overdue_seconds: number
+  escalation: { count: number; last_delivery: string
+    acked_by: string; snooze_until: string; snooze_active: boolean } | null
 }
 interface SystemChainView {
   slug: string; name: string; story: string
@@ -385,7 +398,7 @@ const boundIds = computed(() => {
 
 // ---- v93: the drawn chain view - geometry + honest helpers ----------------
 const CH_NODE_W = 148
-const CH_NODE_H = 60
+const CH_NODE_H = 76  // v94: grew one line - the node carries its own ack/snooze state
 const CH_GAP = 96
 const CH_PAD = 8
 
@@ -409,6 +422,63 @@ function missingEnds(chain: SystemChainView): string[] {
 }
 function shortName(name: string): string {
   return name.length > 19 ? name.slice(0, 18) + '…' : name
+}
+
+// ---- v94: ack/snooze straight from the chain nodes -----------------------
+// the same receipt the attention rows post (by + note + snooze hrs) to
+// the SAME endpoint, addressed by the ROW's own ids; the detail re-reads
+// so the node wears the ack the moment it lands
+const chainAckForId = ref('')
+const chainAckBy = ref('')
+const chainAckNote = ref('')
+const chainAckSnooze = ref('')
+const chainAcking = ref(false)
+const chainAckError = ref('')
+
+function chainOverdueRows(chain: SystemChainView): { node: SystemChainNode; inst: ChainOverdueInstance }[] {
+  const rows: { node: SystemChainNode; inst: ChainOverdueInstance }[] = []
+  for (const n of chain.nodes) for (const inst of n.overdue_instances || []) rows.push({ node: n, inst })
+  return rows
+}
+
+function openChainAck(inst: ChainOverdueInstance) {
+  chainAckForId.value = chainAckForId.value === inst.instance_id ? '' : inst.instance_id
+  chainAckBy.value = ''
+  chainAckNote.value = ''
+  chainAckSnooze.value = ''
+  chainAckError.value = ''
+}
+
+async function ackFromChain(inst: ChainOverdueInstance) {
+  if (!chainAckBy.value.trim() || !detail.value) return
+  chainAcking.value = true
+  chainAckError.value = ''
+  try {
+    await api.post(
+      `/processes/${inst.process_id}/instances/${inst.instance_id}/escalations/ack`,
+      { by: chainAckBy.value.trim(), note: chainAckNote.value.trim(),
+        snooze_hours: chainAckSnooze.value.trim() ? Number(chainAckSnooze.value) : null })
+    chainAckForId.value = ''
+    await openDetail(detail.value.id)  // the node re-reads wearing the ack
+  } catch (e: any) {
+    chainAckError.value = e?.data?.detail || e?.message || 'The acknowledgement was refused'
+  } finally {
+    chainAcking.value = false
+  }
+}
+
+function fmtOverdue(sec: number): string {
+  if (sec >= 86400) return `${Math.floor(sec / 86400)}d`
+  if (sec >= 3600) return `${Math.floor(sec / 3600)}h`
+  if (sec >= 60) return `${Math.floor(sec / 60)}m`
+  return `${sec}s`
+}
+
+function ackAge(title: string, until: string): string {
+  const ms = new Date(until).getTime() - Date.now()
+  if (!(ms > 0)) return `snoozed (ran out) - ${title}`
+  const m = Math.floor(ms / 60000)
+  return `snoozed ${m >= 60 ? `${Math.floor(m / 60)}h` : `${m}m`} more - ${title}`
 }
 
 onMounted(async () => {
@@ -746,7 +816,7 @@ onMounted(async () => {
                     waiting on {{ missingEnds(chain).join(', ') }}
                   </span>
                 </div>
-                <svg :viewBox="`0 0 ${chainWidth(chain.nodes.length)} 150`"
+                <svg :viewBox="`0 0 ${chainWidth(chain.nodes.length)} 166`"
                   class="mt-2 w-full" style="max-width: 720px"
                   role="img" :aria-label="`the ${chain.name} chain on this system`">
                   <defs>
@@ -768,11 +838,16 @@ onMounted(async () => {
                     <text :x="chainNodeX(i) + 26" y="28" font-size="11" font-weight="700"
                       :fill="n.bound ? '#fafafa' : '#52525b'">{{ shortName(n.process) }}</text>
                     <template v-if="n.bound">
-                      <text :x="chainNodeX(i) + 26" y="44" font-size="9.5" font-weight="600"
+                      <text :x="chainNodeX(i) + 26" y="43" font-size="9.5" font-weight="600"
                         :fill="n.overdue ? '#fb7185' : '#67e8f9'">
                         {{ n.open }} open{{ n.overdue ? ` · ${n.overdue} past SLA` : '' }}
                       </text>
-                      <text :x="chainNodeX(i) + 26" y="58" font-size="8" fill="#71717a">
+                      <!-- v94: the node's own ack/snooze state - the door holds these,
+                        the clock does not (the rows stay past SLA either way) -->
+                      <text v-if="n.acked || n.snoozed" :x="chainNodeX(i) + 26" y="56" font-size="8" font-weight="700">
+                        <tspan v-if="n.acked" fill="#34d399">{{ n.acked }} acked</tspan><tspan v-if="n.acked && n.snoozed" fill="#71717a"> · </tspan><tspan v-if="n.snoozed" fill="#38bdf8">{{ n.snoozed }} snoozed</tspan>
+                      </text>
+                      <text :x="chainNodeX(i) + 26" y="70" font-size="8" fill="#71717a">
                         {{ n.operator.replace('-operator', '') }}
                       </text>
                     </template>
@@ -786,16 +861,16 @@ onMounted(async () => {
                       :stroke="legArmed(leg) ? '#e879f9' : '#52525b'" stroke-width="1.6"
                       :stroke-dasharray="legArmed(leg) ? undefined : '4 3'"
                       :marker-end="`url(#sarr-${chain.slug})`" />
-                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="86" text-anchor="middle"
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="102" text-anchor="middle"
                       font-size="9.5" font-weight="700" fill="#67e8f9">{{ leg.on_state }}</text>
-                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="100" text-anchor="middle"
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="116" text-anchor="middle"
                       font-size="9" fill="#a1a1aa">opens {{ leg.opens }}</text>
-                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="114" text-anchor="middle"
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="130" text-anchor="middle"
                       font-size="8.5" font-weight="600"
                       :fill="legArmed(leg) ? '#e879f9' : '#71717a'">{{ slaText(leg.due_in_seconds) }}</text>
-                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="132" text-anchor="middle"
+                    <text :x="chainNodeX(i) + CH_NODE_W + CH_GAP / 2" y="148" text-anchor="middle"
                       font-size="8.5" :fill="leg.counts.overdue ? '#fb7185' : '#a1a1aa'">
-                      {{ leg.counts.in_state }} in state · {{ leg.counts.fired }} fired{{ leg.counts.overdue ? ` · ${leg.counts.overdue} late` : '' }}
+                      {{ leg.counts.in_state }} in state · {{ leg.counts.fired }} fired{{ leg.counts.overdue ? ` · ${leg.counts.overdue} late` : '' }}<template v-if="leg.counts.acked || leg.counts.snoozed"> · <tspan v-if="leg.counts.acked" fill="#34d399">{{ leg.counts.acked }} ack</tspan><tspan v-if="leg.counts.acked && leg.counts.snoozed" fill="#71717a">/</tspan><tspan v-if="leg.counts.snoozed" fill="#38bdf8">{{ leg.counts.snoozed }} snz</tspan></template>
                     </text>
                   </g>
                 </svg>
@@ -816,6 +891,59 @@ onMounted(async () => {
                       {{ leg.from_process }} is not installed - nothing arms this leg yet.
                     </template>
                   </p>
+                </div>
+                <!-- v94: ack/snooze ON the chain nodes - the node's overdue
+                  entities named under the drawing, each with its door state
+                  and the same inline receipt the attention rows carry -->
+                <div v-if="chainOverdueRows(chain).length" class="mt-3 space-y-1.5 border-t border-zinc-800/60 pt-3">
+                  <p class="text-[9px] font-bold uppercase tracking-widest text-zinc-500">
+                    At the nodes - {{ chainOverdueRows(chain).length }} past SLA, the door's book attached
+                  </p>
+                  <div v-for="{ node, inst } in chainOverdueRows(chain)" :key="`${chain.slug}-${inst.instance_id}`"
+                    class="rounded-xl border border-zinc-800/80 bg-zinc-950/50 px-2.5 py-1.5">
+                    <div class="flex flex-wrap items-center gap-1.5">
+                      <span class="h-1.5 w-1.5 shrink-0 rounded-full bg-fuchsia-400" :title="node.process"></span>
+                      <span class="text-[10px] font-bold text-zinc-200">{{ inst.ref || inst.instance_id.slice(0, 8) }}</span>
+                      <span v-if="inst.title" class="truncate text-[10px] text-zinc-500">{{ inst.title }}</span>
+                      <span class="rounded-full bg-zinc-800/80 px-1.5 py-0.5 text-[9px] font-semibold text-zinc-400">{{ inst.state }}</span>
+                      <span class="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300"
+                        :title="`${node.process} - ${fmtOverdue(inst.overdue_seconds)} past its SLA`">
+                        +{{ fmtOverdue(inst.overdue_seconds) }}
+                      </span>
+                      <span v-if="inst.escalation?.acked_by"
+                        class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300"
+                        :title="`acknowledged by ${inst.escalation.acked_by} - the door holds; the clock does not`">
+                        ack · {{ inst.escalation.acked_by }}
+                      </span>
+                      <span v-if="inst.escalation?.snooze_until"
+                        class="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold"
+                        :class="inst.escalation.snooze_active ? 'text-sky-300' : 'text-zinc-500 line-through'"
+                        :title="ackAge(inst.title || inst.ref, inst.escalation.snooze_until)">
+                        snoozed{{ inst.escalation.snooze_active ? '' : ' (ran out)' }}
+                      </span>
+                      <span v-if="inst.escalation?.count" class="text-[9px] text-amber-300/80" :title="`the door knocked ${inst.escalation.count} time(s) this stint`">
+                        knock ×{{ inst.escalation.count }}
+                      </span>
+                      <button class="ml-auto flex items-center gap-1 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[9px] font-bold text-emerald-300 transition hover:bg-emerald-500/20"
+                        title="take it - the door goes quiet (an optional snooze re-arms it after N hours)"
+                        @click="openChainAck(inst)">
+                        Ack
+                      </button>
+                    </div>
+                    <!-- the inline receipt - by + note + snooze, the same form the attention rows open -->
+                    <div v-if="chainAckForId === inst.instance_id" class="mt-2 flex flex-wrap items-center gap-1.5">
+                      <input v-model="chainAckBy" placeholder="acknowledged by" class="w-32 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                      <input v-model="chainAckNote" placeholder="note (optional)" class="w-40 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
+                      <input v-model="chainAckSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
+                      <button class="flex items-center gap-1 rounded-lg bg-emerald-500 px-2.5 py-1 text-[10px] font-bold text-white transition hover:bg-emerald-400 disabled:opacity-50"
+                        :disabled="chainAcking || !chainAckBy.trim()" @click="ackFromChain(inst)">
+                        <Loader2 v-if="chainAcking" class="h-3 w-3 animate-spin" />
+                        Confirm
+                      </button>
+                      <button class="text-[10px] text-zinc-600 hover:text-zinc-300" @click="chainAckForId = ''">✕</button>
+                    </div>
+                    <p v-if="chainAckForId === inst.instance_id && chainAckError" class="mt-1.5 text-[10px] text-rose-300">{{ chainAckError }}</p>
+                  </div>
                 </div>
               </div>
             </div>

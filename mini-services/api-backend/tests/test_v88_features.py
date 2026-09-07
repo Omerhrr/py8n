@@ -600,4 +600,4 @@ def test_v88_department_onboarding_loops():
 # ---------------------------------------------------------------------------
 
 def test_v88_version_pin():
-    assert settings.version == "1.93.0"
+    assert settings.version == "1.94.0"

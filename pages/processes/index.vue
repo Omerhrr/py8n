@@ -44,6 +44,16 @@ interface Analytics {
   mean_time_in_state_seconds: Record<string, number>
   advance_counts: Record<string, number>
   terminal_states: string[]
+  escalation_history?: EscalationHistory
+}
+
+// v94: the escalation history the sparkline draws - 14 day buckets the
+// analytics derive from the transition log's own timestamps (the door's
+// knocks/moves, the team's receipts, the summaries)
+interface EscalationHistory {
+  window_days: number
+  days: { date: string; escalations: number; acknowledgements: number
+    digests: number; total: number }[]
 }
 
 // v91: one row of the overdue-attention view - an open instance past its
@@ -476,6 +486,40 @@ function journeyChipClass(transition: string): string {
   return 'bg-cyan-500/10 text-cyan-300'
 }
 
+// ---- v94: the escalation-history sparkline per machine -------------------
+// one row of stacked bars per day: the door's knocks (amber), the team's
+// receipts (emerald), the summaries (violet) - all derived from the log,
+// the window named so a quiet stretch reads as data, not absence
+const histDays = computed(() => analytics.value?.escalation_history?.days || [])
+const histMaxV = computed(() => Math.max(1, ...histDays.value.map(d => d.total)))
+const histQuiet = computed(() => histDays.value.every(d => d.total === 0))
+
+function histX(i: number): number {
+  return 24 + i * 19.6
+}
+
+interface HistSeg { y: number; h: number; fill: string }
+
+function histSegs(d: { escalations: number; acknowledgements: number; digests: number }): HistSeg[] {
+  const segs: HistSeg[] = []
+  let base = 46
+  for (const [v, fill] of [
+    [d.escalations, '#fbbf24'],
+    [d.acknowledgements, '#34d399'],
+    [d.digests, '#a78bfa'],
+  ] as const) {
+    if (!v) continue
+    const h = Math.max(2, Math.round((v / histMaxV.value) * 38))
+    base -= h
+    segs.push({ y: base, h, fill })
+  }
+  return segs
+}
+
+function histTitle(d: { date: string; escalations: number; acknowledgements: number; digests: number }): string {
+  return `${d.date} - ${d.escalations} escalation(s) · ${d.acknowledgements} ack(s) · ${d.digests} digest(s)`
+}
+
 function allowedFrom(state: string) {
   if (!selected.value) return []
   return selected.value.transitions.filter(t => t.from === state)
@@ -838,6 +882,33 @@ onMounted(async () => {
                 <p class="text-[9px] uppercase tracking-widest text-zinc-600">moves on record</p>
                 <p class="text-sm font-bold text-zinc-200">{{ Object.values(analytics?.advance_counts || {}).reduce((a, b) => a + b, 0) }}</p>
               </div>
+            </div>
+            <!-- v94: the escalation-history sparkline - the door's rhythm on
+              THIS machine over the last 14 days, drawn from the log -->
+            <div v-if="histDays.length" class="mt-3 rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2.5">
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="text-[9px] font-bold uppercase tracking-widest text-zinc-500">Escalation history - last {{ analytics?.escalation_history?.window_days ?? 14 }} days</p>
+                <span class="flex items-center gap-1 text-[8px] text-amber-300/90"><span class="h-1.5 w-1.5 rounded-sm bg-amber-400"></span>escalations</span>
+                <span class="flex items-center gap-1 text-[8px] text-emerald-300/90"><span class="h-1.5 w-1.5 rounded-sm bg-emerald-400"></span>acks</span>
+                <span class="flex items-center gap-1 text-[8px] text-violet-300/90"><span class="h-1.5 w-1.5 rounded-sm bg-violet-400"></span>digests</span>
+                <span v-if="histQuiet" class="ml-auto text-[9px] text-zinc-600">the door has been quiet</span>
+              </div>
+              <svg viewBox="0 0 300 62" class="mt-1.5 w-full" style="max-width: 460px"
+                role="img" aria-label="escalation history - the last 14 days, one bar per day">
+                <line x1="20" y1="46.5" x2="296" y2="46.5" stroke="#3f3f46" stroke-width="1" />
+                <g v-for="(d, i) in histDays" :key="d.date">
+                  <rect v-for="(s, si) in histSegs(d)" :key="`${d.date}-${si}`"
+                    :x="histX(i)" :y="s.y" width="14" :height="s.h"
+                    :fill="s.fill" rx="1.5" />
+                  <rect v-if="d.total" :x="histX(i)" y="8" width="14" height="38" fill="transparent">
+                    <title>{{ histTitle(d) }}</title>
+                  </rect>
+                  <text v-if="i === 0 || i === 7 || i === histDays.length - 1"
+                    :x="histX(i) + 7" y="57" text-anchor="middle" font-size="6.5" fill="#71717a">
+                    {{ d.date.slice(5) }}
+                  </text>
+                </g>
+              </svg>
             </div>
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <button

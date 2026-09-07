@@ -891,7 +891,8 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
 # the process, measured - all derived, nothing stored twice
 # ---------------------------------------------------------------------------
 
-async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | None) -> dict:
+async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | None,
+                            *, now: datetime | None = None) -> dict:
     p = await _load_process(db, process_id, owner_id)
     definition = p.definition or {}
     instances = (await db.execute(
@@ -958,6 +959,37 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
             digests += 1
     for name in PAPERWORK_TRANSITIONS:
         advance_counts.pop(name, None)
+
+    # v94: the escalation HISTORY - the door's rhythm over the last 14
+    # days, one bucket per day, derived entirely from the log's own
+    # timestamps (the same rows the counts above read): the door's
+    # knock/move ('escalated' + the machine's own 'escalate'), the
+    # human's receipts (acknowledgements) and the summaries (digests).
+    # The window is NAMED so a quiet stretch reads as data, not absence.
+    clock = _aware(now) or _now()
+    window_days = 14
+    day_keys = [(clock - timedelta(days=i)).date().isoformat()
+                for i in range(window_days - 1, -1, -1)]
+    hist: dict[str, dict] = {k: {"escalations": 0, "acknowledgements": 0,
+                                 "digests": 0} for k in day_keys}
+    for t in logs:
+        created = _aware(t.created_at)
+        if created is None:
+            continue
+        bucket = hist.get(created.date().isoformat())
+        if bucket is None:
+            continue  # older than the window - the sparkline is honest
+        if t.transition in ("escalated", "escalate"):
+            bucket["escalations"] += 1
+        elif t.transition == ACK_TRANSITION:
+            bucket["acknowledgements"] += 1
+        elif t.transition == DIGEST_TRANSITION:
+            bucket["digests"] += 1
+    escalation_history = {
+        "window_days": window_days,
+        "days": [{"date": k, **hist[k], "total": sum(hist[k].values())}
+                 for k in day_keys],
+    }
     return {
         "process_id": p.id, "name": p.name,
         "instances": len(instances), "open": open_count,
@@ -967,6 +999,7 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
         "annotations": annotations,
         "acknowledgements": acknowledgements,
         "digests": digests,
+        "escalation_history": escalation_history,
         "mean_time_in_state_seconds": mean_time_in_state,
         "advance_counts": advance_counts,
         "terminal_states": sorted(terminal),

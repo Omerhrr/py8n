@@ -316,7 +316,9 @@ def test_v93_system_chains_live_counts():
             assert (leg0["from_process"], leg0["on_state"], leg0["opens"]) == \
                 ("Lead pipeline", "won", "Customer onboarding")
             assert leg0["bound_from"] is True and leg0["bound_opens"] is True
-            assert leg0["counts"] == {"in_state": 1, "fired": 1, "overdue": 0}
+            # v94: the leg counts carry the ack/snooze sub-counts too
+            assert leg0["counts"] == {"in_state": 1, "fired": 1, "overdue": 0,
+                                      "acked": 0, "snoozed": 0}
             assert (leg1["from_process"], leg1["on_state"], leg1["opens"]) == \
                 ("Customer onboarding", "handed_off", "Invoice lifecycle")
             assert leg1["bound_from"] is True and leg1["bound_opens"] is False
@@ -338,7 +340,8 @@ def test_v93_system_chains_live_counts():
             assert nodes2["Lead pipeline"]["overdue"] == 1
             # the leg's fired child (no leg SLA on this leg) stays at zero
             assert chain2["legs"][0]["counts"] == {"in_state": 1, "fired": 1,
-                                                   "overdue": 0}
+                                                   "overdue": 0,
+                                                   "acked": 0, "snoozed": 0}
 
             # a system that binds no machines draws no chains - an honest
             # absence, never an empty diagram
@@ -510,4 +513,4 @@ def test_v93_policy_preview():
 # ---------------------------------------------------------------------------
 
 def test_v93_version_pin():
-    assert settings.version == "1.93.0"
+    assert settings.version == "1.94.0"

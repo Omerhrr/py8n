@@ -2037,12 +2037,19 @@ async def chains_for_system(db: AsyncSession, system, *,
 
     * per NODE (a bound process in the walk): open instances + how many
       are past their SLA (terminal states skipped - a closed entity does
-      not count as late);
+      not count as late), plus v94's ack/snooze surfacing: ``acked`` /
+      ``snoozed`` count the overdue ones the door is holding (the ack
+      holds the DOOR, never the clock - the row stays overdue either
+      way), and ``overdue_instances`` names them (most overdue first,
+      capped at 5) with each one's escalation book - the same receipt the
+      attention feed carries, so the chain node answers "who has this"
+      without leaving the drawing;
     * per LEG: ``in_state`` = the source process's open instances sitting
       in the fire state right now (the hand-off is armed), ``fired`` =
       the target process's OPEN instances this leg opened itself (they
       carry the journey link in their context), ``overdue`` = the fired
-      ones past the leg's own SLA promise.
+      ones past the leg's own SLA promise - with the same ``acked`` /
+      ``snoozed`` sub-counts among them.
 
     A system that binds no processes draws no chains - the section is
     simply absent, never an empty lie."""
@@ -2050,6 +2057,7 @@ async def chains_for_system(db: AsyncSession, system, *,
 
     from ..models import BusinessProcess, BusinessProcessInstance
     from . import business_processes as process_svc
+    from . import escalations as escalations_svc  # v94: the ack book reader
 
     if now is None:
         now = _dt.now(_tz.utc)
@@ -2080,15 +2088,65 @@ async def chains_for_system(db: AsyncSession, system, *,
             due = due.replace(tzinfo=_tz.utc)
         return now >= due
 
+    # v94: the ack/snooze surfacing - read from the episode book the door
+    # keeps on the instance's memory (the SAME receipt the attention feed
+    # carries). The ack holds the door, never the clock: an acked row is
+    # still overdue, so acked/snoozed are sub-counts of overdue. A snooze
+    # is a LOAN - ``snooze_active`` is False once snooze_until has passed
+    # (the door re-knocks; the ack itself still shows).
+    def _book_of(row) -> dict:
+        book = process_svc.escalations_svc.episode_book(row)
+        acked = book.get("acked") if isinstance(book.get("acked"), dict) else None
+        snooze_until = str((acked or {}).get("snooze_until") or "")
+        snooze_active = False
+        if snooze_until:
+            until = escalations_svc._parse_iso(snooze_until)
+            snooze_active = until is not None and now < until
+        return {
+            "count": int(book.get("count") or 0),
+            "last_delivery": str(book.get("last_delivery") or ""),
+            "acked_by": str((acked or {}).get("by") or ""),
+            "snooze_until": snooze_until,
+            "snooze_active": snooze_active,
+        }
+
+    def _ack_counts(rows: list) -> tuple[int, int]:
+        acked = snoozed = 0
+        for r in rows:
+            b = _book_of(r)
+            if b["acked_by"]:
+                acked += 1
+            if b["snooze_active"]:
+                snoozed += 1
+        return acked, snoozed
+
     nodes_stat: dict[str, dict] = {}
     for name, proc in bound.items():
         rows = [r for r in open_rows if r.process_id == proc.id]
         term = terminal_of.get(name) or set()
+        late_rows = [r for r in rows
+                     if r.due_at is not None and r.state not in term and _late(r)]
+        # most overdue first, capped - the node names who needs the human
+        # without turning the drawing into a feed
+        late_rows.sort(
+            key=lambda r: (now - (r.due_at.replace(tzinfo=_tz.utc)
+                                  if r.due_at.tzinfo is None else r.due_at)
+                           ).total_seconds(),
+            reverse=True)
+        acked, snoozed = _ack_counts(late_rows)
         nodes_stat[name] = {
             "open": len(rows),
-            "overdue": len([r for r in rows
-                            if r.due_at is not None and r.state not in term
-                            and _late(r)]),
+            "overdue": len(late_rows),
+            "acked": acked,
+            "snoozed": snoozed,
+            "overdue_instances": [{
+                "process_id": proc.id, "instance_id": r.id,
+                "ref": r.ref, "title": r.title, "state": r.state,
+                "overdue_seconds": round((now - (
+                    r.due_at.replace(tzinfo=_tz.utc)
+                    if r.due_at.tzinfo is None else r.due_at)).total_seconds()),
+                "escalation": _book_of(r),
+            } for r in late_rows[:5]],
         }
 
     # the legs' fired children: open instances carrying the journey link
@@ -2117,6 +2175,8 @@ async def chains_for_system(db: AsyncSession, system, *,
                                 and r.state == leg["on_state"]])
             children = [r for r in fired_index.get((src, leg["on_state"]), [])
                         if bound_opens and r.process_id == bound[dst].id]
+            late_children = [r for r in children if _late(r)]
+            child_acked, child_snoozed = _ack_counts(late_children)
             leg_out.append({
                 "from_process": src, "on_state": leg["on_state"],
                 "opens": dst,
@@ -2125,7 +2185,8 @@ async def chains_for_system(db: AsyncSession, system, *,
                 "opens_operator": owner_of.get(dst, ""),
                 "bound_from": bound_from, "bound_opens": bound_opens,
                 "counts": {"in_state": in_state, "fired": len(children),
-                           "overdue": len([r for r in children if _late(r)])},
+                           "overdue": len(late_children),
+                           "acked": child_acked, "snoozed": child_snoozed},
             })
         ops_order: list[str] = []
         for pr in walk:
