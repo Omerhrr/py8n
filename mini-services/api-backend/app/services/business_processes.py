@@ -399,7 +399,10 @@ async def process_analytics(db: AsyncSession, process_id: str, owner_id: str | N
     for t in logs:
         if t.from_state is not None:
             advance_counts[t.transition] = advance_counts.get(t.transition, 0) + 1
-        if t.transition == "escalated":
+        # v86 fix found live: the door's nudge lands BOTH ways - the
+        # no-move 'escalated' log row AND the machine's own 'escalate'
+        # move. The metric counts the nudge, not the paperwork.
+        if t.transition in ("escalated", "escalate"):
             escalations += 1
     return {
         "process_id": p.id, "name": p.name,

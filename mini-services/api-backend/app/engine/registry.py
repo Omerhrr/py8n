@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from .nodes.base import BaseNode, NodeDefinition
 from .nodes.agent import AgentNode
-from .nodes.business import BusinessAdvanceNode  # v85: workflows move the business
+from .nodes.business import (  # v85 + v86: workflows move AND open the business
+    BusinessAdvanceNode,
+    BusinessStartNode,
+)
 from .nodes.data import (
     AggregateNode,
     AnalyzeNode,  # v45
@@ -119,6 +122,7 @@ for _cls in (
     LlmChatNode,
     AgentNode,
     BusinessAdvanceNode,  # v85: advance a business process instance (by id or ref)
+    BusinessStartNode,    # v86: start a tracked instance (the operators' intake wiring)
     EmailSendNode,
     RespondToWebhookNode,
     WaitForResumeNode,

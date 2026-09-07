@@ -1,4 +1,4 @@
-"""Marketplace operators (v83) - "Install a business operator".
+"""Marketplace operators (v83 + v86) - "Install a business operator".
 
 A solution ships a PACK (workflows + datasets, installed inactive). An
 operator ships the BUSINESS: the interaction primitives (AI agent,
@@ -16,6 +16,14 @@ appointment requests that land from inbound texts. The credentials
 bind; until they exist the passes record honest skips - never silent
 ones. Channels stay interchangeable infrastructure: the operator owns
 the system underneath them.
+
+v86 grew the shelf to NINE and closed the intake loop: every
+department-shaped operator (support, operations, hr, finance,
+procurement, logistics) now ships a pre-wired PROCESS seeded from its
+dataset, an intake workflow that opens tracked instances (the v86
+business_start node), an advancer that moves them on real calls, and
+escalate self-loops for the scheduler door - the machine watches every
+entity from the moment it exists.
 """
 
 from __future__ import annotations
@@ -356,7 +364,1109 @@ _CLINIC_OPERATOR = {
     ],
 }
 
-OPERATORS: list[dict] = [_MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR]
+_SUPPORT_OPERATOR = {
+    "slug": "support-operator",
+    "name": "Support Operator",
+    "tagline": ("A support desk in one click: an AI support agent grounded in the "
+                "support FAQ, a help queue with the SMS backchannel, tickets that "
+                "open themselves from inbound texts and land in the case machine "
+                "tracked, and the staff board."),
+    "category": "Support",
+    "icon": "headset",
+    "color": "#60a5fa",
+    "outcomes": [
+        "Support tickets dataset (cases + statuses)",
+        "Case lifecycle business process (pre-wired, seeded from the tickets)",
+        "Support agent grounded in the support FAQ",
+        "Help queue (announce + SMS + callback wired)",
+        "sms.received -> ticket opener (event-reactive: row AND tracked case)",
+        "call.ended -> case logger + case advancer (event-reactive)",
+        "Ticket events dataset (every touch)",
+        "Staff dashboard over the desk",
+    ],
+    "datasets": [
+        {"name": "Support tickets",
+         "description": "The desk - one row per case; the opener workflow appends "
+                        "inbound requests, the team works the statuses",
+         "columns": ["ticket", "requester", "phone", "subject", "status"],
+         "rows": [
+             {"ticket": "TCK-1041", "requester": "Nora Faye", "phone": "+15550003111",
+              "subject": "cannot sign in", "status": "assigned"},
+             {"ticket": "TCK-1042", "requester": "Omar Diallo", "phone": "+15550003222",
+              "subject": "refund not received", "status": "investigating"},
+             {"ticket": "TCK-1043", "requester": "June Park", "phone": "+15550003333",
+              "subject": "password reset", "status": "opened"},
+         ]},
+        {"name": "Ticket events",
+         "description": "One row per touch (written by the logger workflow the moment "
+                        "a call ends) - the traffic behind the cases",
+         "columns": ["session_id", "channel", "action", "at"],
+         "rows": []},
+        {"name": "Support FAQ",
+         "description": "The agent's knowledge - the answers the desk gives all day",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "I cannot sign in",
+              "answer": "Use the forgot-password link on the sign-in page; the reset mail arrives within a minute. If it does not, we open a case and engineering looks the same day."},
+             {"question": "What is the refund policy",
+              "answer": "Full refund within fourteen days of purchase, no questions asked - after that we prorate to the day and credit the account."},
+             {"question": "What are your support hours",
+              "answer": "The line is staffed eight AM to eight PM weekdays; the AI agent answers any time and a human picks up urgent cases around the clock."},
+             {"question": "How do I reach a human",
+              "answer": "Say agent at any point on the call, or reply HUMAN to the SMS thread - you keep your queue place either way."},
+             {"question": "My account is locked",
+              "answer": "Five failed attempts locks the account for thirty minutes as a guard; after that the reset link clears it. Locked longer than an hour becomes a case we investigate."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Ticket opener",
+         "description": "sms.received -> shape -> Support tickets -> business_start: "
+                        "every inbound text opens a ticket row AND a tracked case "
+                        "(ref = the sender's phone) - the machine watches it from "
+                        "day one and the door inherits the SLA.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the ticket",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'ticket': '', 'requester': r.get('actor', ''), "
+                                  "'phone': r.get('actor', ''), "
+                                  "'subject': (pl.get('text') or '')[:60], "
+                                  "'status': 'opened'}]")}},
+             {"type": "dataset_write", "name": "Open the ticket row",
+              "params": {"dataset": "Support tickets", "mode": "append"}},
+             {"type": "business_start", "name": "Track the case",
+              "params": {"process": "Case lifecycle",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Inbound from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "support-operator",
+                         "due_in_seconds": 86400,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Case logger",
+         "description": "call.ended -> shape -> Ticket events. Every call on the line "
+                        "leaves evidence - the desk sees the traffic behind the cases.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the touch",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'session_id': r.get('session_id', ''), "
+                                  "'channel': r.get('source', 'voice'), "
+                                  "'action': 'call ' + str(pl.get('end_reason', 'ended')), "
+                                  "'at': r.get('triggered_at', '')}]")}},
+             {"type": "dataset_write", "name": "Append the touch",
+              "params": {"dataset": "Ticket events", "mode": "append"}},
+         ]},
+        {"name": "Case advancer",
+         "description": "call.ended -> business_advance: a completed call from a "
+                        "tracked requester moves their case (opened -> assigned). "
+                        "Callers the desk does not track, and cases already past "
+                        "the move, skip honestly - the call is evidence, not a "
+                        "forced move.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the caller's case",
+              "params": {"process": "Case lifecycle", "ref": "{{ input.actor }}",
+                         "transition": "triage", "actor": "support-operator",
+                         "note": "a real call ended - the case moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "Support agent",
+              "greeting": "Support, good day - what are we solving?",
+              "system_prompt": ("You are a patient, precise support agent. Answer from the "
+                                "knowledge matches in metadata.knowledge; when the answer is "
+                                "not there or the caller asks for a human, take the case and "
+                                "promise the callback - never guess."),
+              "knowledge": {"dataset": "Support FAQ", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "Support desk room", "title": "Support desk room",
+               "modality": "audio"}],
+    "queues": [{"name": "Support help queue", "room": "Support desk room",
+                "bind_agent": True,
+                "config": {"max_size": 40, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 60},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": None,
+    "processes": [
+        {"name": "Case lifecycle",
+         "description": ("The case journey as a state machine - one tracked instance "
+                         "per case remembering status and context across days; calls "
+                         "move it, inbound texts open it, the escalation door nudges "
+                         "it when it goes stale."),
+         "definition": {
+             "states": ["opened", "assigned", "investigating", "waiting",
+                        "resolved", "closed"],
+             "initial": "opened",
+             "transitions": [
+                 {"name": "triage", "from": "opened", "to": "assigned"},
+                 {"name": "investigate", "from": "assigned", "to": "investigating"},
+                 {"name": "wait_on_caller", "from": "investigating", "to": "waiting"},
+                 {"name": "resume", "from": "waiting", "to": "investigating"},
+                 {"name": "resolve", "from": "investigating", "to": "resolved"},
+                 {"name": "close", "from": "resolved", "to": "closed"},
+                 {"name": "reopen", "from": "resolved", "to": "assigned"},
+                 # the escalation door's move: a stale case re-enters its
+                 # state (a fresh stint, on the record) so the desk sees
+                 # the nudge - a case can go stale at ANY working stage
+                 {"name": "escalate", "from": "opened", "to": "opened",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "assigned", "to": "assigned",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "investigating", "to": "investigating",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "waiting", "to": "waiting",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Support tickets",
+         "ref_column": "phone",
+         "title_from": ["ticket", "subject"],
+         "state_column": "status",
+         "due_in_seconds": 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "Support Operator Board",
+                  "description": "The desk at a glance - open cases, inbound traffic, "
+                                 "case pressure by status."},
+    "notes": [
+        "The help queue announces positions, texts waiting callers over the SMS "
+        "backchannel (bind config.sms.channel_id when the credentials exist) and "
+        "offers callbacks - the desk works the same either way.",
+        "The opener opens BOTH the ticket row and a tracked case (ref = the "
+        "sender's phone, on_duplicate=skip): a tracked phone texts again and "
+        "nothing doubles. It installs INACTIVE - boot the system (start with "
+        "activate_workflows) to open the reactive path.",
+        "Stale cases: the machine defines escalate self-loops on opened / "
+        "assigned / investigating / waiting - the scheduler door (POST "
+        "/scheduler/escalations/tick) walks past-SLA cases through them.",
+        "Email/WhatsApp/Telegram channels are the installer's endpoints to bind "
+        "(channels page) - the operator is the system underneath them, channels "
+        "stay interchangeable.",
+    ],
+}
+
+_OPERATIONS_OPERATOR = {
+    "slug": "operations-operator",
+    "name": "Operations Operator",
+    "tagline": ("The back office in one click: internal requests that intake "
+                "themselves and land tracked in the approval machine, an ops "
+                "concierge grounded in the handbook, the work queue, and the "
+                "staff board."),
+    "category": "Operations",
+    "icon": "clipboard-list",
+    "color": "#a78bfa",
+    "outcomes": [
+        "Ops requests dataset (requests + statuses)",
+        "Request lifecycle business process (pre-wired, seeded from the requests)",
+        "Ops concierge grounded in the handbook",
+        "Work queue (announce + SMS + callback wired)",
+        "sms.received -> request intake (event-reactive: row AND tracked request)",
+        "call.ended -> decision logger + approval advancer (event-reactive)",
+        "Ops approvals dataset (every decision)",
+        "Staff dashboard over the back office",
+    ],
+    "datasets": [
+        {"name": "Ops requests",
+         "description": "The work queue's spine - one row per internal request; "
+                        "the intake workflow appends inbound asks, the team works "
+                        "the statuses",
+         "columns": ["request", "kind", "requester", "phone", "status"],
+         "rows": [
+             {"request": "laptop replacement - MRI-214", "kind": "equipment",
+              "requester": "Ruth Bello", "phone": "+15550004111", "status": "in_review"},
+             {"request": "standing desk", "kind": "equipment",
+              "requester": "Kofi Adjei", "phone": "+15550004222", "status": "approved"},
+             {"request": "badge reissue", "kind": "facilities",
+              "requester": "Lena Muller", "phone": "+15550004333", "status": "submitted"},
+         ]},
+        {"name": "Ops approvals",
+         "description": "One row per decision (the logger appends every approval "
+                        "call) - who decided what, and when",
+         "columns": ["request_ref", "decision", "decided_by", "at"],
+         "rows": []},
+        {"name": "Ops handbook",
+         "description": "The concierge's knowledge - how the back office runs",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "How do I file a request",
+              "answer": "Text this line with what you need - the request lands tracked immediately - or ask the concierge to file it with you."},
+             {"question": "How long does a request take",
+              "answer": "The SLA is two working days in review; if it sits longer the escalation door nudges the owner automatically."},
+             {"question": "Who approves equipment",
+              "answer": "Equipment goes to your line manager; anything above the limit in the policy adds finance as a second approval."},
+             {"question": "What is the expense limit",
+              "answer": "Requests up to five hundred need one approval; above that a second approver joins and the machine waits for both."},
+             {"question": "How do I mark a request urgent",
+              "answer": "Include the word urgent and the reason - urgent requests page the on-call coordinator through the work queue."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Ops request intake",
+         "description": "sms.received -> shape -> Ops requests -> business_start: "
+                        "every inbound text opens a request row AND a tracked "
+                        "instance (ref = the sender's phone) - the approval "
+                        "machine watches it from day one.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the request",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'request': (pl.get('text') or '')[:60], "
+                                  "'kind': '', 'requester': r.get('actor', ''), "
+                                  "'phone': r.get('actor', ''), 'status': 'submitted'}]")}},
+             {"type": "dataset_write", "name": "Open the request row",
+              "params": {"dataset": "Ops requests", "mode": "append"}},
+             {"type": "business_start", "name": "Track the request",
+              "params": {"process": "Request lifecycle",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Request from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "operations-operator",
+                         "due_in_seconds": 172800,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Ops decision logger",
+         "description": "call.ended -> shape -> Ops approvals. Approval calls land "
+                        "on the record - the trail behind every decision.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the decision",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'request_ref': '', "
+                                  "'decision': 'call ' + str(pl.get('end_reason', 'ended')), "
+                                  "'decided_by': r.get('actor', ''), "
+                                  "'at': r.get('triggered_at', '')}]")}},
+             {"type": "dataset_write", "name": "Append the decision",
+              "params": {"dataset": "Ops approvals", "mode": "append"}},
+         ]},
+        {"name": "Approval advancer",
+         "description": "call.ended -> business_advance: a completed call from a "
+                        "tracked requester moves their request (submitted -> "
+                        "in_review). Unknown callers and requests already past the "
+                        "move skip honestly.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the requester's request",
+              "params": {"process": "Request lifecycle", "ref": "{{ input.actor }}",
+                         "transition": "review", "actor": "operations-operator",
+                         "note": "a real call ended - the request moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "Ops concierge",
+              "greeting": "Operations here - what do you need moved?",
+              "system_prompt": ("You are the internal operations concierge. Answer from the "
+                                "knowledge matches in metadata.knowledge; help employees file "
+                                "requests and check statuses; never promise an approval - "
+                                "the machine and the approvers decide."),
+              "knowledge": {"dataset": "Ops handbook", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "Ops war room", "title": "Ops war room", "modality": "audio"}],
+    "queues": [{"name": "Ops work queue", "room": "Ops war room",
+                "bind_agent": True,
+                "config": {"max_size": 30, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 90},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": None,
+    "processes": [
+        {"name": "Request lifecycle",
+         "description": ("The approval machine - one tracked instance per request "
+                         "remembering where it stands across days; inbound texts "
+                         "open it, calls move it, the door nudges it when the SLA "
+                         "slips."),
+         "definition": {
+             "states": ["submitted", "in_review", "approved", "in_progress",
+                        "done", "rejected"],
+             "initial": "submitted",
+             "transitions": [
+                 {"name": "review", "from": "submitted", "to": "in_review"},
+                 {"name": "approve", "from": "in_review", "to": "approved"},
+                 {"name": "reject", "from": "in_review", "to": "rejected"},
+                 {"name": "start", "from": "approved", "to": "in_progress"},
+                 {"name": "complete", "from": "in_progress", "to": "done"},
+                 {"name": "escalate", "from": "submitted", "to": "submitted",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "in_review", "to": "in_review",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "approved", "to": "approved",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "in_progress", "to": "in_progress",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Ops requests",
+         "ref_column": "phone",
+         "title_from": ["request", "requester"],
+         "state_column": "status",
+         "due_in_seconds": 2 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "Operations Operator Board",
+                  "description": "The back office at a glance - requests by status, "
+                                 "approval traffic, SLA pressure."},
+    "notes": [
+        "The intake opens BOTH the request row and a tracked instance (ref = "
+        "the sender's phone, on_duplicate=skip) - a requester texting again "
+        "never doubles. It installs INACTIVE - boot the system to open the "
+        "reactive path.",
+        "The machine defines escalate self-loops on every working state - the "
+        "scheduler door sweeps past-SLA requests through them (POST "
+        "/scheduler/escalations/tick).",
+        "The handbook is the concierge's knowledge - edit the dataset and the "
+        "answers follow, no redeploy.",
+    ],
+}
+
+_HR_OPERATOR = {
+    "slug": "hr-operator",
+    "name": "HR Operator",
+    "tagline": ("People ops in one click: employee records, leave requests that "
+                "move through the machine by themselves, onboarding pipelines "
+                "that remember where every hire stands, an HR assistant grounded "
+                "in the handbook, and the staff board."),
+    "category": "People",
+    "icon": "users",
+    "color": "#fbbf24",
+    "outcomes": [
+        "People dataset (employee records + onboarding stages)",
+        "Onboarding pipeline business process (pre-wired, seeded from the people)",
+        "Leave requests dataset + Leave pipeline business process (seeded)",
+        "HR assistant grounded in the handbook",
+        "HR front desk queue (announce + SMS + callback wired)",
+        "sms.received -> leave intake (event-reactive: row AND tracked request)",
+        "call.ended -> onboarding advancer (event-reactive)",
+        "Staff dashboard over the people",
+    ],
+    "datasets": [
+        {"name": "People",
+         "description": "The employee records - one row per person; the onboarding "
+                        "column is the stage the machine tracks",
+         "columns": ["employee", "role", "phone", "stage"],
+         "rows": [
+             {"employee": "Ada Nwosu", "role": "data engineer",
+              "phone": "+15550005111", "stage": "day_one"},
+             {"employee": "Tom Weber", "role": "account executive",
+              "phone": "+15550005222", "stage": "accepted"},
+             {"employee": "Sara Haddad", "role": "support lead",
+              "phone": "+15550005333", "stage": "buddied"},
+         ]},
+        {"name": "Leave requests",
+         "description": "One row per leave ask - the intake workflow appends "
+                        "inbound requests, the pipeline tracks them",
+         "columns": ["employee", "phone", "kind", "dates", "status"],
+         "rows": [
+             {"employee": "Ada Nwosu", "phone": "+15550005111", "kind": "annual",
+              "dates": "2026-03-02..03-06", "status": "manager_review"},
+             {"employee": "Tom Weber", "phone": "+15550005222", "kind": "sick",
+              "dates": "2026-01-12", "status": "approved"},
+             {"employee": "Sara Haddad", "phone": "+15550005333", "kind": "parental",
+              "dates": "from 2026-04-01", "status": "requested"},
+         ]},
+        {"name": "HR handbook",
+         "description": "The assistant's knowledge - policy answers, not rumors",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "How much annual leave do I have",
+              "answer": "The standard allowance is twenty-five days a year plus public holidays; your balance and carried-over days are on the people record."},
+             {"question": "How far ahead must I request leave",
+              "answer": "Two weeks for single days, four weeks for a week or more - the pipeline nudges the manager if the review sits past the SLA."},
+             {"question": "What are the public holidays",
+              "answer": "The holiday calendar is published each December; days that fall on weekends roll to the next working day."},
+             {"question": "When is payroll",
+              "answer": "Payroll lands on the last working day of the month; expense claims close five days before for the same run."},
+             {"question": "What happens on day one",
+              "answer": "Badge and accounts at nine, the buddy introduction at ten, the team lunch at noon - the onboarding pipeline tracks each step."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Leave intake",
+         "description": "sms.received -> shape -> Leave requests -> business_start: "
+                        "every inbound text opens a leave row AND a tracked "
+                        "request (ref = the sender's phone) - the leave pipeline "
+                        "watches it from day one.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the request",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'employee': '', 'phone': r.get('actor', ''), "
+                                  "'kind': (pl.get('text') or '')[:20], "
+                                  "'dates': (pl.get('text') or '')[20:60], "
+                                  "'status': 'requested'}]")}},
+             {"type": "dataset_write", "name": "Open the leave row",
+              "params": {"dataset": "Leave requests", "mode": "append"}},
+             {"type": "business_start", "name": "Track the leave request",
+              "params": {"process": "Leave pipeline",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Leave ask from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "hr-operator",
+                         "due_in_seconds": 259200,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Onboarding advancer",
+         "description": "call.ended -> business_advance: a completed check-in call "
+                        "with a tracked hire moves their onboarding (day_one -> "
+                        "buddied). Hires the machine does not track, and stages "
+                        "already past, skip honestly.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the hire's onboarding",
+              "params": {"process": "Onboarding pipeline",
+                         "ref": "{{ input.actor }}",
+                         "transition": "check_in", "actor": "hr-operator",
+                         "note": "a real check-in call ended - onboarding moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "HR assistant",
+              "greeting": "People ops, good day - how can I help?",
+              "system_prompt": ("You are a warm, discreet HR assistant. Answer from the "
+                                "knowledge matches in metadata.knowledge; log leave asks; "
+                                "for anything sensitive offer a human callback - never "
+                                "improvise policy."),
+              "knowledge": {"dataset": "HR handbook", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "HR interview room", "title": "HR interview room",
+               "modality": "audio"}],
+    "queues": [{"name": "HR front desk", "room": "HR interview room",
+                "bind_agent": True,
+                "config": {"max_size": 20, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 90},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": None,
+    "processes": [
+        {"name": "Onboarding pipeline",
+         "description": ("Every hire's first weeks as a state machine - one tracked "
+                         "instance per person remembering the stage across weeks; "
+                         "check-in calls move it, the door nudges it when a hire "
+                         "sits stuck."),
+         "definition": {
+             "states": ["offer_sent", "accepted", "day_one", "buddied", "done"],
+             "initial": "offer_sent",
+             "transitions": [
+                 {"name": "accept", "from": "offer_sent", "to": "accepted"},
+                 {"name": "start", "from": "accepted", "to": "day_one"},
+                 {"name": "check_in", "from": "day_one", "to": "buddied"},
+                 {"name": "finish", "from": "buddied", "to": "done"},
+                 {"name": "escalate", "from": "offer_sent", "to": "offer_sent",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "accepted", "to": "accepted",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "day_one", "to": "day_one",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "buddied", "to": "buddied",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "People",
+         "ref_column": "phone",
+         "title_from": ["employee", "role"],
+         "state_column": "stage",
+         "due_in_seconds": 14 * 24 * 3600,
+        },
+        {"name": "Leave pipeline",
+         "description": ("The leave ask as a state machine - one tracked instance "
+                         "per request; inbound texts open it, managers move it, "
+                         "the door nudges a review that sits past its SLA."),
+         "definition": {
+             "states": ["requested", "manager_review", "approved", "scheduled",
+                        "taken", "closed", "declined"],
+             "initial": "requested",
+             "transitions": [
+                 {"name": "review", "from": "requested", "to": "manager_review"},
+                 {"name": "approve", "from": "manager_review", "to": "approved"},
+                 {"name": "decline", "from": "manager_review", "to": "declined"},
+                 {"name": "schedule", "from": "approved", "to": "scheduled"},
+                 {"name": "mark_taken", "from": "scheduled", "to": "taken"},
+                 {"name": "close", "from": "taken", "to": "closed"},
+                 {"name": "escalate", "from": "requested", "to": "requested",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "manager_review", "to": "manager_review",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "approved", "to": "approved",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "scheduled", "to": "scheduled",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Leave requests",
+         "ref_column": "phone",
+         "title_from": ["employee", "kind"],
+         "state_column": "status",
+         "due_in_seconds": 3 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "HR Operator Board",
+                  "description": "The people at a glance - onboarding stages, leave "
+                                 "pipeline, who sits where."},
+    "notes": [
+        "TWO machines ship bound: the onboarding pipeline seeded from People "
+        "(one instance per employee at its stage) and the leave pipeline seeded "
+        "from Leave requests. Both arrive pre-wired - calls move onboarding, "
+        "texts open leave.",
+        "The intake opens BOTH the leave row and a tracked request (ref = the "
+        "sender's phone, on_duplicate=skip). It installs INACTIVE - boot the "
+        "system to open the reactive path.",
+        "Both machines define escalate self-loops on their working states - the "
+        "scheduler door sweeps past-SLA hires and leave asks through them (POST "
+        "/scheduler/escalations/tick).",
+        "The handbook is the assistant's knowledge - edit the dataset and the "
+        "answers follow, no redeploy.",
+    ],
+}
+
+_FINANCE_OPERATOR = {
+    "slug": "finance-operator",
+    "name": "Finance Operator",
+    "tagline": ("Money ops in one click: invoices that intake themselves and land "
+                "tracked in the approval machine, a collections dialer ready for "
+                "your endpoint, a finance clerk grounded in the policy, and the "
+                "staff board."),
+    "category": "Finance",
+    "icon": "banknote",
+    "color": "#2dd4bf",
+    "outcomes": [
+        "Invoices dataset (payables + statuses)",
+        "Invoice lifecycle business process (pre-wired, seeded from the invoices)",
+        "Finance clerk grounded in the finance policy",
+        "Approvals queue (announce + SMS + callback wired)",
+        "Collections campaign (empty dialer, targets from the invoices)",
+        "sms.received -> invoice intake (event-reactive: row AND tracked invoice)",
+        "call.ended -> ledger logger + payment advancer (event-reactive)",
+        "Ledger events dataset (every touch)",
+        "Staff dashboard over the money",
+    ],
+    "datasets": [
+        {"name": "Invoices",
+         "description": "The payables ledger - one row per invoice; the intake "
+                        "workflow appends inbound bills, the team works the "
+                        "statuses",
+         "columns": ["invoice", "vendor", "phone", "amount", "status"],
+         "rows": [
+             {"invoice": "INV-2041", "vendor": "Brightline Media",
+              "phone": "+15550006111", "amount": "1250.00", "status": "matched"},
+             {"invoice": "INV-2038", "vendor": "Corelink Supplies",
+              "phone": "+15550006222", "amount": "480.00", "status": "approved"},
+             {"invoice": "INV-2035", "vendor": "Datahost",
+              "phone": "+15550006333", "amount": "990.00", "status": "received"},
+         ]},
+        {"name": "Ledger events",
+         "description": "One row per touch (the logger appends every call) - the "
+                        "trail behind the numbers",
+         "columns": ["invoice_ref", "action", "at"],
+         "rows": []},
+        {"name": "Finance policy",
+         "description": "The clerk's knowledge - the rules the money follows",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "What is the approval threshold",
+              "answer": "Invoices up to five hundred are approved on the clerk's match alone; above that a second approver joins before the payment run."},
+             {"question": "When is the payment run",
+              "answer": "Payments go out every Friday; invoices approved by Thursday evening make that week's run."},
+             {"question": "What is three-way matching",
+              "answer": "Invoice against purchase order against goods received - all three agree and the machine moves the invoice to matched."},
+             {"question": "How do I dispute an invoice",
+              "answer": "Move the case to disputed with the reason; the vendor gets the callback and the disputed trail stays on the ledger."},
+             {"question": "What happens on overdue collections",
+              "answer": "The collections campaign dials the contact numbers with the clerk's script; promises to pay are logged and the machine tracks them."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Invoice intake",
+         "description": "sms.received -> shape -> Invoices -> business_start: every "
+                        "inbound bill opens an invoice row AND a tracked instance "
+                        "(ref = the vendor's phone) - the machine watches it from "
+                        "day one.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the invoice",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'invoice': '', "
+                                  "'vendor': (pl.get('text') or '')[:40], "
+                                  "'phone': r.get('actor', ''), 'amount': '', "
+                                  "'status': 'received'}]")}},
+             {"type": "dataset_write", "name": "Open the invoice row",
+              "params": {"dataset": "Invoices", "mode": "append"}},
+             {"type": "business_start", "name": "Track the invoice",
+              "params": {"process": "Invoice lifecycle",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Invoice from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "finance-operator",
+                         "due_in_seconds": 432000,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Ledger logger",
+         "description": "call.ended -> shape -> Ledger events. Vendor and collections "
+                        "calls land on the ledger - the trail behind the numbers.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the touch",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'invoice_ref': '', "
+                                  "'action': 'call ' + str(pl.get('end_reason', 'ended')), "
+                                  "'at': r.get('triggered_at', '')}]")}},
+             {"type": "dataset_write", "name": "Append the ledger touch",
+              "params": {"dataset": "Ledger events", "mode": "append"}},
+         ]},
+        {"name": "Payment advancer",
+         "description": "call.ended -> business_advance: a completed call from a "
+                        "tracked vendor moves their invoice (matched -> approved). "
+                        "Vendors the machine does not track, and invoices already "
+                        "past the move, skip honestly.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the vendor's invoice",
+              "params": {"process": "Invoice lifecycle", "ref": "{{ input.actor }}",
+                         "transition": "approve", "actor": "finance-operator",
+                         "note": "a real call ended - the invoice moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "Finance clerk",
+              "greeting": "Finance here - which invoice can we settle?",
+              "system_prompt": ("You are a careful finance clerk. Answer from the knowledge "
+                                "matches in metadata.knowledge; never confirm a payment that "
+                                "the machine has not approved - walk the caller through the "
+                                "lifecycle instead."),
+              "knowledge": {"dataset": "Finance policy", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "Finance review room", "title": "Finance review room",
+               "modality": "audio"}],
+    "queues": [{"name": "Finance approvals queue", "room": "Finance review room",
+                "bind_agent": True,
+                "config": {"max_size": 20, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 90},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": {"name": "Collections campaign",
+                 "config": {}},
+    "processes": [
+        {"name": "Invoice lifecycle",
+         "description": ("The payable as a state machine - one tracked instance per "
+                         "invoice remembering where it stands across weeks; vendor "
+                         "calls move it, inbound bills open it, the door nudges an "
+                         "approval that sits past its SLA."),
+         "definition": {
+             "states": ["received", "matched", "approved", "scheduled", "paid",
+                        "disputed"],
+             "initial": "received",
+             "transitions": [
+                 {"name": "match", "from": "received", "to": "matched"},
+                 {"name": "approve", "from": "matched", "to": "approved"},
+                 {"name": "dispute", "from": "matched", "to": "disputed"},
+                 {"name": "reinstate", "from": "disputed", "to": "matched"},
+                 {"name": "schedule", "from": "approved", "to": "scheduled"},
+                 {"name": "pay", "from": "scheduled", "to": "paid"},
+                 {"name": "escalate", "from": "received", "to": "received",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "matched", "to": "matched",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "approved", "to": "approved",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "scheduled", "to": "scheduled",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Invoices",
+         "ref_column": "phone",
+         "title_from": ["invoice", "vendor"],
+         "state_column": "status",
+         "due_in_seconds": 5 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "Finance Operator Board",
+                  "description": "The money at a glance - invoices by status, ledger "
+                                 "traffic, approval pressure."},
+    "notes": [
+        "The collections campaign installs EMPTY on purpose: add targets from the "
+        "invoices (POST /voice/campaigns/{id}/targets) and bind a telnyx voice "
+        "endpoint when the dialing credentials exist - until then dials skip "
+        "honestly.",
+        "The intake opens BOTH the invoice row and a tracked instance (ref = the "
+        "vendor's phone, on_duplicate=skip). It installs INACTIVE - boot the "
+        "system to open the reactive path.",
+        "The machine defines escalate self-loops on every working state - the "
+        "scheduler door sweeps past-SLA invoices through them (POST "
+        "/scheduler/escalations/tick).",
+        "The policy dataset is the clerk's knowledge - edit it and the answers "
+        "follow, no redeploy.",
+    ],
+}
+
+_PROCUREMENT_OPERATOR = {
+    "slug": "procurement-operator",
+    "name": "Procurement Operator",
+    "tagline": ("Buying ops in one click: purchase requests that intake themselves "
+                "and land tracked in the quote-approve-order machine, a "
+                "procurement assistant grounded in the policy, the vendor desk, "
+                "and the staff board."),
+    "category": "Procurement",
+    "icon": "shopping-cart",
+    "color": "#fb923c",
+    "outcomes": [
+        "Purchase requests dataset (asks + statuses)",
+        "Purchase lifecycle business process (pre-wired, seeded from the requests)",
+        "Procurement assistant grounded in the policy",
+        "Vendor desk queue (announce + SMS + callback wired)",
+        "sms.received -> purchase intake (event-reactive: row AND tracked request)",
+        "call.ended -> quote logger + PO advancer (event-reactive)",
+        "Vendor quotes dataset (the market view)",
+        "Staff dashboard over the buying",
+    ],
+    "datasets": [
+        {"name": "Purchase requests",
+         "description": "The buying desk - one row per purchase request; the intake "
+                        "workflow appends inbound asks, the team works the "
+                        "statuses",
+         "columns": ["request", "item", "vendor", "phone", "status"],
+         "rows": [
+             {"request": "PR-301", "item": "24 monitors", "vendor": "DeskWorks",
+              "phone": "+15550007111", "status": "quoted"},
+             {"request": "PR-302", "item": "office chairs x6", "vendor": "SeatCo",
+              "phone": "+15550007222", "status": "approved"},
+             {"request": "PR-303", "item": "CRM licenses x10", "vendor": "Softline",
+              "phone": "+15550007333", "status": "requested"},
+         ]},
+        {"name": "Vendor quotes",
+         "description": "One row per quote conversation (the logger appends every "
+                        "vendor call) - the market view behind each purchase",
+         "columns": ["request_ref", "vendor", "phone", "amount",
+                     "lead_time_days", "at"],
+         "rows": []},
+        {"name": "Procurement policy",
+         "description": "The assistant's knowledge - the rules the buying follows",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "What is the three-quote rule",
+              "answer": "Purchases above the limit need three written quotes; the quotes dataset holds the market view and the machine holds the request until they land."},
+             {"question": "What is the approval limit",
+              "answer": "Requests up to one thousand are approved on the desk's judgement; above that the budget owner approves inside the machine."},
+             {"question": "Who are the preferred vendors",
+              "answer": "Preferred vendors ship in the policy dataset with agreed terms; buying outside them needs a written reason on the request."},
+             {"question": "How do deliveries get received",
+              "answer": "The machine moves the purchase to receiving when the order ships; receiving confirms the count and the request closes only when the goods are booked."},
+             {"question": "What about returns",
+              "answer": "Rejected quotes end the request honestly; wrong goods return through the same machine - the vendor call opens the exception."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Purchase intake",
+         "description": "sms.received -> shape -> Purchase requests -> "
+                        "business_start: every inbound ask opens a request row AND "
+                        "a tracked instance (ref = the requester's phone) - the "
+                        "machine watches it from day one.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the request",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'request': (pl.get('text') or '')[:20], "
+                                  "'item': (pl.get('text') or '')[20:60], "
+                                  "'vendor': '', 'phone': r.get('actor', ''), "
+                                  "'status': 'requested'}]")}},
+             {"type": "dataset_write", "name": "Open the request row",
+              "params": {"dataset": "Purchase requests", "mode": "append"}},
+             {"type": "business_start", "name": "Track the purchase",
+              "params": {"process": "Purchase lifecycle",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Purchase ask from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "procurement-operator",
+                         "due_in_seconds": 432000,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Quote logger",
+         "description": "call.ended -> shape -> Vendor quotes. Vendor calls land on "
+                        "the market view - the quotes behind each purchase.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the quote touch",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'request_ref': '', "
+                                  "'vendor': r.get('actor', ''), "
+                                  "'phone': r.get('actor', ''), 'amount': '', "
+                                  "'lead_time_days': '', "
+                                  "'at': r.get('triggered_at', '')}]")}},
+             {"type": "dataset_write", "name": "Append the quote touch",
+              "params": {"dataset": "Vendor quotes", "mode": "append"}},
+         ]},
+        {"name": "PO advancer",
+         "description": "call.ended -> business_advance: a completed call from a "
+                        "tracked requester or vendor moves their purchase "
+                        "(requested -> quoted). Unknown callers and purchases "
+                        "already past the move skip honestly.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Move the tracked purchase",
+              "params": {"process": "Purchase lifecycle", "ref": "{{ input.actor }}",
+                         "transition": "quote", "actor": "procurement-operator",
+                         "note": "a real call ended - the purchase moves itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "Procurement assistant",
+              "greeting": "Buying desk, good day - what are we sourcing?",
+              "system_prompt": ("You are a sharp procurement assistant. Answer from the "
+                                "knowledge matches in metadata.knowledge; log asks and "
+                                "vendor touches; never commit an order - the machine and "
+                                "the approvers decide."),
+              "knowledge": {"dataset": "Procurement policy", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "Vendor room", "title": "Vendor room", "modality": "audio"}],
+    "queues": [{"name": "Procurement desk", "room": "Vendor room",
+                "bind_agent": True,
+                "config": {"max_size": 20, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 90},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": None,
+    "processes": [
+        {"name": "Purchase lifecycle",
+         "description": ("The buy as a state machine - one tracked instance per "
+                         "purchase remembering where it stands across weeks; "
+                         "inbound asks open it, vendor calls move it, the door "
+                         "nudges a quote that sits past its SLA."),
+         "definition": {
+             "states": ["requested", "quoted", "approved", "ordered", "receiving",
+                        "received", "closed", "rejected"],
+             "initial": "requested",
+             "transitions": [
+                 {"name": "quote", "from": "requested", "to": "quoted"},
+                 {"name": "approve", "from": "quoted", "to": "approved"},
+                 {"name": "reject", "from": "quoted", "to": "rejected"},
+                 {"name": "order", "from": "approved", "to": "ordered"},
+                 {"name": "start_receiving", "from": "ordered", "to": "receiving"},
+                 {"name": "confirm", "from": "receiving", "to": "received"},
+                 {"name": "close", "from": "received", "to": "closed"},
+                 {"name": "escalate", "from": "requested", "to": "requested",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "quoted", "to": "quoted",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "approved", "to": "approved",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "ordered", "to": "ordered",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "receiving", "to": "receiving",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Purchase requests",
+         "ref_column": "phone",
+         "title_from": ["request", "item"],
+         "state_column": "status",
+         "due_in_seconds": 5 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "Procurement Operator Board",
+                  "description": "The buying at a glance - purchases by status, vendor "
+                                 "traffic, quote coverage."},
+    "notes": [
+        "The intake opens BOTH the request row and a tracked instance (ref = the "
+        "requester's phone, on_duplicate=skip). It installs INACTIVE - boot the "
+        "system to open the reactive path.",
+        "The machine defines escalate self-loops on every working state - the "
+        "scheduler door sweeps past-SLA purchases through them (POST "
+        "/scheduler/escalations/tick).",
+        "The policy dataset is the assistant's knowledge - edit it and the "
+        "answers follow, no redeploy.",
+    ],
+}
+
+_LOGISTICS_OPERATOR = {
+    "slug": "logistics-operator",
+    "name": "Logistics Operator",
+    "tagline": ("Delivery ops in one click: orders that intake themselves from "
+                "inbound texts and land tracked in the dispatch machine, a "
+                "confirmation campaign ready for your endpoint, a dispatch agent "
+                "grounded in the delivery FAQ, and the staff board."),
+    "category": "Logistics",
+    "icon": "truck",
+    "color": "#f87171",
+    "outcomes": [
+        "Orders dataset (deliveries + statuses)",
+        "Delivery pipeline business process (pre-wired, seeded from the orders)",
+        "Dispatch agent grounded in the delivery FAQ",
+        "Dispatch line queue (announce + SMS + callback wired)",
+        "Delivery confirmation campaign (empty dialer, targets from the orders)",
+        "sms.received -> order intake (event-reactive: row AND tracked order)",
+        "call.ended -> delivery logger + delivery advancer (event-reactive)",
+        "Delivery events dataset (every touch)",
+        "Staff dashboard over the deliveries",
+    ],
+    "datasets": [
+        {"name": "Orders",
+         "description": "The board - one row per delivery; the intake workflow "
+                        "appends inbound orders, the team works the statuses",
+         "columns": ["order", "customer", "phone", "destination", "status"],
+         "rows": [
+             {"order": "ORD-2041", "customer": "Marta Vidal",
+              "phone": "+15550008111", "destination": "12 Harbour Rd",
+              "status": "in_transit"},
+             {"order": "ORD-2042", "customer": "Chen Wei",
+              "phone": "+15550008222", "destination": "4 Mill Lane",
+              "status": "dispatched"},
+             {"order": "ORD-2043", "customer": "Ike Umeh",
+              "phone": "+15550008333", "destination": "88 Ring Rd",
+              "status": "placed"},
+         ]},
+        {"name": "Delivery events",
+         "description": "One row per touch (the logger appends every confirmation "
+                        "call) - the trail behind every delivery",
+         "columns": ["order_ref", "action", "at"],
+         "rows": []},
+        {"name": "Logistics FAQ",
+         "description": "The dispatch agent's knowledge - the answers customers get",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "When will my order arrive",
+              "answer": "Delivery windows are two to five working days from dispatch; the machine tracks your order and the confirmation call goes out the moment it is out for delivery."},
+             {"question": "I missed the delivery",
+              "answer": "The driver reattempts next working day; or reply to arrange a pickup point - your order moves to exception and back by itself."},
+             {"question": "Can I change the delivery address",
+              "answer": "Before dispatch, yes - tell the agent and the order record updates; after dispatch the reroute goes through the exception path."},
+             {"question": "My order arrived damaged",
+              "answer": "Say so on the call or text the line - the order moves to exception, the claim opens, and the return is arranged from the same record."},
+             {"question": "Do I get proof of delivery",
+              "answer": "Yes - the delivered move records the confirmation call on the trail; the note and timestamp stand as the proof."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Order intake",
+         "description": "sms.received -> shape -> Orders -> business_start: every "
+                        "inbound order opens a row AND a tracked instance (ref = "
+                        "the customer's phone) - the dispatch machine watches it "
+                        "from day one.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "sms.received"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the order",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'order': '', "
+                                  "'customer': (pl.get('text') or '')[:40], "
+                                  "'phone': r.get('actor', ''), 'destination': '', "
+                                  "'status': 'placed'}]")}},
+             {"type": "dataset_write", "name": "Open the order row",
+              "params": {"dataset": "Orders", "mode": "append"}},
+             {"type": "business_start", "name": "Track the delivery",
+              "params": {"process": "Delivery pipeline",
+                         "ref": "{{ nodes.n_trigger.output.actor }}",
+                         "title": "Order from {{ nodes.n_trigger.output.actor }}",
+                         "actor": "logistics-operator",
+                         "due_in_seconds": 172800,
+                         "on_duplicate": "skip"}},
+         ]},
+        {"name": "Delivery logger",
+         "description": "call.ended -> shape -> Delivery events. Confirmation calls "
+                        "land on the trail - the evidence behind every delivery.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the touch",
+              "params": {"code": ("r = df.iloc[0] if len(df) else {}\n"
+                                  "pl = r.get('payload') or {}\n"
+                                  "result = [{'order_ref': '', "
+                                  "'action': 'call ' + str(pl.get('end_reason', 'ended')), "
+                                  "'at': r.get('triggered_at', '')}]")}},
+             {"type": "dataset_write", "name": "Append the delivery touch",
+              "params": {"dataset": "Delivery events", "mode": "append"}},
+         ]},
+        {"name": "Delivery advancer",
+         "description": "call.ended -> business_advance: a completed confirmation "
+                        "call from a tracked customer completes their delivery "
+                        "(in_transit -> delivered). Customers the machine does not "
+                        "track, and orders already past the move, skip honestly.",
+         "trigger": {"type": "event_trigger", "params": {"event_type": "call.ended"}},
+         "steps": [
+             {"type": "business_advance", "name": "Complete the customer's delivery",
+              "params": {"process": "Delivery pipeline", "ref": "{{ input.actor }}",
+                         "transition": "deliver", "actor": "logistics-operator",
+                         "note": "the confirmation call ended - the delivery completes itself",
+                         "on_missing": "skip", "on_refusal": "skip"}},
+         ]},
+    ],
+    "agent": {"name": "Dispatch agent",
+              "greeting": "Dispatch here - where is your order headed?",
+              "system_prompt": ("You are a brisk, helpful dispatch agent. Answer from the "
+                                "knowledge matches in metadata.knowledge; confirm deliveries "
+                                "on the call; route damage and address changes to the "
+                                "exception path - never promise a time the board has not set."),
+              "knowledge": {"dataset": "Logistics FAQ", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "Dispatch room", "title": "Dispatch room", "modality": "audio"}],
+    "queues": [{"name": "Dispatch line", "room": "Dispatch room",
+                "bind_agent": True,
+                "config": {"max_size": 40, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 60},
+                           "sms": {"enabled": True, "channel_id": "", "template": ""},
+                           "callback": {"enabled": True, "endpoint_id": ""}}}],
+    "campaign": {"name": "Delivery confirmation campaign",
+                 "config": {}},
+    "processes": [
+        {"name": "Delivery pipeline",
+         "description": ("The delivery as a state machine - one tracked instance "
+                         "per order remembering where it stands across days; "
+                         "inbound orders open it, confirmation calls complete it, "
+                         "exceptions route through their own path and back, and "
+                         "the door nudges a delivery that sits stuck."),
+         "definition": {
+             "states": ["placed", "picked", "dispatched", "in_transit", "delivered",
+                        "exception", "returned"],
+             "initial": "placed",
+             "transitions": [
+                 {"name": "pick", "from": "placed", "to": "picked"},
+                 {"name": "dispatch", "from": "picked", "to": "dispatched"},
+                 {"name": "depart", "from": "dispatched", "to": "in_transit"},
+                 {"name": "deliver", "from": "in_transit", "to": "delivered"},
+                 {"name": "raise_exception", "from": "in_transit", "to": "exception"},
+                 {"name": "restore", "from": "exception", "to": "in_transit"},
+                 {"name": "return_back", "from": "exception", "to": "returned"},
+                 {"name": "escalate", "from": "placed", "to": "placed",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "picked", "to": "picked",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "dispatched", "to": "dispatched",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "in_transit", "to": "in_transit",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Orders",
+         "ref_column": "phone",
+         "title_from": ["order", "customer"],
+         "state_column": "status",
+         "due_in_seconds": 2 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "Logistics Operator Board",
+                  "description": "The deliveries at a glance - orders by status, exception "
+                                 "rate, confirmation traffic."},
+    "notes": [
+        "The confirmation campaign installs EMPTY on purpose: add targets from "
+        "the orders (POST /voice/campaigns/{id}/targets) and bind a telnyx voice "
+        "endpoint when the dialing credentials exist - until then dials skip "
+        "honestly.",
+        "The intake opens BOTH the order row and a tracked instance (ref = the "
+        "customer's phone, on_duplicate=skip). It installs INACTIVE - boot the "
+        "system to open the reactive path.",
+        "The machine defines escalate self-loops on every working state - the "
+        "scheduler door sweeps past-SLA deliveries through them (POST "
+        "/scheduler/escalations/tick).",
+        "The FAQ dataset is the agent's knowledge - edit it and the answers "
+        "follow, no redeploy.",
+    ],
+}
+
+OPERATORS: list[dict] = [
+    _MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR,
+    _SUPPORT_OPERATOR, _OPERATIONS_OPERATOR, _HR_OPERATOR,
+    _FINANCE_OPERATOR, _PROCUREMENT_OPERATOR, _LOGISTICS_OPERATOR,
+]
 OPERATORS_BY_SLUG = {op["slug"]: op for op in OPERATORS}
 
 
@@ -588,11 +1698,13 @@ async def install_operator(db: AsyncSession, slug: str, *, owner_id: str | None,
             ref = str(params.get("dataset") or "").strip()
             if ref in ds_by_name:
                 params["dataset"] = ds_by_name[ref]["name"]
-            # v85: business_advance steps resolve the process by NAME in the
-            # spec, but bind to the BUILT process id (a second install of
-            # the same operator must move ITS pipeline, never the first's)
+            # v85 + v86: business_advance AND business_start steps resolve
+            # the process by NAME in the spec, but bind to the BUILT
+            # process id (a second install of the same operator must move
+            # and track ITS pipeline, never the first's)
             proc_ref = str(params.get("process") or "").strip()
-            if proc_ref and str(s.get("type") or "") == "business_advance":
+            if (proc_ref and str(s.get("type") or "")
+                    in ("business_advance", "business_start")):
                 hit = proc_by_name.get(proc_ref)
                 if not hit:
                     raise OperatorError(

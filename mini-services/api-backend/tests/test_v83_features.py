@@ -116,8 +116,11 @@ def test_v83_catalog_and_detail():
             res = await client.get("/operators", headers=h)
             assert res.status_code == 200, res.text
             shelf = res.json()["operators"]
-            assert [o["slug"] for o in shelf] == ["meeting-operator", "sales-operator",
-                                                  "clinic-operator"]
+            # v86: the shelf grew to nine - the founding three still lead it
+            assert [o["slug"] for o in shelf[:3]] == ["meeting-operator",
+                                                      "sales-operator",
+                                                      "clinic-operator"]
+            assert len(shelf) == 9
             meeting = shelf[0]
             assert meeting["topology"] == {"datasets": 1, "workflows": 1, "agents": 1,
                                            "rooms": 1, "queues": 1, "campaign": 0,
@@ -416,4 +419,4 @@ def test_v83_install_refusals_and_double_install():
 # ---------------------------------------------------------------------------
 
 def test_v83_version_pin():
-    assert settings.version == "1.85.0"
+    assert settings.version == "1.86.0"

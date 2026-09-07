@@ -1,18 +1,26 @@
-"""Business nodes (v85) - workflows move the business state machine.
+"""Business nodes (v85 + v86) - workflows move the business state machine.
 
 v84 made long-running entities first-class (BusinessProcess = the
-machine, instances = the tracked entities that remember). This node is
-how the rest of the platform MOVES them: a workflow reacting to a real
-event (call.ended, sms.received, form submitted, schedule tick) advances
-the matching instance through the machine - the move is validated, on
-the record, and emits business.state_changed like any other advance.
+machine, instances = the tracked entities that remember). These nodes are
+how the rest of the platform MOVES and STARTS them:
+
+* business_advance (v85): a workflow reacting to a real event (call.
+  ended, sms.received, form submitted, schedule tick) advances the
+  matching instance through the machine - the move is validated, on the
+  record, and emits business.state_changed like any other advance.
+* business_start (v86): the intake side - a workflow opens a NEW tracked
+  instance (ref = the external key the business already tracks: the
+  sender's phone, the case number, the order id). The machine watches
+  the entity from the moment it exists; the escalation door inherits it.
 
 The killer wiring is ref-based: the workflow names the process and the
 external key it already tracks (the caller's number from the event's
 actor, the case number from a form field, the lead id from a dataset
-row); the node finds the OPEN instance carrying that ref and takes the
-machine's move. Unknown refs skip honestly when on_missing=skip - a
-call from someone not in the pipeline must not fail the run.
+row); the advance node finds the OPEN instance carrying that ref and
+takes the machine's move. Unknown refs skip honestly when
+on_missing=skip - a call from someone not in the pipeline must not fail
+the run; start never doubles an entity that is already tracked when
+on_duplicate=skip.
 """
 
 from __future__ import annotations
@@ -161,3 +169,87 @@ async def _open_instance_by_ref(session, process_id: str, ref: str):
          .order_by(BusinessProcessInstance.entered_state_at.desc())
          .limit(1))
     return (await session.execute(q)).scalar_one_or_none()
+
+
+class BusinessStartNode(BaseNode):
+    """Start a tracked instance of a business process machine (v86)."""
+
+    type = "business_start"
+    name = "Business Start"
+    description = (
+        "Starts a NEW tracked instance of a business process - the intake "
+        "wiring for operators: an inbound text, call or form opens the "
+        "entity the business tracks (ref = the external key: the sender's "
+        "phone, the case number, the order id) and the machine watches it "
+        "from the moment it exists. An open instance already carrying the "
+        "ref is not doubled: on_duplicate=skip continues honestly."
+    )
+    category = "actions"
+    icon = "flag"
+    color = "#6366f1"
+
+    class ParamsModel(BaseModel):
+        process: str = Field(default="", description="Process name (or id) - the machine that will track the entity")
+        ref: str = Field(default="", description="The external key of the new entity (required) - the phone, case number, order id the business already speaks in")
+        title: str = Field(default="", description="Human title for the tracked entity")
+        context: dict = Field(default_factory=dict, description="Starting memory for the instance (facts the machine should remember)")
+        due_in_seconds: int | None = Field(default=None, description="The SLA promise - when the escalation door should first knock")
+        actor: str = Field(default="workflow", description="Who started it (journey log)")
+        on_duplicate: str = Field(
+            default="error",
+            json_schema_extra={"widget": "select", "options": list(_ON_MISSING)},
+            description="error = fail the run when an open instance already carries this ref; skip = continue honestly - the entity is already tracked",
+        )
+
+    async def execute(self, context) -> NodeResult:
+        from ...db import AsyncSessionLocal
+        from ...services import business_processes as bp_svc
+        from ...services.business_processes import ProcessError
+
+        p = self.params  # type: BusinessStartNode.ParamsModel
+        process_ref = str(p.process or "").strip()
+        if not process_ref:
+            raise NodeExecutionError("a process name (or id) is required - which machine tracks?")
+        ref = str(p.ref or "").strip()
+        if not ref:
+            raise NodeExecutionError(
+                "a ref is required - the external key the business tracks "
+                "(phone, case number, order id)")
+        if p.on_duplicate not in _ON_MISSING:
+            raise NodeExecutionError(f"on_duplicate must be {'|'.join(_ON_MISSING)}")
+
+        async with AsyncSessionLocal() as session:
+            proc = await _resolve_process(session, process_ref, context.owner_id)
+            if proc is None:
+                raise NodeExecutionError(f"Process {process_ref!r} not found")
+            existing = await _open_instance_by_ref(session, proc.id, ref)
+            if existing is not None:
+                if p.on_duplicate == "skip":
+                    return self._single({
+                        "started": False, "skipped": True,
+                        "reason": "an open instance already carries this ref",
+                        "process": proc.name, "ref": ref,
+                        "instance_id": existing.id, "state": existing.state,
+                    })
+                raise NodeExecutionError(
+                    f"an open instance of {proc.name!r} already carries ref "
+                    f"{ref!r} - the entity is already tracked (set "
+                    "on_duplicate=skip to pass honestly)")
+            try:
+                out = await bp_svc.start_instance(
+                    session, proc.id, owner_id=context.owner_id, ref=ref,
+                    title=str(p.title or "")[:200],
+                    context=dict(p.context or {}),
+                    due_in_seconds=p.due_in_seconds,
+                    actor=p.actor or "workflow")
+                await session.commit()  # nodes own their sessions (the dataset_write rule)
+            except ProcessError as exc:
+                raise NodeExecutionError(str(exc)) from exc
+        return self._single({
+            "started": True,
+            "instance_id": out["id"],
+            "ref": out["ref"],
+            "state": out["state"],
+            "process": proc.name,
+            "is_terminal": out["is_terminal"],
+        })
