@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
-    attention_feed, create_process, escalation_preview, get_instance,
+    attention_feed, chain_map, create_process, escalation_history_grid,
+    escalation_preview, get_instance,
     get_process, list_instances, list_processes, process_analytics,
     start_instance, update_escalation_policy,
 )
@@ -82,6 +83,27 @@ async def attention(limit: int = 200, user=Depends(get_optional_user),
     book per row. Declared BEFORE /{process_id} so the word 'attention'
     is never eaten as a process id."""
     return await attention_feed(db, getattr(user, "id", None), limit=limit)
+
+
+@router.get("/chains")
+async def chains(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v95: the owner-wide chain map - the cross-machine journey chains
+    derived from what is INSTALLED, each node with its live counts, each
+    leg with its ride counts and the recent traversals (the HISTORY the
+    operator-detail chain overlays). Declared BEFORE /{process_id}."""
+    return await chain_map(db, getattr(user, "id", None))
+
+
+@router.get("/escalation-history")
+async def escalation_history_grid_route(days: int = 14,
+                                        user=Depends(get_optional_user),
+                                        db: AsyncSession = Depends(get_db)):
+    """v95: the CROSS-MACHINE escalation history - per machine, per day,
+    the door's activity (escalations / digests) and the humans' (acks),
+    read straight off the transition log. The heatmap's grid (v94's
+    per-machine sparkline lives in the analytics; this is the estate
+    wide view beside it). Declared BEFORE /{process_id}."""
+    return await escalation_history_grid(db, getattr(user, "id", None), days=days)
 
 
 @router.get("/{process_id}")

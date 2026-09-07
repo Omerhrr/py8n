@@ -1573,3 +1573,257 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                       + sum(len(v) for v in buckets.values())),
             "escalated": escalated, "recorded": recorded,
             "held": held, "already": already, "digest": digest_report}
+
+
+# v95: the cross-machine view - the chain map with per-leg history
+# (the operator-detail chain's live overlay) + the cross-machine escalation
+# heatmap grid. attention lives in attention_feed (v91); the per-machine
+# sparkline lives in process_analytics (v94) - this is the CROSS-MACHINE view.
+# ---------------------------------------------------------------------------
+
+ESCALATION_HISTORY_TRANSITIONS = ("escalate", "escalated", ACK_TRANSITION,
+                                  DIGEST_TRANSITION)
+
+# the canonical chains the shelf threads (v90) - matched on the head's
+# machine name + the first leg's fire-state; anything else names itself
+CHAIN_NAMES: dict[tuple[str, str], str] = {
+    ("Lead pipeline", "won"): "Revenue chain",
+    ("Purchase lifecycle", "ordered"): "Supply chain",
+    ("Appointment journey", "billed"): "Care chain",
+}
+
+
+def _stuck_state(row: BusinessProcessInstance, definition: dict,
+                 now: datetime) -> tuple[bool, int]:
+    """(is_stuck, overdue_seconds) - the same derivation every view uses."""
+    due = _aware(row.due_at)
+    if row.ended_at is not None or due is None or now <= due:
+        return False, 0
+    terminal = _terminal_states(definition) if definition else set()
+    if terminal and row.state in terminal:
+        return False, 0
+    overdue = round((now - due).total_seconds())
+    return True, overdue
+
+
+def _ack_summary(book: dict, now: datetime) -> dict | None:
+    """The episode's ack receipt as the views show it (v89 loan included)."""
+    acked = book.get("acked")
+    if not isinstance(acked, dict):
+        return None
+    out = {"by": str(acked.get("by") or ""), "at": acked.get("at"),
+           "note": str(acked.get("note") or "")}
+    until = escalations_svc.parse_iso(acked.get("snooze_until"))
+    if until is not None:
+        out["snooze_until"] = until.isoformat()
+        out["snooze_remaining_seconds"] = max(0, round(
+            (until - now).total_seconds()))
+    return out
+
+
+def _resolve_leg_target(procs: list[BusinessProcess], want: str) -> BusinessProcess | None:
+    """Resolve a journey's target among the owner's INSTALLED machines -
+    the same resolution the fire uses (id first, then case-insensitive
+    name, most recent wins). None = the partner operator is not installed;
+    the leg is still reported (honestly pending), never hidden."""
+    want = str(want or "").strip()
+    if not want:
+        return None
+    for p in procs:
+        if p.id == want:
+            return p
+    hits = [p for p in procs if (p.name or "").lower() == want.lower()]
+    if not hits:
+        return None
+    hits.sort(key=lambda p: p.created_at or datetime.min, reverse=True)
+    return hits[0]
+
+
+async def chain_map(db: AsyncSession, owner_id: str | None) -> dict:
+    """v93: the cross-machine CHAIN view - the journey legs the installed
+    machines thread, drawn as chains with LIVE counts and per-leg HISTORY.
+
+    Derived entirely from what is installed: every definition's journeys
+    become a leg (source machine --on_state--> target machine, resolved
+    by the fire's own resolution so an uninstalled partner shows as an
+    honest pending leg naming it, never hidden). Legs walk into chains
+    from the heads (machines with no incoming leg), the shelf's three
+    canonical threads keep their names (Revenue / Supply / Care), and
+    anything else names itself after its head.
+
+    Every node carries the machine's live operation (open, stuck, the
+    systems that bind it); every leg carries how many items have ridden
+    it (opened), how many are still moving (open_now), how many the door
+    is watching (stuck), and the recent traversals - the HISTORY the
+    operator-detail chain draws: ref, title, where the item is now,
+    when the leg opened it, and what the escalation door knows about it
+    (overdue? acknowledged? snoozing?)."""
+    procs = (await db.execute(
+        select(BusinessProcess).order_by(BusinessProcess.created_at.asc()))).scalars().all()
+    if owner_id is not None:
+        procs = [p for p in procs if p.owner_id in (owner_id, None)]
+    if not procs:
+        return {"chains": [], "nodes": {}}
+    by_id = {p.id: p for p in procs}
+    definitions = {p.id: (p.definition or {}) for p in procs}
+    now = _now()
+
+    # the nodes' live operation - every instance of every involved machine
+    inst_rows = (await db.execute(
+        select(BusinessProcessInstance)
+        .where(BusinessProcessInstance.process_id.in_([p.id for p in procs]))
+        .order_by(BusinessProcessInstance.created_at.desc()))).scalars().all()
+    nodes: dict[str, dict] = {}
+    for p in procs:
+        nodes[p.id] = {"process_id": p.id, "name": p.name,
+                       "open": 0, "stuck": 0, "systems": []}
+    for r in inst_rows:
+        node = nodes.get(r.process_id)
+        if node is None or r.ended_at is not None:
+            continue
+        node["open"] += 1
+        stuck, _ = _stuck_state(r, definitions.get(r.process_id) or {}, now)
+        if stuck:
+            node["stuck"] += 1
+    from ..models import Py8nSystem, SystemComponent
+
+    comp_rows = (await db.execute(
+        select(SystemComponent, Py8nSystem.name)
+        .join(Py8nSystem, Py8nSystem.id == SystemComponent.system_id)
+        .where(SystemComponent.kind == "process",
+               SystemComponent.ref_id.in_([p.id for p in procs])))).all()
+    for comp, sys_name in comp_rows:
+        node = nodes.get(comp.ref_id)
+        if node is not None and sys_name and sys_name not in node["systems"]:
+            node["systems"].append(sys_name)
+
+    # the legs - every journey on every installed definition
+    legs: list[dict] = []
+    out_map: dict[str, list[dict]] = {}
+    in_map: dict[str, list[dict]] = {}
+    in_targets: set[str] = set()
+    for p in procs:
+        for j in (definitions[p.id].get("journeys") or []):
+            spec = j.get("open") or {}
+            target_name = str(spec.get("process") or "").strip()
+            target = _resolve_leg_target(procs, target_name)
+            leg = {"from_process_id": p.id, "from_name": p.name,
+                   "on_state": str(j.get("on_state") or ""),
+                   "to_process_id": target.id if target else None,
+                   "to_name": target.name if target else target_name,
+                   "resolved": target is not None,
+                   "due_in_seconds": spec.get("due_in_seconds"),
+                   "opened": 0, "open_now": 0, "stuck": 0, "history": []}
+            legs.append(leg)
+            out_map.setdefault(p.id, []).append(leg)
+            if target is not None:
+                in_map.setdefault(target.id, []).append(leg)
+                in_targets.add(target.id)
+
+    # per-leg ride counts + history - the instances whose journey link
+    # names THIS leg (from_process + from_state, the fire's own stamp);
+    # the link lives on the TARGET machine's instance
+    for r in inst_rows:
+        link = (r.context or {}).get("journey")
+        if not isinstance(link, dict):
+            continue
+        src_l = str(link.get("from_process") or "").lower()
+        st = str(link.get("from_state") or "")
+        for leg in in_map.get(r.process_id, []):
+            if src_l != (leg["from_name"] or "").lower() or st != leg["on_state"]:
+                continue
+            leg["opened"] += 1
+            if r.ended_at is None:
+                leg["open_now"] += 1
+            stuck, overdue = _stuck_state(r, definitions.get(r.process_id) or {}, now)
+            if stuck:
+                leg["stuck"] += 1
+            if len(leg["history"]) < 5:
+                book = escalations_svc.episode_book(r)
+                ack = _ack_summary(book, now)
+                leg["history"].append({
+                    "instance_id": r.id, "process_id": r.process_id,
+                    "ref": r.ref, "title": r.title, "state": r.state,
+                    "opened_at": link.get("at"),
+                    "is_stuck": stuck,
+                    "overdue_seconds": overdue,
+                    "acked_by": (ack or {}).get("by"),
+                    "snooze_remaining_seconds":
+                        (ack or {}).get("snooze_remaining_seconds"),
+                    "due_at": r.due_at.isoformat() if r.due_at else None})
+    for leg in legs:
+        leg["history"].sort(key=lambda h: h.get("opened_at") or "", reverse=True)
+
+    # the chains - walk from the heads (machines no resolved leg arrives at)
+    heads = [p.id for p in procs if p.id not in in_targets and p.id in out_map]
+    chains: list[dict] = []
+    for head in heads:
+        walk: list[dict] = []
+        seen = {head}
+        current = head
+        while current in out_map:
+            nxt_legs = out_map[current]
+            if not nxt_legs:
+                break
+            leg = nxt_legs[0]
+            walk.append(leg)
+            if leg["to_process_id"] is None or leg["to_process_id"] in seen:
+                break
+            seen.add(leg["to_process_id"])
+            current = leg["to_process_id"]
+        if not walk:
+            continue
+        head_proc = by_id[head]
+        name = CHAIN_NAMES.get((head_proc.name, walk[0]["on_state"])) \
+            or f"Chain via {head_proc.name}"
+        chains.append({"name": name, "head": head,
+                       "head_name": head_proc.name, "legs": walk})
+    return {"chains": chains, "nodes": nodes}
+
+
+async def escalation_history_grid(db: AsyncSession, owner_id: str | None,
+                             days: int = 14) -> dict:
+    """v93: the cross-machine ESCALATION HISTORY - per machine, per day,
+    what the door did (escalations), what landed in the summaries
+    (digests) and what the humans took (acks). The heatmap's grid: the
+    door's pressure ACROSS machines over the last N days, read straight
+    off the transition log - derived, nothing stored twice."""
+    days = max(1, min(int(days or 14), 60))
+    now = _now()
+    start = (now - timedelta(days=days - 1)).replace(hour=0, minute=0,
+                                                     second=0, microsecond=0)
+    q = (select(BusinessProcessTransitionLog, BusinessProcess.name)
+         .join(BusinessProcess,
+               BusinessProcess.id == BusinessProcessTransitionLog.process_id)
+         .where(BusinessProcessTransitionLog.transition.in_(
+             ESCALATION_HISTORY_TRANSITIONS),
+             BusinessProcessTransitionLog.created_at >= start))
+    if owner_id is not None:
+        q = q.where(BusinessProcess.owner_id.in_((owner_id, None)))
+    rows = (await db.execute(q)).all()
+    day_keys = [(start + timedelta(days=i)).date().isoformat()
+                for i in range(days)]
+    machines: dict[str, dict] = {}
+    for log, name in rows:
+        m = machines.setdefault(log.process_id, {
+            "process_id": log.process_id, "name": name,
+            "cells": {k: {"escalations": 0, "acks": 0, "digests": 0}
+                      for k in day_keys},
+            "totals": {"escalations": 0, "acks": 0, "digests": 0}})
+        key = _aware(log.created_at).date().isoformat()
+        cell = m["cells"].get(key)
+        if cell is None:
+            continue
+        if log.transition in ("escalate", "escalated"):
+            cell["escalations"] += 1
+            m["totals"]["escalations"] += 1
+        elif log.transition == ACK_TRANSITION:
+            cell["acks"] += 1
+            m["totals"]["acks"] += 1
+        elif log.transition == DIGEST_TRANSITION:
+            cell["digests"] += 1
+            m["totals"]["digests"] += 1
+    out = sorted(machines.values(),
+                 key=lambda m: -(m["totals"]["escalations"]
+                                 + m["totals"]["acks"] + m["totals"]["digests"]))
+    return {"days": day_keys, "machines": out, "days_count": days}

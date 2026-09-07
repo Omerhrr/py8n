@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import {
   Loader2, CheckCircle2, Download, AlertTriangle, ExternalLink, X, Layers,
   Building2, Video, TrendingUp, HeartPulse, Boxes, LayoutDashboard, GitBranch,
-  ArrowLeft, BellRing, ListChecks, Database, Bot, Users, PhoneCall,
+  ArrowLeft, BellRing, ListChecks, Database, Bot, Users, PhoneCall, History,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -120,6 +120,48 @@ function wfRef(w: any): string {
   return w?.id ? `/workflows/${w.id}` : '/workflows'
 }
 
+// v95: the HISTORY on the operator-detail chain. The shelf view above is
+// pre-install (what the chains WILL do); /processes/chains is the
+// owner-wide chain map - the same legs resolved against what is actually
+// INSTALLED, each carrying its ride counts (opened / moving / stuck) and
+// the recent traversals. Where the two agree (from_process + on_state +
+// opens), the shelf chain wears its real history: not just what the
+// install BUILDS but what it has been DOING.
+interface LiveHistoryRow {
+  instance_id: string; process_id: string; ref: string; title: string
+  state: string; opened_at: string | null; is_stuck: boolean
+  overdue_seconds: number; acked_by: string | null
+  snooze_remaining_seconds?: number
+}
+interface LiveLeg {
+  opened: number; open_now: number; stuck: number
+  history: LiveHistoryRow[]
+}
+const liveLegs = ref<Map<string, LiveLeg>>(new Map())
+const liveNodes = ref<Set<string>>(new Set())
+const liveLoading = ref(false)
+
+function legKey(from: string, onState: string, opens: string): string {
+  return `${(from || '').toLowerCase()}|${(onState || '').toLowerCase()}|${(opens || '').toLowerCase()}`
+}
+function legLive(leg: ChainLeg): LiveLeg | null {
+  return liveLegs.value.get(legKey(leg.from_process, leg.on_state, leg.opens)) || null
+}
+function fmtOpenedAt(iso: string | null): string {
+  if (!iso) return ''
+  try {
+    return new Date(iso).toLocaleString([], {
+      month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  } catch { return iso }
+}
+function fmtOverdueShort(sec: number): string {
+  if (!sec || sec <= 0) return ''
+  if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`
+  if (sec < 86400) return `${(sec / 3600).toFixed(1)}h`
+  return `${(sec / 86400).toFixed(1)}d`
+}
+const anyLive = computed(() => liveLegs.value.size > 0)
+
 onMounted(async () => {
   try {
     op.value = await api.get<OpDetail>(`/operators/${slug.value}`)
@@ -128,6 +170,20 @@ onMounted(async () => {
   } finally {
     loading.value = false
   }
+  // the live overlay is a soft read - an absent/empty map just means the
+  // machines are not installed yet (the shelf chain stays the story)
+  liveLoading.value = true
+  try {
+    const map = await api.get<any>('/processes/chains')
+    for (const [pid, n] of Object.entries<any>(map.nodes || {}))
+      if ((n as any)?.name) liveNodes.value.add((n as any).name.toLowerCase())
+    for (const c of map.chains || [])
+      for (const l of c.legs || [])
+        liveLegs.value.set(legKey(l.from_name, l.on_state, l.to_name),
+          { opened: l.opened || 0, open_now: l.open_now || 0,
+            stuck: l.stuck || 0, history: l.history || [] })
+  } catch { /* shelf-only view is honest too */ }
+  finally { liveLoading.value = false }
 })
 </script>
 
@@ -255,6 +311,41 @@ onMounted(async () => {
                     <span class="text-zinc-400">{{ leg.on_state }}</span>, your {{ leg.opens }} opens itself.
                   </template>
                 </p>
+              </div>
+              <!-- v95: the history ON the operator-detail chain - where the
+                machines are installed, the shelf chain wears its real rides -->
+              <div class="mt-3 border-t border-zinc-800/60 pt-3">
+                <p class="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
+                  <History class="h-3 w-3" /> the history so far
+                  <Loader2 v-if="liveLoading" class="h-3 w-3 animate-spin text-zinc-600" />
+                </p>
+                <div v-for="leg in chain.legs" :key="`hist-${leg.from_process}-${leg.on_state}`" class="mt-1.5">
+                  <div v-if="legLive(leg)" class="text-[10px]">
+                    <p class="text-zinc-500">
+                      <span class="font-semibold text-zinc-400">{{ leg.from_process }} --{{ leg.on_state }}--> {{ leg.opens }}</span>:
+                      {{ legLive(leg)!.opened }} opened · {{ legLive(leg)!.open_now }} still moving
+                      <span v-if="legLive(leg)!.stuck" class="font-bold text-rose-400">· {{ legLive(leg)!.stuck }} past SLA</span>
+                    </p>
+                    <div v-if="legLive(leg)!.history.length" class="mt-1 space-y-0.5">
+                      <div v-for="hrow in legLive(leg)!.history" :key="hrow.instance_id"
+                        class="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-zinc-800/70 bg-zinc-950/50 px-2 py-1 text-[9.5px]">
+                        <span class="font-mono font-bold text-zinc-300">{{ hrow.ref }}</span>
+                        <span class="truncate text-zinc-500">{{ hrow.title }}</span>
+                        <span class="rounded bg-zinc-800 px-1 py-0.5 font-semibold text-zinc-400">{{ hrow.state }}</span>
+                        <span class="text-zinc-600">opened {{ fmtOpenedAt(hrow.opened_at) }}</span>
+                        <span v-if="hrow.is_stuck" class="font-bold text-rose-400">{{ fmtOverdueShort(hrow.overdue_seconds) }} past SLA</span>
+                        <span v-if="hrow.acked_by" class="text-emerald-400/80">acked by {{ hrow.acked_by }}</span>
+                        <span v-if="hrow.snooze_remaining_seconds" class="text-sky-300/80">snoozing {{ fmtOverdueShort(hrow.snooze_remaining_seconds) }}</span>
+                      </div>
+                    </div>
+                    <p v-else class="mt-0.5 text-[9.5px] text-zinc-600">
+                      installed - nothing has ridden this leg yet; land {{ leg.from_process }} on {{ leg.on_state }} and the handoff writes itself here.
+                    </p>
+                  </div>
+                  <p v-else class="text-[9.5px] text-zinc-600">
+                    {{ leg.from_process }} --{{ leg.on_state }}--> {{ leg.opens }}: the machines are not installed yet - the history starts when they are.
+                  </p>
+                </div>
               </div>
             </div>
           </div>

@@ -537,4 +537,4 @@ def test_v85_contract_and_version():
 
 
 def test_v85_version_pin():
-    assert settings.version == "1.94.0"
+    assert settings.version == "1.95.0"

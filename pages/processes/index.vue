@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import {
+  Flame,
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
   Flag, RefreshCw, ChevronRight, ListChecks, BellRing, PenLine, CheckCheck,
   Siren, SlidersHorizontal, Radio, Eye,
@@ -681,6 +682,52 @@ async function openJourney(inst: Instance) {
   }
 }
 
+// v95: the CROSS-MACHINE escalation heatmap - per machine, per day, the
+// door's pressure across the whole estate (v94's sparkline is per-machine
+// inside the selected board; this is the machines-x-days grid beside it).
+interface HeatCell { escalations: number; acks: number; digests: number }
+interface HeatMachine {
+  process_id: string; name: string
+  cells: Record<string, HeatCell>
+  totals: { escalations: number; acks: number; digests: number }
+}
+const heatData = ref<{ days: string[]; machines: HeatMachine[] } | null>(null)
+const heatLoading = ref(false)
+const heatError = ref('')
+
+async function loadHeat() {
+  heatLoading.value = true
+  heatError.value = ''
+  try {
+    heatData.value = await api.get<any>('/processes/escalation-history?days=14')
+  } catch (e: any) {
+    heatError.value = e?.data?.detail || e?.message || 'Could not load the escalation history'
+  } finally {
+    heatLoading.value = false
+  }
+}
+
+function heatDay(iso: string): string {
+  try { return new Date(iso + 'T00:00:00').toLocaleDateString([], { weekday: 'narrow' }) }
+  catch { return '' }
+}
+function heatDayNum(iso: string): string {
+  try { return String(new Date(iso + 'T00:00:00').getDate()) }
+  catch { return iso.slice(8) }
+}
+function heatCellClass(cell: HeatCell): string {
+  const e = cell.escalations
+  if (!e && !cell.acks && !cell.digests) return 'bg-zinc-900/60'
+  if (e >= 5) return 'bg-rose-500/60 text-rose-100'
+  if (e >= 3) return 'bg-orange-500/55 text-orange-100'
+  if (e >= 2) return 'bg-amber-500/45 text-amber-100'
+  if (e >= 1) return 'bg-amber-500/25 text-amber-200'
+  return 'bg-emerald-500/20 text-emerald-200' // acks/digests only
+}
+function heatCellTitle(name: string, iso: string, cell: HeatCell): string {
+  return `${name} · ${iso} - ${cell.escalations} escalation(s) · ${cell.acks} ack(s) · ${cell.digests} digest item(s)`
+}
+
 onMounted(async () => {
   try {
     const res = await api.get<{ processes: ProcessDef[] }>('/processes')
@@ -692,6 +739,7 @@ onMounted(async () => {
     loading.value = false
   }
   await loadAttention()  // v91: the overdue view opens with the page
+  loadHeat()             // v95: the cross-machine heatmap opens with it
   connectLiveTail()      // v93: and it refreshes ITSELF from here on
 })
 </script>
@@ -780,6 +828,72 @@ onMounted(async () => {
             </div>
           </div>
           <p v-if="attention.length > 8" class="text-[10px] text-zinc-600">+ {{ attention.length - 8 }} more past SLA (the feed caps at 200, most overdue first)</p>
+        </div>
+      </div>
+
+      <!-- v95: the cross-machine escalation heatmap - the door's pressure across the estate -->
+      <div v-if="!loading" class="mb-5 rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <Flame class="h-3.5 w-3.5 text-amber-400" />
+            <h2 class="text-xs font-bold uppercase tracking-wide text-zinc-300">Escalation heatmap</h2>
+            <span class="text-[10px] text-zinc-500">the door's pressure across machines, last 14 days - hover a cell for the counts</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="flex items-center gap-1 text-[9px] text-zinc-600">
+              quiet
+              <span class="inline-block h-2.5 w-2.5 rounded-sm bg-zinc-900 ring-1 ring-zinc-800" />
+              <span class="inline-block h-2.5 w-2.5 rounded-sm bg-amber-500/25" />
+              <span class="inline-block h-2.5 w-2.5 rounded-sm bg-amber-500/45" />
+              <span class="inline-block h-2.5 w-2.5 rounded-sm bg-orange-500/55" />
+              <span class="inline-block h-2.5 w-2.5 rounded-sm bg-rose-500/60" />
+              hot
+            </span>
+            <button class="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300 transition hover:border-zinc-500 disabled:opacity-50"
+              :disabled="heatLoading" @click="loadHeat">
+              <Loader2 v-if="heatLoading" class="h-3 w-3 animate-spin" />
+              <RefreshCw v-else class="h-3 w-3" /> refresh
+            </button>
+          </div>
+        </div>
+        <div v-if="heatError" class="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[10px] text-rose-300">{{ heatError }}</div>
+        <div v-else-if="heatData && !heatData.machines.length"
+          class="rounded-xl border border-dashed border-zinc-800 px-3 py-5 text-center text-[11px] text-zinc-600">
+          No escalation history yet - the door's knocks, digests and the team's acks will draw the grid here.
+        </div>
+        <div v-else-if="heatData" class="overflow-x-auto">
+          <table class="min-w-[720px] border-separate border-spacing-y-1">
+            <thead>
+              <tr>
+                <th class="w-48 px-2 pb-1 text-left text-[9px] font-bold uppercase tracking-widest text-zinc-600">machine</th>
+                <th v-for="d in heatData.days" :key="d" class="px-0.5 pb-1 text-center text-[8px] font-bold text-zinc-600">
+                  <div>{{ heatDay(d) }}</div>
+                  <div class="text-zinc-500">{{ heatDayNum(d) }}</div>
+                </th>
+                <th class="w-28 px-2 pb-1 text-right text-[9px] font-bold uppercase tracking-widest text-zinc-600">14d total</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="m in heatData.machines" :key="m.process_id">
+                <td class="max-w-48 truncate px-2 py-1 text-[11px] font-bold text-zinc-300" :title="m.name">{{ m.name }}</td>
+                <td v-for="d in heatData.days" :key="d" class="px-0.5 py-0.5 text-center">
+                  <div class="mx-auto flex h-6 w-7 items-center justify-center rounded text-[9px] font-bold"
+                    :class="heatCellClass(m.cells[d])" :title="heatCellTitle(m.name, d, m.cells[d])">
+                    <span v-if="m.cells[d].escalations || m.cells[d].acks || m.cells[d].digests">
+                      {{ m.cells[d].escalations + m.cells[d].acks + m.cells[d].digests }}
+                    </span>
+                  </div>
+                </td>
+                <td class="whitespace-nowrap px-2 py-1 text-right text-[9.5px] font-bold">
+                  <span class="text-amber-300">{{ m.totals.escalations }} esc</span>
+                  <span class="text-zinc-600"> · </span>
+                  <span class="text-emerald-300">{{ m.totals.acks }} ack</span>
+                  <span class="text-zinc-600"> · </span>
+                  <span class="text-sky-300">{{ m.totals.digests }} dig</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
       </div>
 
