@@ -1866,3 +1866,75 @@ Stage Summary:
 - Next candidates: per-domain TLS notes on the route sheet, the work surface
   gaining advance actions beside the acks, and the deployment evidence riding
   the surface (the domain's own liveness where the people are).
+
+## Task 90 (v106 - advance beside the acks, per-domain TLS notes, the liveness on the surface)
+
+Date: 2026-09-09 · Version: 1.105.0 -> 1.106.0 · Baseline: 577 passed + 7 skipped -> 581 passed + 7 skipped
+
+Session opened on a STALE inherited summary (claimed v98 as HEAD with the v105
+round unstarted); fetch showed origin/main at 3cd88a4 (v105) - fast-forwarded,
+environment restored (requirements + torch CPU wheel after another sandbox
+reset), and the round built exactly along Task 89's named next candidates.
+
+ADVANCE BESIDE THE ACKS (v106): system_work_surface's attention rows now carry
+`transitions` - the moves the machine allows FROM the row's current state,
+resolved by the SAME _allowed_from the advance door runs, so the surface's
+buttons can never offer a move the door would refuse (a state with no outgoing
+moves wears an empty list and the surface hides the control). The front door
+grows the Advance control beside the take: the move's own form (transitions as
+"name -> to" choices, an optional note, one form open at a time - opening one
+closes the other) riding the SAME v105 authority the ack rides. Pinned: the
+viewer's move refuses 403, the journey receipt names the human (actor), a row
+advanced but still late STAYS on the attention list wearing its NEW state's
+transitions (the clock never lied), and the terminal move retires the row from
+the list entirely.
+
+PER-DOMAIN TLS NOTES ON THE ROUTE SHEET (v106): _tls_note on every live site
+block of GET /systems/deployment/routes.caddy - the posture (production leans
+on Caddy's automatic HTTPS, staging rehearses on the ACME staging issuer
+sparing the production rate limits) followed by what THAT domain's liveness
+probe last saw: "certificate live: last probe answered HTTP {code} in {ms} ms
+({stamp})" when it answered, "CHECK THE CERTIFICATE: last probe failed
+({detail}, {stamp})" when it did not, "no probe evidence yet" when never
+asked. The sheet an operator wires at the edge now also answers "is this
+certificate doing its job" per domain; regenerated with every deploy verb,
+dark deployments still comments-only (v104 contract intact, re-pinned).
+
+THE LIVENESS RIDING THE SURFACE (v106): system_deployment grew liveness() and
+_last_ping_out (ONE writer for the evidence shape - the estate row and the
+front door can never drift); GET /systems/by-domain/{domain}/work answers
+`liveness` {domain, status, environment, last_ping} - the people on a custom
+domain see their own address is being watched, an honest null when never
+probed, never a lying green. The page wears it as "This address": pulsing
+emerald "answered HTTP {code} - {ms} ms - probed N ago" / rose "no answer" +
+detail / zinc "never probed - liveness unknown".
+
+ALSO FIXED LIVE: the go/[domain] template's Clock3 icon was never imported
+(the v105 build passed with an unresolved component - Nuxt does not fail the
+build; it renders as nothing). Imported with the v106 additions.
+
+TESTS: tests/test_v106_features.py (4 tests - the advance round incl. the
+viewer 403 + the journey naming + the state-wearing + the terminal retirement;
+the TLS notes incl. the stamped-ok block, the REAL refused-probe CHECK block,
+the staging never-probed block + dark-stays-comment; the liveness round incl.
+honest-null -> real refused probe -> stamped recovery + the estate's one-truth
+read; the pin). FOUND LIVE while writing them: the route-sheet block splitter
+must cut on "\n}" - the block body carries the literal {host} brace, a bare
+"}" split truncates before the rewrite line.
+
+GATES: 581 passed + 7 deliberate skips (577 -> 581) + bun build green
+(1.94 MB) + 3-check live smoke green (scripts/smoke_v106_live.py: the row wore
+its moves and the owner advanced it over the wire through to the terminal
+retirement; the real ping door probed the domain - the override aimed at the
+smoke server's own /health - and the sheet read certificate-live with the
+numbers; the surface's liveness walked null -> green on real evidence).
+
+Stage Summary:
+- Py8n v1.106.0 pushed (3cd88a4..b0c61a3): the front door's work surface is a
+  workplace - the people see the liveness of their own address, move the work
+  along beside taking it, and the edge's route sheet carries each domain's TLS
+  evidence.
+- Next candidates: the operator installation/update lifecycle deepening
+  (upgrade diffs were v102's first cut; the estate row could wear pending
+  updates), scheduled pings surfacing their rhythm on the deployment panel,
+  or the work surface gaining per-machine views beneath the attention list.
