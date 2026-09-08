@@ -186,6 +186,33 @@ async def get_optional_user(request: Request, db: AsyncSession = Depends(get_db)
 
     api_key = (request.headers.get("x-api-key") or "").strip()
     if api_key:
+        # v104: "py8n_sys_" is a RESERVED prefix - a SYSTEM key, the machine
+        # identity of one deployed system. It is NOT a user: nothing here
+        # resolves to a User row. The resolved key rides request.state (the
+        # system doors consult it through system_keys.key_role), and
+        # enforce_auth treats a stamped key as an authenticated caller even
+        # in enforced mode. A system key can never inherit a user's
+        # estate-wide powers, and a user key can never collide with it.
+        if api_key.startswith("py8n_sys_"):
+            from .services.system_keys import resolve as resolve_system_key
+
+            row = await resolve_system_key(db, api_key)
+            if row is None:
+                return None
+            # sqlite stores naive datetimes - keep arithmetic in naive UTC (v38 GOTCHA)
+            now = datetime.utcnow()
+            if row.last_used_at is None or (now - row.last_used_at) > timedelta(seconds=60):
+                row.last_used_at = now  # throttled touch
+                await db.commit()
+            scopes = list(row.scopes) if row.scopes else ["read", "write"]
+            request.state.py8n_system_key = {
+                "key_id": row.id, "system_id": row.system_id, "scopes": scopes,
+            }
+            # ride the same scopes channel v43 uses so the router-level
+            # read/write gate covers system keys with zero new wiring
+            request.state.py8n_key_scopes = scopes
+            return None
+
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()
         row = (
             await db.execute(
@@ -217,10 +244,15 @@ def enforce_auth(request: Request, user=Depends(get_optional_user)) -> None:
 
     Public/machine surfaces (see is_public_path) stay reachable so webhooks,
     chat widgets and published app/dashboard runtimes keep working.
+    v104: a resolved SYSTEM key (request.state.py8n_system_key) counts as an
+    authenticated caller - it authenticated, just as a machine rather than a
+    person; what it may touch is decided per door by its scope-derived role.
     """
     if user is not None or not settings.require_auth:
         return
     if is_public_path(request.url.path):
+        return
+    if getattr(request.state, "py8n_system_key", None) is not None:
         return
     raise HTTPException(status_code=401, detail="Authentication required")
 

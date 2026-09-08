@@ -66,14 +66,20 @@ async def _tick_escalations() -> None:
     v81 lifecycle gate holds the sweep for paused/stopped systems).
     v99: the due chain-report schedules dispatch after the walk - the
     digest pattern applied to the chain-history FILE, every outcome an
-    honest record on the schedule row."""
+    honest record on the schedule row.
+    v104: the walk also feeds the health dot - every LIVE deployment
+    whose latest probe is older than PY8N_DEPLOY_PING_INTERVAL_SECONDS
+    gets re-probed (evidence stamped; only lost/recovered transitions
+    are loud)."""
     from . import business_processes
+    from . import system_deployment as deploy_svc
 
     try:
         async with AsyncSessionLocal() as session:
             out = await business_processes.escalate_stuck(session, None)
             reports = await business_processes.dispatch_due_chain_reports(
                 session, None)
+            pings = await deploy_svc.ping_due_deployments(session)
             await session.commit()
         n = len(out.get("escalated") or []) + len(out.get("recorded") or [])
         if n or out.get("held"):
@@ -85,6 +91,11 @@ async def _tick_escalations() -> None:
             logger.info("Chain report: %s to %s (%s leg(s), %s ride(s)) - %s",
                         r.get("delivery"), r.get("to"), r.get("legs"),
                         r.get("rides"), r.get("filename"))
+        if pings.get("probed"):
+            logger.info(
+                "Deploy ping: %s live domain(s) probed, %s answered, %s lost, %s recovered",
+                pings.get("probed", 0), pings.get("ok", 0),
+                len(pings.get("lost") or []), len(pings.get("recovered") or []))
     except Exception:  # noqa: BLE001 - a sweep bug must never wedge the scheduler
         logger.exception("Escalation sweep failed")
 

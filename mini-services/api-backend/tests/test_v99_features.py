@@ -429,4 +429,4 @@ def test_v99_attachment_builder():
 # ---------------------------------------------------------------------------
 
 def test_v99_version_pin():
-    assert settings.version == "1.103.0"
+    assert settings.version == "1.104.0"

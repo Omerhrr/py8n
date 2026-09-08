@@ -92,6 +92,15 @@ services:
       - "8025:80"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # v104 tenant routing - EITHER switch works, no setup needed by default:
+      #   a) the derived route sheet: save
+      #      GET /api/v1/systems/deployment/routes.caddy
+      #      into ./caddy-tenants/ and unmount the line below; Caddy's glob
+      #      import skips it silently while the directory is empty/missing.
+      # - ./caddy-tenants:/etc/caddy/tenants:ro
+      #   b) the static list (comma-separated Caddy site addresses):
+      # environment:
+      #   PY8N_TENANT_HOSTS: "ops.acme.com, *.acme.io"
     depends_on:
       - frontend
       - api

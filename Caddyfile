@@ -1,23 +1,75 @@
+# Py8n edge (Caddy) - the single entrypoint in front of the platform.
+#
+# THREE concerns live here:
+#
+# 1. THE PLATFORM - the builder's estate (canvas, systems page, API).
+#    Everything lands on the Nuxt frontend; requests carrying the dev
+#    transform query (?XTransformPort=<port>) go to that backend port.
+#
+# 2. TENANT DOMAINS (v104) - a deployed system's custom hostname
+#    ("ops.acme.com") must reach ITS front door. Two switches, use
+#    either or both:
+#      a. the DERIVED route sheet: GET /api/v1/systems/deployment/routes.caddy
+#         writes the per-domain site blocks from the live deployments -
+#         save it into /etc/caddy/tenants/ and Caddy's glob import below
+#         picks it up (a glob matching nothing is not an error, so fresh
+#         installs route zero tenants and keep working); or
+#      b. the static env list: PY8N_TENANT_HOSTS="ops.acme.com, *.acme.io"
+#         (comma-separated site addresses are valid Caddy) - the site
+#         block near the bottom maps those hosts onto /go/{host}.
+#    DNS for every custom domain points at THIS Caddy either way.
+#
+# 3. NOTHING ELSE - the default block keeps serving the platform.
+
+# ---------------------------------------------------------------------------
+# 1. the platform (unchanged since the XTransformPort contract was set)
+# ---------------------------------------------------------------------------
 :81 {
-	@transform_port_query {
-		query XTransformPort=*
-	}
+        @transform_port_query {
+                query XTransformPort=*
+        }
 
-	handle @transform_port_query {
-		reverse_proxy localhost:{query.XTransformPort} {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
-	}
+        handle @transform_port_query {
+                reverse_proxy localhost:{query.XTransformPort} {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
 
-	handle {
-		reverse_proxy localhost:3000 {
-			header_up Host {host}
-			header_up X-Forwarded-For {remote_host}
-			header_up X-Forwarded-Proto {scheme}
-			header_up X-Real-IP {remote_host}
-		}
-	}
+        handle {
+                reverse_proxy localhost:3000 {
+                        header_up Host {host}
+                        header_up X-Forwarded-For {remote_host}
+                        header_up X-Forwarded-Proto {scheme}
+                        header_up X-Real-IP {remote_host}
+                }
+        }
+}
+
+# ---------------------------------------------------------------------------
+# 2a. tenant domains via the DERIVED route sheet (v104)
+#     the sheet is regenerated from the estate (every deployment with a
+#     domain becomes `rewrite * /go/{domain}`; dark deployments stay
+#     commented out). Mount the directory in docker-compose to use it.
+# ---------------------------------------------------------------------------
+import /etc/caddy/tenants/*.caddy
+
+# ---------------------------------------------------------------------------
+# 2b. tenant domains via the static env list (v104)
+#     unset (default), the block's only host is the reserved no-op name
+#     and the block is INERT - the sandbox keeps working untouched.
+#     set PY8N_TENANT_HOSTS="ops.acme.com, *.acme.io" and those hostnames
+#     land on the branded front door: /go/{host} resolves the LIVE
+#     deployment's identity before sign-in (v103).
+# ---------------------------------------------------------------------------
+{$PY8N_TENANT_HOSTS:tenant-routing-disabled.invalid} {
+        rewrite * /go/{host}
+        reverse_proxy localhost:3000 {
+                header_up Host {host}
+                header_up X-Forwarded-For {remote_host}
+                header_up X-Forwarded-Proto {scheme}
+                header_up X-Real-IP {remote_host}
+        }
 }

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.103.0"
+    version: str = "1.104.0"
     # v54: public base URL for report drilldown links (PNG captions + json refs).
     # Empty = relative-only links (/d/{slug}?c={id}).
     public_url: str = ""
@@ -140,15 +140,20 @@ class Settings(BaseSettings):
     max_delivery_attachment_bytes: int = 8_000_000   # skip attaching bigger files
 
     # ------------------------------------------------------------------
-    # v103: deployment liveness probe. POST /systems/{id}/deployment/ping
+    # v103/v104: deployment liveness probe. POST /systems/{id}/deployment/ping
     # asks "does this system's custom domain actually answer?" - an
     # outbound GET to https://{domain}. In dev/test environments domains
     # do not resolve, so PY8N_DEPLOY_PING_OVERRIDE points the probe at a
     # reachable URL instead (e.g. the local server itself). Never set in
-    # production.
+    # production. v104: the probes also run THEMSELVES - the scheduler's
+    # escalation tick re-probes every LIVE deployment whose latest probe
+    # is older than deploy_ping_interval_seconds, so the health dot is
+    # fed by evidence on a rhythm instead of by whoever remembers to
+    # click "Ping now".
     # ------------------------------------------------------------------
     deploy_ping_override: str = ""
     deploy_ping_timeout_seconds: float = 6.0
+    deploy_ping_interval_seconds: int = 600
 
 
 @lru_cache

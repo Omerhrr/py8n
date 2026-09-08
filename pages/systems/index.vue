@@ -5,7 +5,7 @@ import {
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
   Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video, GitBranch,
-  Globe, Undo2, CheckCheck, ExternalLink, Server,
+  Globe, Undo2, CheckCheck, ExternalLink, Server, KeyRound, Copy,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -227,7 +227,8 @@ interface HealthRow {
   lifecycle: string; status: string
   success_rate_7d: number | null; runs_7d: number
   failed_workflows_7d: number; overdue: number; escalations: number
-  deployment: { domain: string; url: string; environment: string; status: string } | null
+  deployment: { domain: string; url: string; environment: string; status: string
+    unreachable?: boolean; last_ping?: { at: string; ok: boolean; ms: number | null } | null } | null
 }
 interface HealthOverview {
   systems: HealthRow[]; counts: { running: number; attention: number; hold: number }
@@ -351,6 +352,91 @@ async function pingDeployment() {
   } finally { deployBusy.value = false }
 }
 
+// ---- v104: host routing - the estate's domains as the edge eats them ----
+// The Caddyfile maps a tenant hostname onto the branded front door
+// (/go/{host}); the route sheet (GET /systems/deployment/routes.caddy)
+// is DERIVED from the live deployments, so the edge never drifts.
+const routeNote = ref('')
+const caddySnippet = computed(() => {
+  const d = deployment.value?.domain
+  if (!d) return ''
+  return `${d} {\n\trewrite * /go/${d}\n\treverse_proxy localhost:3000\n}`
+})
+
+async function _copy(text: string, note: string) {
+  try {
+    await navigator.clipboard.writeText(text)
+    routeNote.value = note
+    setTimeout(() => { if (routeNote.value === note) routeNote.value = '' }, 2500)
+  } catch { routeNote.value = 'clipboard refused - select the block and copy by hand' }
+}
+
+async function copyCaddyBlock() {
+  if (caddySnippet.value) await _copy(caddySnippet.value, 'Caddy block copied - serve it from the edge')
+}
+
+async function copyRoutesSheet() {
+  try {
+    const sheet = await api.get<string>('/systems/deployment/routes.caddy')
+    await _copy(String(sheet), 'the whole route sheet copied - drop it into /etc/caddy/tenants/')
+  } catch (e: any) {
+    routeNote.value = e?.data?.detail || e?.message || 'Could not fetch the route sheet'
+  }
+}
+
+// ---- v104: the system's own API keys - the machine identity ----
+interface SystemKeyRow {
+  id: string; name: string; prefix: string
+  created_at: string | null; last_used_at: string | null
+  revoked: boolean; revoked_at: string | null
+  scopes: string[]; read_only: boolean
+}
+const sysKeys = ref<SystemKeyRow[]>([])
+const keyName = ref('')
+const keyReadOnly = ref(false)
+const keyBusy = ref(false)
+const keyNote = ref('')
+const revealedKey = ref('')
+
+async function loadSystemKeys(id: string) {
+  try {
+    const res = await api.get<any>(`/systems/${id}/keys`)
+    sysKeys.value = res.keys || []
+  } catch { sysKeys.value = [] } // non-owners get 403 - the panel hides itself
+}
+
+async function mintKey() {
+  if (!detail.value) return
+  keyBusy.value = true
+  keyNote.value = ''
+  try {
+    const res = await api.post<any>(`/systems/${detail.value.id}/keys`, {
+      name: keyName.value.trim(),
+      scopes: keyReadOnly.value ? ['read'] : ['read', 'write'],
+    })
+    revealedKey.value = res.key // shown ONCE - storage keeps only the hash
+    keyName.value = ''
+    keyReadOnly.value = false
+    keyNote.value = 'key minted - copy it now, it is never shown again'
+    await loadSystemKeys(detail.value.id)
+  } catch (e: any) {
+    keyNote.value = e?.data?.detail || e?.message || 'Could not mint the key'
+  } finally { keyBusy.value = false }
+}
+
+async function revokeKey(keyId: string) {
+  if (!detail.value) return
+  keyBusy.value = true
+  keyNote.value = ''
+  try {
+    await api.del(`/systems/${detail.value.id}/keys/${keyId}`)
+    keyNote.value = 'key revoked - the next request carrying it resolves to nothing'
+    await loadSystemKeys(detail.value.id)
+  } catch (e: any) {
+    keyNote.value = e?.data?.detail || e?.message || 'Could not revoke the key'
+  } finally { keyBusy.value = false }
+}
+
 // ---- v102: the update lifecycle - preview -> apply -> accept / rollback ----
 interface UpdatePreview {
   updatable: boolean; path: string; solution?: string; operator?: string
@@ -402,6 +488,7 @@ async function loadDeps() {
 
 async function openDetail(id: string) {
   detailLoading.value = true
+  revealedKey.value = ''
   try {
     detail.value = await api.get<SystemDetail>(`/systems/${id}`)
     const m = await api.get<any>(`/systems/${id}/members`)
@@ -409,6 +496,8 @@ async function openDetail(id: string) {
     await loadRuntime(id)
     // v102: the deployment identity + the update lifecycle ride the drawer
     await Promise.all([loadDeployment(id), loadUpdatePreview(id)])
+    // v104: the machine credentials (owner-only door - the panel hides)
+    await loadSystemKeys(id)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load the system'
   } finally {
@@ -755,6 +844,8 @@ onMounted(async () => {
               <Globe class="h-3 w-3" /> {{ row.deployment.domain || '(no domain)' }}
               <span class="rounded-full px-1.5 py-0.5 text-[9px] font-bold" :class="deployStatusMeta[row.deployment.status]?.chip">{{ row.deployment.status }}</span>
               <span class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[9px] font-bold text-zinc-400">{{ row.deployment.environment }}</span>
+              <!-- v104: the scheduled probes feed the dot - a live domain that stopped answering says so here -->
+              <span v-if="row.deployment.unreachable" class="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-bold text-rose-300" title="the last scheduled liveness probe got no answer">no answer</span>
             </span>
           </div>
           <p v-if="!healthOverview.systems.length" class="px-3 py-2 text-[11px] text-zinc-600">No systems yet - create one and its row appears here.</p>
@@ -1105,6 +1196,75 @@ onMounted(async () => {
               <span class="text-[10px] text-zinc-600">who can use this system is the membership list above - owner / editor / viewer ride the deployed surface too</span>
             </div>
             <p v-if="deployNote" class="mt-2 rounded-xl bg-zinc-900/70 px-3 py-2 text-[11px] text-sky-300">{{ deployNote }}</p>
+
+            <!-- v104: host routing - the hostname lands on the branded front door -->
+            <div v-if="deployment?.domain" class="mt-3 rounded-xl bg-zinc-950/70 px-3 py-2.5">
+              <div class="flex flex-wrap items-center gap-2">
+                <Network class="h-3 w-3 text-sky-300" />
+                <span class="text-[10px] font-bold uppercase tracking-wide text-zinc-400">host routing</span>
+                <span class="font-mono text-[10px] text-zinc-500">{{ deployment.domain }} &rarr; /go/{{ deployment.domain }}</span>
+                <span class="ml-auto flex gap-1.5">
+                  <button class="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300 transition hover:bg-zinc-800" title="Copy this domain's Caddy site block" @click="copyCaddyBlock">
+                    <Copy class="h-3 w-3" /> Copy block
+                  </button>
+                  <button class="flex items-center gap-1 rounded-lg border border-sky-500/40 px-2 py-1 text-[10px] font-bold text-sky-300 transition hover:bg-sky-500/10" title="Copy the whole route sheet derived from every deployment" @click="copyRoutesSheet">
+                    <Copy class="h-3 w-3" /> Copy routes file
+                  </button>
+                </span>
+              </div>
+              <pre class="mt-2 overflow-x-auto rounded-lg bg-zinc-900/80 px-3 py-2 font-mono text-[10px] leading-relaxed text-sky-200">{{ caddySnippet }}</pre>
+              <p class="mt-1.5 text-[10px] text-zinc-600">point the domain's DNS at the edge, then serve this block (or the derived sheet: GET /systems/deployment/routes.caddy, imported from /etc/caddy/tenants/) - a visitor lands on the branded front door, dark deployments are never routed</p>
+              <p v-if="routeNote" class="mt-1 text-[10px] text-emerald-300">{{ routeNote }}</p>
+            </div>
+          </div>
+
+          <!-- v104: the system's own API keys - the machine identity of the deployed surface -->
+          <div v-if="isOwner" class="mb-5 rounded-2xl border border-amber-500/25 bg-amber-500/5 p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <KeyRound class="h-3.5 w-3.5 text-amber-300" />
+              <h3 class="text-xs font-bold text-amber-200">API keys</h3>
+              <span class="text-[10px] text-zinc-500">machine credentials that speak AS this system - scoped to it, never to a person's whole estate</span>
+            </div>
+
+            <div v-if="revealedKey" class="mt-3 rounded-xl border border-emerald-500/40 bg-emerald-500/5 px-3 py-2.5">
+              <p class="text-[10px] font-bold text-emerald-300">copy it now - the full key is shown exactly once</p>
+              <div class="mt-1.5 flex items-center gap-2">
+                <code class="flex-1 overflow-x-auto whitespace-nowrap rounded-lg bg-zinc-950 px-3 py-2 font-mono text-[11px] text-emerald-200">{{ revealedKey }}</code>
+                <button class="flex items-center gap-1 rounded-lg border border-emerald-500/40 px-2 py-1 text-[10px] font-bold text-emerald-300 transition hover:bg-emerald-500/10" @click="_copy(revealedKey, 'key copied')">
+                  <Copy class="h-3 w-3" /> Copy
+                </button>
+              </div>
+            </div>
+
+            <div class="mt-3 flex flex-wrap items-end gap-2">
+              <label class="text-[10px] text-zinc-500">
+                what the key is for
+                <input v-model="keyName" placeholder="ERP push job" class="mt-1 w-56 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-amber-500/60" />
+              </label>
+              <label class="flex items-center gap-1.5 pb-2 text-[10px] text-zinc-400">
+                <input v-model="keyReadOnly" type="checkbox" class="h-3 w-3 accent-amber-500" />
+                read-only
+              </label>
+              <button class="flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-amber-400 disabled:opacity-50" :disabled="keyBusy || !keyName.trim()" @click="mintKey">
+                <Loader2 v-if="keyBusy" class="h-3 w-3 animate-spin" /> <KeyRound v-else class="h-3 w-3" /> Mint key
+              </button>
+            </div>
+
+            <div v-if="sysKeys.length" class="mt-3 space-y-1.5">
+              <div v-for="k in sysKeys" :key="k.id" class="flex flex-wrap items-center gap-2 rounded-xl bg-zinc-900/60 px-3 py-2 text-[11px]">
+                <code class="font-mono text-zinc-400">{{ k.prefix }}&hellip;</code>
+                <span class="font-bold text-zinc-200">{{ k.name }}</span>
+                <span class="rounded-full px-2 py-0.5 text-[9px] font-bold" :class="k.read_only ? 'bg-zinc-500/15 text-zinc-400' : 'bg-sky-500/15 text-sky-300'">{{ k.read_only ? 'read-only' : 'read + write' }}</span>
+                <span v-if="k.revoked" class="rounded-full bg-rose-500/15 px-2 py-0.5 text-[9px] font-bold text-rose-300">revoked</span>
+                <span v-else-if="k.last_used_at" class="text-[10px] text-zinc-600">used {{ new Date(k.last_used_at).toLocaleString() }}</span>
+                <span v-else class="text-[10px] text-zinc-600">never used</span>
+                <button v-if="!k.revoked" class="ml-auto flex items-center gap-1 rounded-lg border border-rose-500/40 px-2 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/10" :disabled="keyBusy" @click="revokeKey(k.id)">
+                  <Trash2 class="h-3 w-3" /> Revoke
+                </button>
+              </div>
+            </div>
+            <p v-else class="mt-3 text-[10px] text-zinc-500">no keys yet - one speaks for this system with the role its scope spells (write &rarr; editor, read &rarr; viewer), and only on this system</p>
+            <p v-if="keyNote" class="mt-2 rounded-xl bg-zinc-900/70 px-3 py-2 text-[11px] text-amber-300">{{ keyNote }}</p>
           </div>
 
           <!-- v102: the update lifecycle - what changes, then accept or roll it back -->

@@ -533,4 +533,4 @@ def test_v101_scope_units_and_pin():
          " - Revenue chain")
 
     # and the pin
-    assert settings.version == "1.103.0", settings.version
+    assert settings.version == "1.104.0", settings.version

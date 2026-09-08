@@ -1883,3 +1883,42 @@ class SystemDeployment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
                                                  onupdate=_now)
+
+
+class SystemApiKey(Base):
+    """A deployed system's machine credential (v104) - the system's own voice.
+
+    Where v41's ``api_keys`` authenticate AS A USER (inheriting that user's
+    whole estate), a system key authenticates AS THE SYSTEM: the key resolves
+    to exactly one ``py8n_systems`` row and speaks only on it - the machine
+    identity for the integrations a deployed system needs (monitoring agents,
+    upstream pushers, the company's other software talking to ITS operations
+    system). ``py8n_sys_`` is a RESERVED prefix: keys carrying it never match
+    the user-key table.
+
+    The role the key speaks with is derived from its scopes at read time -
+    ``write`` in scopes -> editor, otherwise viewer - the same role ladder
+    the human members use, so a key can never do something its scope does
+    not spell. The full key is shown exactly once at creation; storage keeps
+    only the sha256 hash and a display prefix. Revoke = stamp revoked_at.
+    A machine can never mint or manage keys (owner-only, human doors), and
+    a key on a foreign system looks nonexistent (404) - never a fall-through
+    to the anonymous path.
+    """
+
+    __tablename__ = "system_api_keys"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    system_id: Mapped[str] = mapped_column(
+        ForeignKey("py8n_systems.id", ondelete="CASCADE"),
+        nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    prefix: Mapped[str] = mapped_column(String(24), default="")  # display form, e.g. py8n_sys_ab12cd34
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)  # sha256 hex
+    # same ladder as v43: ["read", "write"] (default) or ["read"]; the role
+    # is DERIVED at read time (system_keys.role_for), never stored separately
+    scopes: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)  # the owner who minted it
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

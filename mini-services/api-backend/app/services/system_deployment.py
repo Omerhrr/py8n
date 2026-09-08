@@ -353,3 +353,146 @@ async def ping_deployment(db: AsyncSession, system: Py8nSystem, *,
         {"domain": row.domain, "ok": result["ok"], "code": result["code"],
          "ms": result["ms"], "detail": result["detail"][:120]})
     return row, result
+
+
+# ------------------------------------------------------------------ v104
+# the scheduled walk - the health dot fed by evidence on a rhythm
+
+PING_LOST_OP = "deployment_ping_lost"
+PING_RECOVERED_OP = "deployment_ping_recovered"
+
+
+def _clamp_interval() -> int:
+    return max(60, int(settings.deploy_ping_interval_seconds or 600))
+
+
+async def ping_due_deployments(db: AsyncSession, *, now: datetime | None = None,
+                               actor: str = "scheduler") -> dict:
+    """Re-probe every LIVE deployment whose latest probe is older than
+    PY8N_DEPLOY_PING_INTERVAL_SECONDS. This is what feeds the health dot
+    automatically: the scheduler's escalation tick walks the estate on
+    its rhythm (same session, same commit, injectable clock for tests),
+    probes what is due, and stamps the SAME evidence columns the manual
+    "Ping now" door stamps - one truth, two rhythms.
+
+    The operations log stays honest WITHOUT flooding: steady-state
+    probes update the evidence columns silently; only TRANSITIONS land
+    as ops + events - ``deployment_ping_lost`` when a domain that used
+    to answer stops (with ``system.deployment_ping_lost`` on the event
+    thread, so a workflow can react to a dark domain), and
+    ``deployment_ping_recovered`` when it answers again. The very first
+    probe answering is also silent; the first probe failing IS a lost.
+
+    Never raises: a probe bug is that deployment's honest evidence, not
+    a broken sweep (the per-deployment try keeps one bad row from
+    killing the walk)."""
+    if now is None:
+        now = _now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    interval = _clamp_interval()
+
+    rows = (
+        await db.execute(
+            select(SystemDeployment).where(
+                SystemDeployment.domain.is_not(None),
+                SystemDeployment.status == "live")
+        )
+    ).scalars().all()
+
+    probed: list[dict] = []
+    lost: list[dict] = []
+    recovered: list[dict] = []
+    for row in rows:
+        last = row.last_ping_at
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)  # sqlite naive (v38 GOTCHA)
+        if last is not None and (now - last).total_seconds() < interval:
+            continue  # this domain's rhythm has not elapsed yet
+        system = await db.get(Py8nSystem, row.system_id)
+        if system is None:
+            continue
+        prev_ok = row.last_ping_ok  # captured BEFORE the stamp overwrites it
+        try:
+            result = await probe_url(_probe_target(row.domain))
+        except Exception as exc:  # noqa: BLE001 - the probe contract says never raise
+            result = {"ok": False, "ms": None, "code": None,
+                      "detail": f"{type(exc).__name__}: {exc}"[:200]}
+        row.last_ping_at = now
+        row.last_ping_ok = bool(result.get("ok"))
+        row.last_ping_ms = result.get("ms")
+        row.last_ping_code = result.get("code")
+        row.last_ping_detail = str(result.get("detail") or "")[:200]
+        entry = {"system_id": row.system_id, "name": system.name,
+                 "domain": row.domain, "ok": row.last_ping_ok,
+                 "ms": row.last_ping_ms, "detail": row.last_ping_detail}
+        probed.append(entry)
+        # transition bookkeeping - evidence updates silently, transitions
+        # are LOUD (ops + event thread)
+        transition: str | None = None
+        if prev_ok is False and not row.last_ping_ok:
+            transition = None  # already dark - the record updates, no new noise
+        elif not row.last_ping_ok:
+            transition = PING_LOST_OP  # answering -> dark, or first probe dark
+        elif prev_ok is False:
+            transition = PING_RECOVERED_OP
+        if transition is not None:
+            payload = {"domain": row.domain, "ok": row.last_ping_ok,
+                       "code": row.last_ping_code, "ms": row.last_ping_ms,
+                       "detail": row.last_ping_detail[:120],
+                       "previous_ok": prev_ok}
+            await system_runtime.record_operation(
+                db, system, transition, actor, payload)
+            await system_runtime._emit_system_event(
+                db, system, f"system.{transition}", payload)
+            (lost if transition == PING_LOST_OP else recovered).append(entry)
+    return {"checked": len(rows), "probed": len(probed), "ok": sum(1 for p in probed if p["ok"]),
+            "lost": lost, "recovered": recovered,
+            "interval_seconds": interval}
+
+
+def routes_sheet(rows: list[tuple[SystemDeployment, Py8nSystem | None]], *,
+                 upstream: str = "localhost:3000") -> str:
+    """The DERIVED Caddy route sheet (v104) - the estate's host routing
+    written out the way Caddy eats it. Every deployment with a domain
+    becomes one site block mapping the hostname onto the branded front
+    door (``rewrite * /go/{domain}`` -> the v103 landing resolves the
+    live identity BEFORE sign-in); dark deployments (paused / offline)
+    appear ONLY as comments - a dark door must not receive traffic.
+
+    This is a projection, never state: regenerate after every deploy
+    verb (``GET /systems/deployment/routes.caddy``) and the edge never
+    drifts from the estate. Caddy includes it with a glob import, and a
+    glob that matches nothing is not an error - a fresh install routes
+    zero tenants and keeps working."""
+    live = [(d, s) for d, s in rows if d.status == "live"]
+    dark = [(d, s) for d, s in rows if d.status != "live"]
+    stamp = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "# Py8n tenant routes - DERIVED from the estate's deployments (v104).",
+        "# Do not edit by hand: regenerate with",
+        "#   GET /api/v1/systems/deployment/routes.caddy?upstream=host:port",
+        f"# Caddyfile:  import /etc/caddy/tenants/*.caddy   # zero matches is fine",
+        f"# generated {stamp} - {len(live)} live, {len(dark)} dark",
+        f"# upstream: {upstream}",
+        "",
+    ]
+    for dep, system in live:
+        name = system.name if system is not None else dep.system_id
+        env = dep.environment
+        lines += [
+            f"# {name} ({env}) - live",
+            f"{dep.domain} {{",
+            f"\t# map the hostname onto the branded front door (v103): /go/{{host}}",
+            f"\trewrite * /go/{dep.domain}",
+            f"\treverse_proxy {upstream}",
+            "}",
+            "",
+        ]
+    if dark:
+        lines.append("# dark deployments - NOT routed (a paused/offline door stays dark)")
+        for dep, system in dark:
+            name = system.name if system is not None else dep.system_id
+            lines.append(f"# {dep.domain}\t# {name} ({dep.environment}) - status: {dep.status}")
+        lines.append("")
+    return "\n".join(lines)

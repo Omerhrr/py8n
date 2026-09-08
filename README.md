@@ -31,11 +31,17 @@ The full arc, in order:
    the v62 membership (owner / editor / viewer).
 4. **Watch** - the estate health overview answers "is my business
    actually healthy?" per system: status dot, success rate, overdue,
-   failed workflows, open escalations.
+   failed workflows, open escalations - and the dot is fed by scheduled
+   liveness probes, so a custom domain that stops answering moves the
+   row to attention on its own (no stored flag, only fresh evidence).
 5. **Update** - the update lifecycle answers "what's going to change if
    I upgrade?" BEFORE anything moves, then every applied upgrade waits
    for a human ruling: accept (settled history) or roll back (unbind
    exactly what it bound).
+6. **Integrate** - the system mints its own API keys (`py8n_sys_...`):
+   machine credentials that speak AS the system - scoped to it alone,
+   with the role their scopes spell - so the company's other software
+   can talk to ITS operations system.
 
 ## The platform, layer by layer
 
@@ -47,7 +53,7 @@ The full arc, in order:
 | Escalations | Per-machine policies (channel + repeat), knock or digest modes, on-call rotation, real email/SMS/Slack delivery |
 | Systems | The operating unit: components, lifecycle gate (start/pause/stop), operations log, events, roles |
 | Operators & marketplace | Pre-wired business operators, marketplace solutions that install as systems, chain views with live counts |
-| Deployments | Custom domains, environments, branding, the public identity door, deployment status on the record |
+| Deployments | Custom domains, environments, branding, the public identity door, deployment status on the record, host routing + liveness probes |
 | Estate health | Per-system status, success rates, overdue and escalation counters - derived, never stored |
 | Reporting | Scheduled chain-history CSV reports, multi-recipient envelopes, hourly/daily/weekly rhythms |
 | Real-time | WebSocket execution progress, the live event system (`system.*`, `business.*`, `call.*`), SSE model streaming |
@@ -103,6 +109,25 @@ installed from a marketplace solution (`as_system=true`). From there:
   tagline, headline, logo) before signing in - and `POST /api/v1/
   systems/{id}/deployment/ping` asks the domain if it answers, keeping
   the evidence on the record (an honest answer even when it fails);
+* the **host routing** (v104) maps a real hostname onto the door:
+  Caddy serves `rewrite * /go/{host}` for each tenant domain (set
+  `PY8N_TENANT_HOSTS` or import the derived sheet), and
+  `GET /api/v1/systems/deployment/routes.caddy` writes that sheet FROM
+  the live deployments - the edge never drifts from the estate, and a
+  paused deployment is never routed;
+* the **scheduled probes** (v104) feed the health dot automatically:
+  the scheduler re-probes every live deployment on a rhythm
+  (`PY8N_DEPLOY_PING_INTERVAL_SECONDS`, default 600s), stamps the same
+  evidence the manual ping keeps, and is loud only on transitions -
+  `deployment_ping_lost` / `deployment_ping_recovered` land in the
+  operations log AND on the system's event thread, so a workflow can
+  react to a dark domain;
+* the **system API keys** (v104) are the machine identity:
+  `POST /api/v1/systems/{id}/keys` mints a `py8n_sys_...` credential
+  that authenticates AS the system (send as `X-API-Key`), speaks with
+  the role its scopes spell (`write` -> editor, else viewer), answers
+  only for its own system, and can never mint keys, manage members or
+  restructure the system it speaks for;
 * the **update lifecycle** (v102) previews an upgrade from the source
   solution's pack (the same reconcile plan the upgrade runs), and
   leaves every applied upgrade PENDING until a human accepts it or
@@ -161,6 +186,9 @@ GET    /api/v1/systems/health/overview   ← the estate health rows
 GET/PUT /api/v1/systems/{id}/deployment  ← domain · environment · branding
 POST   /api/v1/systems/{id}/deployment/deploy|pause|retire
 POST   /api/v1/systems/{id}/deployment/ping ← ask the domain if it answers
+GET    /api/v1/systems/deployment/routes.caddy ← the DERIVED Caddy routes
+GET/POST /api/v1/systems/{id}/keys      ← machine keys (owner only)
+DELETE /api/v1/systems/{id}/keys/{key_id}
 GET    /api/v1/systems/{id}/update/preview
 POST   /api/v1/systems/{id}/update/accept|rollback
 GET    /api/v1/systems/by-domain/{domain} ← the public identity door
@@ -178,7 +206,7 @@ CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 
 ```bash
 cd mini-services/api-backend
-python -m pytest tests/ -q          # 563 tests: engine, systems, machines,
+python -m pytest tests/ -q          # 573 tests: engine, systems, machines,
                                     # escalations, deployments, reporting
 python demo/phase1_demo.py          # standalone milestone demo
 ```

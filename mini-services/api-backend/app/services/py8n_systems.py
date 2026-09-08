@@ -298,6 +298,12 @@ async def health_overview(db: AsyncSession, user) -> dict:
 
     A system with zero runs shows ``null`` success rate - the frontend
     renders a dash, never a lying 0%.
+
+    v104: the dot also listens to the scheduled liveness probes - a LIVE
+    deployment whose latest probe got no answer moves the dot to
+    ``attention`` (the system may be green inside, but its people cannot
+    reach it; that IS a business problem). The deployment object carries
+    the boolean (``unreachable``) so the UI can say WHY.
     """
     from .business_processes import _terminal_states
     from .system_governance import member_role
@@ -408,13 +414,18 @@ async def health_overview(db: AsyncSession, user) -> dict:
         overdue = info.get("overdue", 0)
         escalations = info.get("escalations", 0)
         failures = info["failures"]
+        dep = dep_by_system.get(s.id)
+        # v104: a live domain that stopped answering is attention - the
+        # newest probe's evidence moves the dot, nothing is stored
+        unreachable = bool(
+            dep and dep.status == "live"
+            and dep.last_ping_at is not None and not dep.last_ping_ok)
         if lifecycle in ("paused", "stopped"):
             status = "hold"
-        elif overdue or escalations or failures:
+        elif unreachable or overdue or escalations or failures:
             status = "attention"
         else:
             status = "running"
-        dep = dep_by_system.get(s.id)
         success_rate = (
             round((info["runs"] - failures) / info["runs"] * 100, 1)
             if info["runs"] else None
@@ -433,6 +444,7 @@ async def health_overview(db: AsyncSession, user) -> dict:
                 "url": f"https://{dep.domain}" if dep.domain else "",
                 "environment": dep.environment,
                 "status": dep.status,
+                "unreachable": unreachable,
                 # v103: what the domain answered the last time somebody
                 # asked (compact - the full evidence lives on the record)
                 "last_ping": (
