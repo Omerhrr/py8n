@@ -71,7 +71,7 @@ def test_v47_templates_e2e():
     async def _go():
         async with _client() as client:
             health = (await client.get("/health")).json()
-            assert health["version"] >= "1.47.0", health
+            assert tuple(int(p) for p in health["version"].split(".")) >= (1, 47, 0), health
 
             for template_id in (RETRAINING, ETL):
                 # 1. one-click instantiate, exactly like the gallery button

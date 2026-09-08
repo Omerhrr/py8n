@@ -159,7 +159,7 @@ class _ScriptedChat:
 # ---------------------------------------------------------------------------
 
 def test_v73_pins():
-    assert settings.version >= "1.73.0"  # v74+ carries the batch forward
+    assert tuple(int(p) for p in settings.version.split(".")) >= (1, 73, 0)  # v74+ carries the batch forward
     from app.services.voice_agents import BRAINS, BRAIN_PROVIDERS
     assert BRAINS == ("scaffold", "ai_agent")
     assert BRAIN_PROVIDERS == ("sandbox_bridge", "openai_compatible")

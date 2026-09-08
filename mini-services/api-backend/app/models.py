@@ -1772,8 +1772,14 @@ class ChainReportSchedule(Base):
     digest's subject names its shape.
 
     One row per owner (unique): the report is an ESTATE concern - the
-    whole chain map or one filtered chain (``chain`` names it, the same
-    filter the plot's per-chain CSV button sends). The schedule stamps
+    whole chain map, one filtered chain (``chain`` names it, the same
+    filter the plot's per-chain CSV button sends) or one SYSTEM's slice
+    (v100: ``system`` names it, the same filter the systems page's
+    per-system export sends - the report breaks down by the systems the
+    machines actually bind). The report rides to ONE envelope with
+    EVERY name on it (v100: ``to`` carries the recipient LIST,
+    comma/semicolon-separated, normalized and ceilinged - one SMTP
+    conversation, one attachment, all of the names). The schedule stamps
     its own bookkeeping: last_sent_at / next_due (advanced on EVERY due
     attempt - an honest skip consumes the window, the same way the
     digest's window elapses when the bucket stays empty) and
@@ -1791,10 +1797,16 @@ class ChainReportSchedule(Base):
     # the minimum honest cadence: a file dispatch is a minutes concern,
     # not a seconds one (the door's own tick defaults to 300s)
     cadence_seconds: Mapped[int] = mapped_column(Integer, default=86400)
-    to: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    # v100: the recipient LIST - comma/semicolon-separated, normalized on
+    # save (whitespace stripped, duplicates collapsed, ceiling enforced);
+    # one envelope carries every name
+    to: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     history_limit: Mapped[int] = mapped_column(Integer, default=50)
     # optional single-chain filter ("" = the whole estate map)
     chain: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    # v100: optional single-system scope ("" = every system) - the report
+    # covers only the machines the named system binds
+    system: Mapped[str] = mapped_column(String(120), nullable=False, default="")
     last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
                                                           nullable=True)
     next_due: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),

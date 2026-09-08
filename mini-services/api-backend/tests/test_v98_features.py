@@ -145,7 +145,7 @@ def test_v98_chain_history_csv_export():
                 "leg_opened", "leg_open_now", "leg_stuck", "history_truncated",
                 "ref", "title", "state", "opened_at", "due_at", "is_stuck",
                 "overdue_seconds", "acked_by", "snooze_remaining_seconds",
-                "instance_id", "process_id"]], rows
+                "instance_id", "process_id", "system"]], rows
 
             # install the revenue chain's three departments
             for slug in ("operations-operator", "sales-operator",
@@ -164,7 +164,8 @@ def test_v98_chain_history_csv_export():
             for name, row in leg_rows.items():
                 assert row[0] == "Revenue chain", row          # the chain named
                 assert row[5] == "0" and row[8] == "no", row   # no rides yet
-                assert all(cell == "" for cell in row[9:]), row  # the absence reads as data
+                assert all(cell == "" for cell in row[9:20]), row  # the absence reads as data
+                assert row[20], row                            # v100: the machine's system named (the breakdown dimension)
             assert leg_rows["Customer onboarding"][4] == str(5 * 24 * 3600), leg_rows
 
             # a fresh lead WINS - the leg opens the onboarding case
@@ -413,4 +414,4 @@ def test_v98_side_legs_group():
 # ---------------------------------------------------------------------------
 
 def test_v98_version_pin():
-    assert settings.version == "1.99.0"
+    assert settings.version == "1.100.0"

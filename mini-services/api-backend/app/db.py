@@ -134,5 +134,10 @@ async def init_db() -> None:
                 sync_conn.execute(text("ALTER TABLE py8n_systems ADD COLUMN source_solution_slug VARCHAR(140)"))
             if "upgraded_at" not in sys_cols:
                 sync_conn.execute(text("ALTER TABLE py8n_systems ADD COLUMN upgraded_at TIMESTAMP"))
+            # v100: the chain report's system scope (the v99 table gains a
+            # column; fresh installs get it from create_all)
+            cr_cols = {c["name"] for c in insp.get_columns("chain_report_schedules")}
+            if "system" not in cr_cols:
+                sync_conn.execute(text("ALTER TABLE chain_report_schedules ADD COLUMN system VARCHAR(120) DEFAULT ''"))
 
         await conn.run_sync(_add_missing_columns)

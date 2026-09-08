@@ -1124,12 +1124,25 @@ def email_build_outbound(config: dict, to: str, text: str, subject: str = "",
     }
 
 
+def email_rcpt_list(raw) -> list[str]:
+    """v100: the envelope's recipient list out of the request's ``to`` -
+    one string that may carry ONE address (every pre-v100 caller) or a
+    comma/semicolon-separated LIST (the chain report's recipient list).
+    An address never contains a comma, semicolon or whitespace, so the
+    split is safe; empties drop; order and spelling survive as given
+    (dedupe is the caller's save-time job, not the wire's)."""
+    import re as _re
+    return [a for a in _re.split(r"[,;\s]+", str(raw or "")) if a]
+
+
 def email_send_smtp(request: dict) -> dict:
     """The blocking SMTP send (run in a thread by deliver_outbound).
 
     STARTTLS on 587, implicit SSL on 465, plain otherwise - the three
     shapes every submission port speaks. Failures raise; the caller
-    records them honestly.
+    records them honestly. v100: the envelope carries EVERY recipient the
+    request names (one conversation, one RCPT TO per name) - the report's
+    single attachment rides to the whole list on ONE send.
     """
     import smtplib
 
@@ -1137,8 +1150,11 @@ def email_send_smtp(request: dict) -> dict:
     port = int(request.get("port") or 587)
     user = str(request.get("user") or "")
     password = str(request.get("password") or "")
+    rcpts = email_rcpt_list(request.get("to"))
     if not host:
         raise ValueError("no smtp_host configured")
+    if not rcpts:
+        raise ValueError("no recipient named - the message has nowhere to go")
     if port == 465:
         client = smtplib.SMTP_SSL(host, port, timeout=10)
     else:
@@ -1153,7 +1169,7 @@ def email_send_smtp(request: dict) -> dict:
     try:
         if user:
             client.login(user, password)
-        refusal = client.sendmail(request["from"], [request["to"]], request["message"].encode("utf-8"))
+        refusal = client.sendmail(request["from"], rcpts, request["message"].encode("utf-8"))
         if refusal:
             raise ValueError(f"SMTP refused recipients: {list(refusal)}")
     finally:
@@ -1161,7 +1177,8 @@ def email_send_smtp(request: dict) -> dict:
             client.quit()
         except Exception:  # noqa: BLE001
             pass
-    return {"delivery": "delivered", "detail": f"smtp accepted the message for {request['to']}"}
+    return {"delivery": "delivered",
+            "detail": f"smtp accepted the message for {', '.join(rcpts)}"}
 
 
 # ---------------------------------------------------------------------------

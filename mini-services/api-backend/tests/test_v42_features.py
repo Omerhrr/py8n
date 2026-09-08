@@ -60,7 +60,7 @@ def test_v42_health_pin():
 
     body = asyncio.run(_go())
     assert body["app"] == "Py8n"
-    assert body["version"] >= "1.42.0", f"expected at least 1.42.0, got {body['version']}"
+    assert tuple(int(p) for p in body["version"].split(".")) >= (1, 42, 0), f"expected at least 1.42.0, got {body['version']}"
 
 
 # ------------------------------------------------------------------ test 2

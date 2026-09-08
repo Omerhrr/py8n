@@ -815,7 +815,11 @@ onMounted(async () => {
 // skipped / failed) stamps the schedule row honestly, and an empty window
 // consumes itself without emailing an empty spreadsheet.
 const chainReport = ref<any>(null)
-const crForm = ref({ enabled: true, cadence_minutes: 1440, to: '', history_limit: 50, chain: '' })
+// v100: the report carries a RECIPIENT LIST (comma/semicolon-separated - one
+// envelope, every name) and an optional SYSTEM scope (the file covers only
+// the machines that system binds, the same filter the systems page's
+// per-system export sends)
+const crForm = ref({ enabled: true, cadence_minutes: 1440, to: '', history_limit: 50, chain: '', system: '' })
 const crEditing = ref(false)
 const crBusy = ref(false)
 const crSending = ref(false)
@@ -838,6 +842,7 @@ async function loadChainReport() {
         to: chainReport.value.to || '',
         history_limit: chainReport.value.history_limit || 50,
         chain: chainReport.value.chain || '',
+        system: chainReport.value.system || '',
       }
     }
   } catch { /* the card reads its absence honestly */ }
@@ -853,6 +858,7 @@ async function saveChainReport() {
       to: crForm.value.to.trim(),
       history_limit: crForm.value.history_limit,
       chain: crForm.value.chain.trim(),
+      system: crForm.value.system.trim(),
     })
     chainReport.value = out.schedule
     crEditing.value = false
@@ -1088,7 +1094,9 @@ async function removeChainReport() {
               every {{ crCadence(chainReport.cadence_seconds) }}
             </span>
             <span class="text-[10px] text-zinc-500">to <span class="text-zinc-300">{{ chainReport.to }}</span></span>
+            <span v-if="chainReport.recipient_count > 1" class="rounded-full bg-sky-500/10 px-2 py-0.5 text-[9px] font-bold text-sky-300" title="one envelope carries every name - one SMTP conversation, the whole list on it">{{ chainReport.recipient_count }} recipients</span>
             <span v-if="chainReport.chain" class="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-bold text-fuchsia-300" title="the report watches one chain only">chain: {{ chainReport.chain }}</span>
+            <span v-if="chainReport.system" class="rounded-full bg-violet-500/10 px-2 py-0.5 text-[9px] font-bold text-violet-300" title="the report covers only the machines this system binds">system: {{ chainReport.system }}</span>
             <span class="ml-auto flex items-center gap-1.5">
               <button class="flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
                 :disabled="crSending" title="one dispatch NOW, whatever the window says - the same renderer the schedule uses"
@@ -1125,22 +1133,25 @@ async function removeChainReport() {
         </div>
         <p v-if="crError" class="mt-2 text-[10px] text-rose-300">{{ crError }}</p>
         <!-- the form - the same fields the backend validates loud -->
-        <div v-if="crEditing" class="mt-3 grid gap-2 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3 sm:grid-cols-[1fr_120px_1fr_110px_140px_auto]">
+        <div v-if="crEditing" class="mt-3 grid gap-2 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3 sm:grid-cols-[1fr_120px_1fr_110px_140px_140px_auto]">
           <label class="flex items-center gap-1.5 text-[10px] text-zinc-400">
             <input v-model="crForm.enabled" type="checkbox" class="accent-cyan-500" /> scheduled
           </label>
           <input v-model="crForm.cadence_minutes" type="number" min="5" step="5" placeholder="cadence (min)"
             class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
             title="how often the file rides the wire, in minutes (floor 5 - a file dispatch is a minutes concern)" />
-          <input v-model="crForm.to" placeholder="to (owner@company.com)"
+          <input v-model="crForm.to" placeholder="to (a@co.com, b@co.com)"
             class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="the recipient - delivered over your bound email endpoint (bind one on /channels)" />
+            title="the recipient LIST - commas or semicolons separate the names; ONE envelope carries every name (ceiling 8); delivered over your bound email endpoint (bind one on /channels)" />
           <input v-model="crForm.history_limit" type="number" min="1" max="50" placeholder="depth"
             class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
             title="the per-leg traversal window (1..50, the map's own clamp)" />
           <input v-model="crForm.chain" placeholder="chain (optional)"
             class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
             title="watch ONE chain only (e.g. Revenue chain) - empty = the whole estate map" />
+          <input v-model="crForm.system" placeholder="system (optional)"
+            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+            title="break the report down by ONE system - the file covers only the machines that system binds (empty = every system); the email names the rides per system either way" />
           <button class="flex items-center justify-center gap-1 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
             :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
             <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save

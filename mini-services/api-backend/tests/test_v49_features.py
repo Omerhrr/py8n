@@ -51,7 +51,7 @@ def test_v49_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] >= "1.49.0", res.json()
+            assert tuple(int(p) for p in res.json()["version"].split(".")) >= (1, 49, 0), res.json()
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
             assert len(defs) >= 47, f"v49 pin: expected at least 47 types, got {len(defs)}"

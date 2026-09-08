@@ -106,6 +106,7 @@ async def chains(history_limit: int = 5, user=Depends(get_optional_user),
 async def chains_history_csv_route(history_limit: int = 50,
                                    chain: str = "",
                                    leg: str = "",
+                                   system: str = "",
                                    user=Depends(get_optional_user),
                                    db: AsyncSession = Depends(get_db)):
     """v98: the per-leg chain history as a CSV download - the SAME map the
@@ -118,15 +119,22 @@ async def chains_history_csv_route(history_limit: int = 50,
     v99: the PLOT's own filters - ``chain`` names one chain (the per-chain
     CSV button), ``leg`` names one leg as "from_name|on_state" (the
     per-leg CSV chip); both compose, case-insensitive, an unknown name an
-    honest empty file. The response names the filters it honored."""
+    honest empty file. v100: ``system`` names one SYSTEM (the systems
+    page's per-system export - a leg rides in when the machine firing it
+    binds that system) and every row names its machine's systems (the
+    breakdown dimension). The response names the filters it honored."""
     out = await chain_history_csv(db, getattr(user, "id", None),
                                   history_limit=history_limit,
-                                  chain=chain or None, leg=leg or None)
+                                  chain=chain or None, leg=leg or None,
+                                  system=system or None)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     slug = ""
     if out["chain_filter"]:
         slug = "-" + "".join(c if c.isalnum() else "-"
                              for c in out["chain_filter"].lower())[:40].strip("-")
+    elif out["system_filter"]:
+        slug = "-sys-" + "".join(c if c.isalnum() else "-"
+                                 for c in out["system_filter"].lower())[:36].strip("-")
     headers = {"Content-Disposition":
                f'attachment; filename="py8n-chain-history{slug}-{stamp}.csv"',
                "X-Py8n-Leg-Count": str(out["leg_count"]),
@@ -135,6 +143,8 @@ async def chains_history_csv_route(history_limit: int = 50,
         headers["X-Py8n-Chain-Filter"] = out["chain_filter"]
     if out["leg_filter"]:
         headers["X-Py8n-Leg-Filter"] = out["leg_filter"]
+    if out["system_filter"]:
+        headers["X-Py8n-System-Filter"] = out["system_filter"]
     return Response(content=out["csv"], media_type="text/csv; charset=utf-8",
                     headers=headers)
 
@@ -142,16 +152,23 @@ async def chains_history_csv_route(history_limit: int = 50,
 class ChainReportUpsert(BaseModel):
     """v99: the chain-report schedule - the digest pattern applied to the
     FILE. One per owner: cadence floor 300s (a file dispatch is a minutes
-    concern), a real recipient, the depth clamped to the map's 1..50, one
-    optional chain name ("" = the whole estate map)."""
+    concern), a real RECIPIENT LIST (v100: comma/semicolon-separated,
+    every name carries an @, ceiling enforced loud), the depth clamped to
+    the map's 1..50, one optional chain name and one optional SYSTEM
+    scope ("" = every chain / every system)."""
     enabled: bool = True
     cadence_seconds: int = Field(default=86400, description=(
         "how often the file rides the wire (floor 300s)"))
-    to: str = Field(default="", description="the recipient (email address)")
+    to: str = Field(default="", description=(
+        "the recipient list - comma/semicolon-separated email addresses; "
+        "one envelope carries every name"))
     history_limit: int = Field(default=50, ge=1, le=50, description=(
         "the per-leg traversal window (the map's own clamp)"))
     chain: str = Field(default="", description=(
         "optional single-chain filter (\"\" = every chain)"))
+    system: str = Field(default="", description=(
+        "optional single-system scope - the report covers only the "
+        "machines that system binds (\"\" = every system)"))
 
 
 @router.get("/chain-report")
@@ -172,7 +189,8 @@ async def put_chain_report_route(body: ChainReportUpsert,
         out = await upsert_chain_report(
             db, getattr(user, "id", None), enabled=body.enabled,
             cadence_seconds=body.cadence_seconds, to=body.to,
-            history_limit=body.history_limit, chain=body.chain)
+            history_limit=body.history_limit, chain=body.chain,
+            system=body.system)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

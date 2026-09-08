@@ -490,14 +490,19 @@ const chainCsvError = ref('')
 function _csvSlug(s: string): string {
   return s.toLowerCase().split('').map(c => /[a-z0-9]/.test(c) ? c : '-').join('').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
 }
-async function exportChainCsv(chain?: string, leg?: string) {
+async function exportChainCsv(chain?: string, leg?: string, system?: string) {
   chainCsvBusy.value = true
   chainCsvError.value = ''
   try {
     const params = new URLSearchParams({ history_limit: '50' })
     if (chain) params.set('chain', chain)
     if (leg) params.set('leg', leg)
-    const tag = chain ? `-${_csvSlug(chain)}` : leg ? `-leg-${_csvSlug(leg.replace('|', '-'))}` : ''
+    // v100: the report's own system scope - a leg rides in when the machine
+    // FIRING it binds this system; every row names its machine's systems
+    if (system) params.set('system', system)
+    const tag = chain ? `-${_csvSlug(chain)}`
+      : leg ? `-leg-${_csvSlug(leg.replace('|', '-'))}`
+      : system ? `-sys-${_csvSlug(system)}` : ''
     await download(`/processes/chains/history.csv?${params.toString()}`,
       `py8n-chain-history${tag}-${new Date().toISOString().slice(0, 10)}.csv`)
   } catch (e: any) {
@@ -841,6 +846,14 @@ onMounted(async () => {
                 @click="exportChainCsv()">
                 <Loader2 v-if="chainCsvBusy" class="h-3 w-3 animate-spin" />
                 <Download v-else class="h-3 w-3" /> Export CSV
+              </button>
+              <!-- v100: the report's system scope - THIS system's slice of the map -->
+              <button class="flex items-center gap-1 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2 py-1 text-[10px] font-bold text-violet-300 transition hover:bg-violet-500/20 disabled:opacity-50"
+                :disabled="chainCsvBusy"
+                title="export only the legs this system's machines fire - a leg rides in when the machine firing it binds this system (every row still names its systems, the breakdown dimension)"
+                @click="exportChainCsv(undefined, undefined, detail.name)">
+                <Loader2 v-if="chainCsvBusy" class="h-3 w-3 animate-spin" />
+                <Download v-else class="h-3 w-3" /> This system
               </button>
             </div>
             <div class="space-y-3">

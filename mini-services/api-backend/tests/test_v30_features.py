@@ -117,7 +117,7 @@ def test_v30_rules_crud_and_validation():
         async with _client() as c:
             r = await c.get("/health")
             # strict pin lives in the latest wave's tests only (v31 convention)
-            assert r.json()["version"] >= "1.30.0"
+            assert tuple(int(p) for p in r.json()["version"].split(".")) >= (1, 30, 0)
 
             # node registry untouched by v30 (app-platform wave, no new nodes)
             r = await c.get("/node-definitions")

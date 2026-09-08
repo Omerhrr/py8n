@@ -670,4 +670,4 @@ def test_v81_metrics_and_events_view():
 def test_v81_version():
     from app.config import settings
 
-    assert settings.version == "1.99.0"
+    assert settings.version == "1.100.0"

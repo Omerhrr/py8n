@@ -140,7 +140,7 @@ def test_v46_definitions():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] >= "1.46.0", f"expected >= 1.46.0, got {res.json()['version']}"  # strict pin moved to v47
+            assert tuple(int(p) for p in res.json()["version"].split(".")) >= (1, 46, 0), f"expected >= 1.46.0, got {res.json()['version']}"  # strict pin moved to v47
             res = await client.get("/node-definitions")
             defs = res.json()["definitions"]
             types = [d["type"] for d in defs]

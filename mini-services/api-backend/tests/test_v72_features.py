@@ -573,7 +573,7 @@ def test_v72_version_and_contracts():
     async def _go():
         async with _client() as client:
             res = await client.get("/health")
-            assert res.json()["version"] >= "1.72.0"  # v73 relaxes the pin forward
+            assert tuple(int(p) for p in res.json()["version"].split(".")) >= (1, 72, 0)  # v73 relaxes the pin forward
             res = await client.get("/voice/contracts")
             assert res.status_code == 200
             contracts = res.json()

@@ -321,4 +321,4 @@ def test_v97_journey_opened_on_the_live_tail():
 def test_v97_version_pin():
     from app.config import settings
 
-    assert settings.version == "1.99.0"
+    assert settings.version == "1.100.0"

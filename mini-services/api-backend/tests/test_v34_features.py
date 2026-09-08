@@ -137,7 +137,7 @@ def test_v34_health_pin():
             res = await client.get("/health")
             assert res.status_code == 200, res.text
             body = res.json()
-            assert body["app"] == "Py8n" and body["version"] >= "1.34.0", body
+            assert body["app"] == "Py8n" and tuple(int(p) for p in body["version"].split(".")) >= (1, 34, 0), body
 
     try:
         asyncio.run(_go())

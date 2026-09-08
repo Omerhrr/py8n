@@ -894,4 +894,4 @@ def test_v78_version_pin():
     from app.config import settings
 
     # relaxed to >= when the next batch pinned the new version
-    assert settings.version >= "1.78.0"
+    assert tuple(int(p) for p in settings.version.split(".")) >= (1, 78, 0)

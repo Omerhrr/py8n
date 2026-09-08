@@ -1789,6 +1789,11 @@ async def chain_map(db: AsyncSession, owner_id: str | None, *,
                    "to_name": target.name if target else target_name,
                    "resolved": target is not None,
                    "due_in_seconds": spec.get("due_in_seconds"),
+                   # v100: the systems the firing machine binds - the
+                   # report's breakdown-by-system reads THIS (a machine
+                   # bound to two systems lands its rides in both buckets,
+                   # the way a pivot over the file would count them)
+                   "systems": list(nodes[p.id]["systems"]),
                    "opened": 0, "open_now": 0, "stuck": 0, "history": []}
             legs.append(leg)
             out_map.setdefault(p.id, []).append(leg)
@@ -1877,10 +1882,13 @@ CHAIN_CSV_HEADER = [
     "ref", "title", "state", "opened_at", "due_at", "is_stuck",
     "overdue_seconds", "acked_by", "snooze_remaining_seconds",
     "instance_id", "process_id",
+    # v100: the systems the firing machine binds, "|"-joined - the
+    # spreadsheet's own breakdown-by-system dimension on every row
+    "system",
 ]
 
 
-def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
+def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int, dict]:
     """v98: the per-leg chain history as CSV rows - one row per traversal,
     the leg (and its live counts) named on every row so a spreadsheet can
     filter or pivot per leg; a leg with no rides yet still ships one row
@@ -1890,9 +1898,16 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
     A leg two walks both carry (two machines firing into the same target -
     a diamond the map honestly draws twice) is written ONCE, under the
     first chain that reached it: a pivot over this file must never count
-    the same ride twice."""
+    the same ride twice.
+
+    v100: every row names the systems its firing machine binds (the
+    "system" column, "|"-joined) and the ride count is broken down BY
+    system - {system_name: rides} with a ride landing in every bucket its
+    machine binds (a pivot's own arithmetic); machines bound to no system
+    ride outside the breakdown, exactly as the file shows."""
     rows = [list(CHAIN_CSV_HEADER)]
     rides = 0
+    by_system: dict[str, int] = {}
     seen_legs: set[tuple[str, str]] = set()
     for ch in chains:
         for leg in ch.get("legs") or []:
@@ -1902,6 +1917,7 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
                 continue
             seen_legs.add(leg_id)
             sla = leg.get("due_in_seconds")
+            sys_cell = "|".join(leg.get("systems") or [])
             base = [ch.get("name") or "", leg.get("from_name") or "",
                     leg.get("on_state") or "", leg.get("to_name") or "",
                     sla if sla is not None else "",
@@ -1910,10 +1926,14 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
                     "yes" if leg.get("history_truncated") else "no"]
             hist = leg.get("history") or []
             if not hist:
-                rows.append(base + [""] * len(CHAIN_CSV_HEADER[9:]))
+                # the inventory row: the leg's identity, the ride columns
+                # empty (the absence reads as data), the systems named
+                rows.append(base + [""] * 11 + [sys_cell])
                 continue
             for h in hist:
                 rides += 1
+                for sname in leg.get("systems") or []:
+                    by_system[sname] = by_system.get(sname, 0) + 1
                 overdue = h.get("overdue_seconds")
                 snooze = h.get("snooze_remaining_seconds")
                 rows.append(base + [
@@ -1924,14 +1944,16 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
                     overdue if overdue is not None else "",
                     h.get("acked_by") or "",
                     snooze if snooze is not None else "",
-                    h.get("instance_id") or "", h.get("process_id") or ""])
-    return rows, rides
+                    h.get("instance_id") or "", h.get("process_id") or ""
+                ] + [sys_cell])
+    return rows, rides, by_system
 
 
 async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
                             history_limit: int = 50,
                             chain: str | None = None,
-                            leg: str | None = None) -> dict:
+                            leg: str | None = None,
+                            system: str | None = None) -> dict:
     """v98: the per-leg chain history as a CSV download - the same map
     the operator-detail chain draws (chain_map, zero drift), rendered as
     one row per traversal with the chain and the leg named on every row.
@@ -1942,14 +1964,20 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
     the leg's live counts (opened / open_now / stuck, history_truncated),
     then the ride itself (ref, title, state, opened_at, due_at, is_stuck,
     overdue_seconds, acked_by, snooze_remaining_seconds) and the row's
-    own ids. Returns {csv, leg_count, ride_count}.
+    own ids, then the systems the firing machine binds (v100, the
+    breakdown dimension). Returns {csv, leg_count, ride_count, by_system,
+    chain_filter, leg_filter, system_filter}.
 
     v99: the PLOT's own filters ride the SAME map - ``chain`` names one
     chain (case-insensitive; the per-chain CSV button), ``leg`` names
     one leg as "from_name|on_state" (case-insensitive; the per-leg CSV
-    chip). Both compose; an unknown chain or leg is an HONEST EMPTY
-    file (header only, leg_count 0) - the absence reads as data, never
-    a 404, because the map the operator is looking at is the truth."""
+    chip). v100: ``system`` names one SYSTEM (case-insensitive; the
+    systems page's per-system export and the report's own scope) - a leg
+    rides in when the machine FIRING it binds that system; a machine
+    bound to no system never matches a named filter. All three compose;
+    an unknown name is an HONEST EMPTY file (header only, leg_count 0) -
+    the absence reads as data, never a 404, because the map the operator
+    is looking at is the truth."""
     out = await chain_map(db, owner_id, history_limit=history_limit)
     chains = out.get("chains") or []
     if chain is not None and str(chain).strip():
@@ -1970,28 +1998,68 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
             if legs:
                 filtered.append({**c, "legs": legs})
         chains = filtered
-    rows, rides = _chain_csv_rows(chains)
+    if system is not None and str(system).strip():
+        want_sys = str(system).strip().lower()
+        filtered = []
+        for c in chains:
+            legs = [l for l in (c.get("legs") or [])
+                    if any((s or "").strip().lower() == want_sys
+                           for s in (l.get("systems") or []))]
+            if legs:
+                filtered.append({**c, "legs": legs})
+        chains = filtered
+    rows, rides, by_system = _chain_csv_rows(chains)
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerows(rows)
     leg_count = sum(len(c.get("legs") or []) for c in chains)
     return {"csv": buf.getvalue(), "leg_count": leg_count,
-            "ride_count": rides,
+            "ride_count": rides, "by_system": by_system,
             "chain_filter": (str(chain).strip() if chain else ""),
-            "leg_filter": (str(leg).strip() if leg else "")}
+            "leg_filter": (str(leg).strip() if leg else ""),
+            "system_filter": (str(system).strip() if system else "")}
 
 
 # ---------------------------------------------------------------------------
 # v99: the chain report - the digest pattern applied to the FILE
 # ---------------------------------------------------------------------------
 
+# v100: the recipient LIST's honest ceiling - a report is a staff brief,
+# not a mailing list (the loud refusal names the count either way)
+CHAIN_REPORT_MAX_RECIPIENTS = 8
+
+
+def parse_report_recipients(raw: str) -> list[str]:
+    """v100: the recipient LIST out of whatever the form carried - commas,
+    semicolons and newlines all separate (an address never contains any of
+    them), whitespace stripped, empties dropped, duplicates collapsed
+    case-insensitively (first spelling wins). Order is preserved: the
+    envelope names them the way the operator typed them."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for piece in str(raw or "").replace("\n", ",").replace(";", ",").split(","):
+        addr = piece.strip()
+        if not addr:
+            continue
+        if addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        out.append(addr)
+    return out
+
+
 def _chain_report_out(row: ChainReportSchedule) -> dict:
-    """The schedule as the API serves it - the state the board reads."""
+    """The schedule as the API serves it - the state the board reads
+    (v100: the parsed recipient LIST and its count ride along, so the
+    board can say "one file, N names" without re-parsing)."""
+    recips = parse_report_recipients(row.to or "")
     return {
         "id": row.id, "owner_id": row.owner_id, "enabled": bool(row.enabled),
         "cadence_seconds": int(row.cadence_seconds),
-        "to": row.to or "", "history_limit": int(row.history_limit),
-        "chain": row.chain or "",
+        "to": row.to or "", "recipients": recips,
+        "recipient_count": len(recips),
+        "history_limit": int(row.history_limit),
+        "chain": row.chain or "", "system": row.system or "",
         "last_sent_at": row.last_sent_at.isoformat() if row.last_sent_at else None,
         "next_due": row.next_due.isoformat() if row.next_due else None,
         "last_result": row.last_result or None,
@@ -1999,12 +2067,16 @@ def _chain_report_out(row: ChainReportSchedule) -> dict:
     }
 
 
-def chain_report_subject(legs: int, rides: int, chain: str = "") -> str:
+def chain_report_subject(legs: int, rides: int, chain: str = "",
+                         system: str = "") -> str:
     """The scan line the subject carries (the digest's own pattern):
-    '[py8n] Chain history - N ride(s) across M leg(s)' - the filter named
-    when the report watches one chain."""
+    '[py8n] Chain history - N ride(s) across M leg(s)' - the chain and/or
+    the system named when the report watches one."""
     base = f"[py8n] Chain history - {rides} ride(s) across {legs} leg(s)"
-    return f"{base} - {chain}" if chain else base
+    suffixes = [s for s in (chain.strip(),
+                            f"System: {system.strip()}" if system.strip() else "")
+                if s]
+    return f"{base} - {' - '.join(suffixes)}" if suffixes else base
 
 
 async def get_chain_report(db: AsyncSession, owner_id: str | None) -> dict:
@@ -2024,17 +2096,31 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
                               cadence_seconds: int = 86400,
                               to: str = "",
                               history_limit: int = 50,
-                              chain: str = "") -> dict:
+                              chain: str = "",
+                              system: str = "") -> dict:
     """Create or update the owner's ONE chain-report schedule - the same
     loud validation every definition carries: cadence at the floor (a
-    file dispatch is a minutes concern), a real recipient, the depth
-    clamped to the map's own 1..50, one optional chain name. The new
-    cadence rules the NEXT window: next_due re-anchors to now + cadence
-    the way the digest's window re-anchors on a mode switch."""
-    to = (to or "").strip()
-    if not to or "@" not in to:
+    file dispatch is a minutes concern), a real RECIPIENT LIST (v100:
+    commas/semicolons separate the names; every name carries an "@",
+    duplicates collapse, the ceiling is loud), the depth clamped to the
+    map's own 1..50, one optional chain name and one optional SYSTEM
+    scope (v100: the report covers only the machines that system binds).
+    The new cadence rules the NEXT window: next_due re-anchors to now +
+    cadence the way the digest's window re-anchors on a mode switch."""
+    recips = parse_report_recipients(to)
+    if not recips:
         raise ProcessError("a chain report names its recipient (to) - an "
                            "email address, or the file has nowhere to land")
+    bad = [a for a in recips if "@" not in a]
+    if bad:
+        raise ProcessError(f"recipient {bad[0]!r} is not an email address "
+                           "(the list is comma-separated, every name carries "
+                           "an @)")
+    if len(recips) > CHAIN_REPORT_MAX_RECIPIENTS:
+        raise ProcessError(f"a chain report carries at most "
+                           f"{CHAIN_REPORT_MAX_RECIPIENTS} recipients "
+                           f"(got {len(recips)}) - a report is a staff "
+                           "brief, not a mailing list")
     try:
         cadence_seconds = int(cadence_seconds)
     except (TypeError, ValueError):
@@ -2048,6 +2134,7 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
     except (TypeError, ValueError):
         history_limit = 50
     chain = (chain or "").strip()[:120]
+    system = (system or "").strip()[:120]
 
     q = select(ChainReportSchedule)
     if owner_id is not None:
@@ -2061,9 +2148,10 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
         db.add(row)
     row.enabled = bool(enabled)
     row.cadence_seconds = cadence_seconds
-    row.to = to
+    row.to = ", ".join(recips)
     row.history_limit = history_limit
     row.chain = chain
+    row.system = system
     row.next_due = now + timedelta(seconds=cadence_seconds)
     row.updated_at = now
     await db.flush()
@@ -2089,11 +2177,16 @@ async def delete_chain_report(db: AsyncSession, owner_id: str | None) -> dict:
 async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
                                 now: datetime) -> dict:
     """One dispatch: render the SAME file the plot exports
-    (chain_history_csv, zero drift - the schedule's own depth and
-    optional chain filter), then deliver it over the owner's bound EMAIL
-    endpoint as a real MIME attachment. Every outcome is an honest
-    record - delivered, skipped (no endpoint, no recipient, an empty
-    window) or failed (smtp refused) - and the schedule stamps them all.
+    (chain_history_csv, zero drift - the schedule's own depth and its
+    chain/system filters), then deliver it over the owner's bound EMAIL
+    endpoint as a real MIME attachment. v100: ONE envelope carries EVERY
+    recipient the schedule names (one SMTP conversation, the names on the
+    To header and on the envelope) and the body breaks the rides down BY
+    system - the report's own summary of the file it carries.
+
+    Every outcome is an honest record - delivered, skipped (no endpoint,
+    no recipient, an empty window) or failed (smtp refused) - and the
+    schedule stamps them all.
 
     The digest's own discipline, applied to the file: a due attempt with
     NOTHING to summarize is a skip that still consumes the window (the
@@ -2104,20 +2197,26 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
     from . import channel_endpoints as cep_svc
     from . import system_events as events_svc
 
+    recips = parse_report_recipients(row.to or "")
     csv_out = await chain_history_csv(
         db, row.owner_id, history_limit=row.history_limit,
-        chain=row.chain or None)
+        chain=row.chain or None, system=row.system or None)
     legs, rides = csv_out["leg_count"], csv_out["ride_count"]
+    by_system = csv_out.get("by_system") or {}
     stamp = now.strftime("%Y%m%d")
     slug = ""
     if row.chain:
         slug = "".join(c if c.isalnum() else "-" for c in row.chain.lower())[:40].strip("-")
-        slug = f"-{slug}"
+    elif row.system:
+        slug = "sys-" + "".join(
+            c if c.isalnum() else "-" for c in row.system.lower())[:36].strip("-")
+    slug = f"-{slug}" if slug else ""
     filename = f"py8n-chain-history{slug}-{stamp}.csv"
 
     result = {"at": now.isoformat(), "legs": legs, "rides": rides,
-              "filename": filename, "to": row.to or ""}
-    if not (row.to or "").strip():
+              "filename": filename, "to": ", ".join(recips),
+              "recipients": len(recips)}
+    if not recips:
         result.update({"delivery": "skipped",
                        "detail": "the schedule names no recipient (to) - "
                                  "the file stayed home"})
@@ -2133,19 +2232,27 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
                            "detail": "no email endpoint bound - bind one on "
                                      "/channels and the file crosses the wire"})
         else:
-            subject = chain_report_subject(legs, rides, row.chain or "")
+            subject = chain_report_subject(legs, rides, row.chain or "",
+                                           row.system or "")
+            breakdown = ", ".join(f"{name} {count} ride(s)"
+                                  for name, count in sorted(
+                                      by_system.items(),
+                                      key=lambda kv: -kv[1]))
             body = (
                 f"The chain history, as the map draws it.\n\n"
                 f"Window: every leg, the {row.history_limit} most recent "
                 f"ride(s) each\n"
                 + (f"Chain: {row.chain}\n" if row.chain else "")
+                + (f"System: {row.system}\n" if row.system else "")
                 + f"Shape: {legs} leg(s), {rides} ride(s) in the file\n"
+                + (f"By system: {breakdown}\n" if breakdown else "")
+                + f"Recipients: {len(recips)}\n"
                 f"Attachment: {filename}\n\n"
                 f"Download the file any time from the chain views "
                 f"(Export CSV) - this copy is the schedule's own.")
             try:
                 delivery = await cep_svc.deliver_outbound(
-                    endpoint, row.to.strip(), body, subject=subject,
+                    endpoint, ", ".join(recips), body, subject=subject,
                     attachments=[{"filename": filename, "content": csv_out["csv"],
                                   "maintype": "text", "subtype": "csv"}])
                 result.update({"delivery": delivery.get("delivery", "failed"),
@@ -2154,8 +2261,9 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
             except Exception as exc:  # noqa: BLE001 - an honest failure IS a result
                 result.update({"delivery": "failed",
                                "detail": f"the dispatch refused loud: {exc}",
-                               "subject": chain_report_subject(legs, rides,
-                                                               row.chain or "")})
+                               "subject": chain_report_subject(
+                                   legs, rides, row.chain or "",
+                                   row.system or "")})
     row.last_sent_at = now
     row.next_due = now + timedelta(seconds=int(row.cadence_seconds))
     row.last_result = result
@@ -2163,10 +2271,12 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
     await events_svc.emit(
         db, row.owner_id, "business.chain_report_dispatched", source="business",
         actor="scheduler", target_type="chain_report", target_id=row.id,
-        payload={"to": result.get("to"), "delivery": result["delivery"],
+        payload={"to": result.get("to"), "recipients": len(recips),
+                 "delivery": result["delivery"],
                  "detail": result.get("detail", ""), "legs": legs,
                  "rides": rides, "filename": filename,
-                 "chain": row.chain or "", "history_limit": row.history_limit,
+                 "chain": row.chain or "", "system": row.system or "",
+                 "history_limit": row.history_limit,
                  "sent_at": result["at"]})
     return result
 
