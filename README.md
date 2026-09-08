@@ -41,7 +41,10 @@ The full arc, in order:
 6. **Integrate** - the system mints its own API keys (`py8n_sys_...`):
    machine credentials that speak AS the system - scoped to it alone,
    with the role their scopes spell - so the company's other software
-   can talk to ITS operations system.
+   can talk to ITS operations system; the keys (and the system's
+   people) ride the process doors: advance and ack on the machines the
+   system binds, and the front door's work surface shows the pending
+   work to whoever signs in at the system's own address.
 
 ## The platform, layer by layer
 
@@ -128,6 +131,18 @@ installed from a marketplace solution (`as_system=true`). From there:
   the role its scopes spell (`write` -> editor, else viewer), answers
   only for its own system, and can never mint keys, manage members or
   restructure the system it speaks for;
+* the **keys ride the process doors** (v105): a system key advances
+  and acknowledges the machines BOUND to its system - the company's
+  other software moves its own operations work AS the system (the
+  journey receipt names the key) - and the system's PEOPLE act with
+  the same boundary: an editor of the system may advance and take the
+  escalations of the machines the system binds, a viewer reads them;
+* the **front door's work surface** (v105):
+  `GET /api/v1/systems/by-domain/{domain}/work` resolves a live domain
+  to the system's own pending work - every bound machine with its live
+  operation and the attention rows (open instances past their SLA, the
+  escalation book per row) - so signing in at the system's address
+  lands the company's people on THEIR work, not the builder's estate;
 * the **update lifecycle** (v102) previews an upgrade from the source
   solution's pack (the same reconcile plan the upgrade runs), and
   leaves every applied upgrade PENDING until a human accepts it or
@@ -192,6 +207,7 @@ DELETE /api/v1/systems/{id}/keys/{key_id}
 GET    /api/v1/systems/{id}/update/preview
 POST   /api/v1/systems/{id}/update/accept|rollback
 GET    /api/v1/systems/by-domain/{domain} ← the public identity door
+GET    /api/v1/systems/by-domain/{domain}/work ← the system's work surface
 GET    /api/v1/systems/{id}/chains       ← the drawn journey chains
 
 CRUD   /api/v1/processes                 ← business machines + instances

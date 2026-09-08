@@ -325,4 +325,4 @@ def test_v103_units_and_version():
     out = deploy_svc.deployment_out(_Row())
     assert out["last_ping"] is None and out["url"] == "https://ops.acme.com", out
 
-    assert settings.version == "1.104.0"
+    assert settings.version == "1.105.0"

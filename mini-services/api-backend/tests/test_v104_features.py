@@ -453,4 +453,4 @@ def test_v104_units_and_version():
     sheet = deploy_svc.routes_sheet([])
     assert "0 live, 0 dark" in sheet, sheet
 
-    assert settings.version == "1.104.0"
+    assert settings.version == "1.105.0"

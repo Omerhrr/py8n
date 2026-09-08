@@ -569,4 +569,4 @@ def test_v82_generate_and_ownership():
 def test_v82_version():
     from app.config import settings
 
-    assert settings.version == "1.104.0"
+    assert settings.version == "1.105.0"

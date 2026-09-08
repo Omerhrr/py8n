@@ -12,11 +12,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
+from ..models import BusinessProcess, SystemApiKey, SystemComponent, SystemMember, Py8nSystem
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
     attention_feed, chain_history_csv, chain_map, create_process,
@@ -26,6 +28,7 @@ from ..services.business_processes import (
     send_chain_report_now, start_instance, update_escalation_policy,
     upsert_chain_report,
 )
+from ..services.system_governance import ROLE_ORDER
 from .auth import get_optional_user
 
 router = APIRouter(prefix="/processes", tags=["processes"])
@@ -33,6 +36,125 @@ router = APIRouter(prefix="/processes", tags=["processes"])
 
 def _http(exc: ProcessError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# v105: the doors answer to the system - the machine's own people and its key
+# ---------------------------------------------------------------------------
+
+def _key_info(request: Request) -> dict | None:
+    """The resolved SYSTEM key auth stamped on this request, if any."""
+    return getattr(request.state, "py8n_system_key", None)
+
+
+def _reject_key() -> None:
+    """The estate-wide views are the OWNER's cross-machine picture - a
+    machine credential does not get them (it would inherit the anonymous
+    owner's powers). The honest refusal names the doors it does get."""
+    raise HTTPException(
+        status_code=403,
+        detail="estate-wide views are human doors - a system API key speaks "
+               "on the machines bound to its own system (advance / ack / "
+               "reads by machine)")
+
+
+async def _machine_bound(db: AsyncSession, process_id: str,
+                         system_id: str | None) -> bool:
+    """Is this machine bound to that system (SystemComponent kind=process)?
+    A missing system_id answers False - nothing to be bound to."""
+    if not system_id:
+        return False
+    row = await db.execute(
+        select(SystemComponent.id).where(
+            SystemComponent.kind == "process",
+            SystemComponent.ref_id == process_id,
+            SystemComponent.system_id == system_id,
+        ).limit(1))
+    return row.scalar_one_or_none() is not None
+
+
+async def _binding_role(db: AsyncSession, process_id: str,
+                        user_id: str) -> str | None:
+    """The best role the user holds on any system that BINDS this machine
+    (the creator's owner anchor counts; invited members via their row).
+    An unclaimed system grants nothing here - the machine's own owner
+    check already answers for those, and a machine credential world must
+    not hand the bootstrap convention to strangers."""
+    sys_ids = (await db.execute(
+        select(SystemComponent.system_id).where(
+            SystemComponent.kind == "process",
+            SystemComponent.ref_id == process_id,
+        ))).scalars().all()
+    if not sys_ids:
+        return None
+    best: str | None = None
+    rows = (await db.execute(
+        select(SystemMember).where(
+            SystemMember.user_id == user_id,
+            SystemMember.system_id.in_(list(sys_ids)),
+        ))).scalars().all()
+    for m in rows:
+        if best is None or ROLE_ORDER.get(m.role, -1) > ROLE_ORDER.get(best, -1):
+            best = m.role
+    owner_ids = (await db.execute(
+        select(Py8nSystem.owner_id).where(Py8nSystem.id.in_(list(sys_ids)))
+    )).scalars().all()
+    if user_id in owner_ids:
+        best = "owner"
+    return best
+
+
+async def _door_authority(db: AsyncSession, process_id: str,
+                          request: Request, user, *, write: bool,
+                          body_actor: str = "") -> tuple[str | None, str]:
+    """Who may knock on a machine's door, decided UPFRONT (v105).
+
+    Returns (owner_id_for_service, actor). The service calls stay
+    untouched; this helper decides the authority the service's owner
+    check would otherwise assume, and it consults EVERY credential:
+
+    * a SYSTEM key (``py8n_sys_``, request.state.py8n_system_key) answers
+      only for the machines bound to its system - an unbound machine
+      looks nonexistent (404), NEVER the anonymous fall-through (auth-off's
+      anonymous is an owner and a machine credential must not inherit
+      that). Writes need the write scope (its role tops out at editor).
+      Its moves name the key - a receipt that says who spoke.
+    * a human who is not the machine's owner may still act when they hold
+      editor+ (writes) / viewer+ (reads) on a system that BINDS the
+      machine - the system's people operate the system's machines, the
+      authority the front door's work surface stands on. A member below
+      the move's role gets an honest 403; a stranger keeps the old
+      behavior (a foreign machine looks nonexistent).
+    * anonymous (auth-off single-operator mode) and direct owners keep
+      exactly the pre-v105 behavior.
+    """
+    info = _key_info(request)
+    uid = getattr(user, "id", None)
+    if info is not None:
+        if not await _machine_bound(db, process_id, info.get("system_id")):
+            raise HTTPException(status_code=404, detail="Not found")
+        if write and "write" not in list(info.get("scopes") or []):
+            raise HTTPException(
+                status_code=403,
+                detail="this system API key is read-only (scope: read) - "
+                       "mint a write-scoped key for this move")
+        key_row = await db.get(SystemApiKey, info.get("key_id"))
+        return None, (f"key:{key_row.name}" if key_row is not None
+                      else "key:system")
+    if uid is None:
+        return None, body_actor or "api"
+    p = await db.get(BusinessProcess, process_id)
+    if p is not None and p.owner_id is not None and p.owner_id != uid:
+        role = await _binding_role(db, process_id, uid)
+        if role is not None:
+            need = "editor" if write else "viewer"
+            if ROLE_ORDER.get(role, -1) >= ROLE_ORDER[need]:
+                return None, body_actor or uid
+            raise HTTPException(
+                status_code=403,
+                detail=f"your role on the system binding this machine is "
+                       f"{role} - this move needs {need}")
+    return uid, body_actor or uid or "api"
 
 
 class ProcessCreate(BaseModel):
@@ -75,22 +197,33 @@ async def create(body: ProcessCreate, user=Depends(get_optional_user),
 
 
 @router.get("")
-async def list_all(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def list_all(request: Request, user=Depends(get_optional_user),
+                   db: AsyncSession = Depends(get_db)):
+    """v105: estate-wide view - a system key does not get the owner's
+    cross-machine picture (it would inherit the anonymous owner's powers)."""
+    if _key_info(request) is not None:
+        _reject_key()
     return {"processes": await list_processes(db, getattr(user, "id", None))}
 
 
 @router.get("/attention")
-async def attention(limit: int = 200, user=Depends(get_optional_user),
+async def attention(request: Request, limit: int = 200,
+                    user=Depends(get_optional_user),
                     db: AsyncSession = Depends(get_db)):
     """v91: the overdue-attention view - every OPEN instance past its SLA
     across ALL machines, most-overdue first, with the door's escalation
     book per row. Declared BEFORE /{process_id} so the word 'attention'
-    is never eaten as a process id."""
+    is never eaten as a process id.
+    v105: estate-wide - a system key is refused (its system's work reads
+    through the front door's work surface, not the owner's estate feed)."""
+    if _key_info(request) is not None:
+        _reject_key()
     return await attention_feed(db, getattr(user, "id", None), limit=limit)
 
 
 @router.get("/chains")
-async def chains(history_limit: int = 5, user=Depends(get_optional_user),
+async def chains(request: Request, history_limit: int = 5,
+                 user=Depends(get_optional_user),
                  db: AsyncSession = Depends(get_db)):
     """v95: the owner-wide chain map - the cross-machine journey chains
     derived from what is INSTALLED, each node with its live counts, each
@@ -98,13 +231,16 @@ async def chains(history_limit: int = 5, user=Depends(get_optional_user),
     operator-detail chain overlays). Declared BEFORE /{process_id}.
     v96: history_limit stretches the per-leg traversal window beyond the
     default 5 (clamped 1..50) - deeper chain history for legs that have
-    ridden for months."""
+    ridden for months. v105: estate-wide - a system key is refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     return await chain_map(db, getattr(user, "id", None),
                            history_limit=history_limit)
 
 
 @router.get("/chains/history.csv")
-async def chains_history_csv_route(history_limit: int = 50,
+async def chains_history_csv_route(request: Request,
+                                   history_limit: int = 50,
                                    chain: str = "",
                                    leg: str = "",
                                    system: str = "",
@@ -127,7 +263,10 @@ async def chains_history_csv_route(history_limit: int = 50,
     breakdown dimension). v101: ``chains`` names a LIST of chains - the
     report's own tag list, comma-separated (the schedule's scope is
     reproducible over the wire, zero drift with the email's file). The
-    response names the filters it honored."""
+    response names the filters it honored. v105: estate-wide - a system
+    key is refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     chain_list = parse_report_chains(chains, ceiling=None)
     out = await chain_history_csv(db, getattr(user, "id", None),
                                   history_limit=history_limit,
@@ -196,19 +335,25 @@ class ChainReportUpsert(BaseModel):
 
 
 @router.get("/chain-report")
-async def get_chain_report_route(user=Depends(get_optional_user),
+async def get_chain_report_route(request: Request,
+                                 user=Depends(get_optional_user),
                                  db: AsyncSession = Depends(get_db)):
-    """v99: the owner's chain-report schedule, or the honest absence."""
+    """v99: the owner's chain-report schedule, or the honest absence.
+    v105: an owner door - a system key is refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     return await get_chain_report(db, getattr(user, "id", None))
 
 
 @router.put("/chain-report")
-async def put_chain_report_route(body: ChainReportUpsert,
+async def put_chain_report_route(body: ChainReportUpsert, request: Request,
                                  user=Depends(get_optional_user),
                                  db: AsyncSession = Depends(get_db)):
     """v99: create or update the schedule - validated loud, next_due
     re-anchored to now + cadence (the new cadence rules the NEXT window,
-    the digest's own re-anchor)."""
+    the digest's own re-anchor). v105: an owner door - keys refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     try:
         out = await upsert_chain_report(
             db, getattr(user, "id", None), enabled=body.enabled,
@@ -222,10 +367,13 @@ async def put_chain_report_route(body: ChainReportUpsert,
 
 
 @router.delete("/chain-report")
-async def delete_chain_report_route(user=Depends(get_optional_user),
+async def delete_chain_report_route(request: Request,
+                                    user=Depends(get_optional_user),
                                     db: AsyncSession = Depends(get_db)):
     """v99: remove the schedule - removing is not pausing, the file stops
-    riding the door entirely."""
+    riding the door entirely. v105: an owner door - keys refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     try:
         out = await delete_chain_report(db, getattr(user, "id", None))
     except ProcessError as exc:
@@ -235,11 +383,15 @@ async def delete_chain_report_route(user=Depends(get_optional_user),
 
 
 @router.post("/chain-report/send-now")
-async def send_chain_report_now_route(user=Depends(get_optional_user),
+async def send_chain_report_now_route(request: Request,
+                                      user=Depends(get_optional_user),
                                       db: AsyncSession = Depends(get_db)):
     """v99: the manual door - one dispatch NOW, whatever next_due says
     (a real send is a real send: last_sent_at/next_due/last_result all
-    stamp). The same renderer the scheduled walk uses, zero drift."""
+    stamp). The same renderer the scheduled walk uses, zero drift.
+    v105: an owner door - keys refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     try:
         out = await send_chain_report_now(db, getattr(user, "id", None))
     except ProcessError as exc:
@@ -249,19 +401,22 @@ async def send_chain_report_now_route(user=Depends(get_optional_user),
 
 
 @router.get("/escalation-history")
-async def escalation_history_grid_route(days: int = 14,
+async def escalation_history_grid_route(request: Request, days: int = 14,
                                         user=Depends(get_optional_user),
                                         db: AsyncSession = Depends(get_db)):
     """v95: the CROSS-MACHINE escalation history - per machine, per day,
     the door's activity (escalations / digests) and the humans' (acks),
     read straight off the transition log. The heatmap's grid (v94's
     per-machine sparkline lives in the analytics; this is the estate
-    wide view beside it). Declared BEFORE /{process_id}."""
+    wide view beside it). Declared BEFORE /{process_id}.
+    v105: estate-wide - a system key is refused."""
+    if _key_info(request) is not None:
+        _reject_key()
     return await escalation_history_grid(db, getattr(user, "id", None), days=days)
 
 
 @router.get("/escalation-history/{process_id}/{day}")
-async def escalation_day(process_id: str, day: str,
+async def escalation_day(process_id: str, day: str, request: Request,
                          user=Depends(get_optional_user),
                          db: AsyncSession = Depends(get_db)):
     """v96: ONE heatmap cell, opened - the machine's day. Every escalation
@@ -270,7 +425,8 @@ async def escalation_day(process_id: str, day: str,
     heatmap cell click serves. Declared BEFORE /{process_id} so the
     literal 'escalation-history' prefix is never eaten as an id; a badly
     shaped day refuses loud (400) before the process is even loaded
-    (unknown machines hide 404, the same as every other read)."""
+    (unknown machines hide 404, the same as every other read).
+    v105: a process-scoped read - it consults the key / the binding."""
     day_s = str(day or "").strip()
     try:
         datetime.fromisoformat(f"{day_s}T00:00:00+00:00")
@@ -278,41 +434,55 @@ async def escalation_day(process_id: str, day: str,
         raise HTTPException(status_code=400, detail=(
             f"day {day_s!r} is not an ISO date (YYYY-MM-DD) - the heatmap "
             "cells name their day")) from None
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
-        return await escalation_day_detail(db, process_id, day_s,
-                                           getattr(user, "id", None))
+        return await escalation_day_detail(db, process_id, day_s, owner_id)
     except ProcessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/{process_id}")
-async def detail(process_id: str, user=Depends(get_optional_user),
+async def detail(process_id: str, request: Request,
+                 user=Depends(get_optional_user),
                  db: AsyncSession = Depends(get_db)):
+    """v105: the read consults the key / the binding (the system's people
+    and its key may read the machines bound to their system)."""
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
-        return await get_process(db, process_id, getattr(user, "id", None))
+        return await get_process(db, process_id, owner_id)
     except ProcessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/{process_id}/analytics")
-async def analytics(process_id: str, user=Depends(get_optional_user),
+async def analytics(process_id: str, request: Request,
+                    user=Depends(get_optional_user),
                     db: AsyncSession = Depends(get_db)):
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
-        return await process_analytics(db, process_id, getattr(user, "id", None))
+        return await process_analytics(db, process_id, owner_id)
     except ProcessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{process_id}/instances", status_code=201)
-async def start(process_id: str, body: InstanceStart, user=Depends(get_optional_user),
-                db: AsyncSession = Depends(get_db)):
+async def start(process_id: str, body: InstanceStart, request: Request,
+                user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v105: the system's key and the binding's editors may start work on
+    the machines bound to their system - the company's software pushes
+    its own entities in AS the system."""
+    owner_id, who = await _door_authority(db, process_id, request, user,
+                                          write=True)
     try:
         out = await start_instance(db, process_id,
-                                   owner_id=getattr(user, "id", None),
+                                   owner_id=owner_id,
                                    ref=body.ref, title=body.title,
                                    context=body.context,
                                    due_in_seconds=body.due_in_seconds,
-                                   actor=getattr(user, "id", None) or "api")
+                                   actor=who)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()
@@ -320,32 +490,45 @@ async def start(process_id: str, body: InstanceStart, user=Depends(get_optional_
 
 
 @router.get("/{process_id}/instances")
-async def instances(process_id: str, state: str | None = None,
-                    user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def instances(process_id: str, request: Request,
+                    state: str | None = None,
+                    user=Depends(get_optional_user),
+                    db: AsyncSession = Depends(get_db)):
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
         return {"instances": await list_instances(
-            db, process_id, getattr(user, "id", None), state=state)}
+            db, process_id, owner_id, state=state)}
     except ProcessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/{process_id}/instances/{instance_id}")
-async def instance(process_id: str, instance_id: str,
-                   user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def instance(process_id: str, instance_id: str, request: Request,
+                   user=Depends(get_optional_user),
+                   db: AsyncSession = Depends(get_db)):
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
-        return await get_instance(db, process_id, instance_id, getattr(user, "id", None))
+        return await get_instance(db, process_id, instance_id, owner_id)
     except ProcessError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{process_id}/instances/{instance_id}/advance")
 async def advance(process_id: str, instance_id: str, body: InstanceAdvance,
-                  user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+                  request: Request, user=Depends(get_optional_user),
+                  db: AsyncSession = Depends(get_db)):
+    """v105: the named door rides the system's credentials - a key minted
+    for the system moves the machines bound to it (the receipt names the
+    key), and an editor of a binding system moves them as its people."""
+    owner_id, who = await _door_authority(db, process_id, request, user,
+                                          write=True, body_actor=body.actor)
     try:
         out = await advance_instance(
-            db, instance_id, owner_id=getattr(user, "id", None),
+            db, instance_id, owner_id=owner_id, process_id=process_id,
             transition=body.transition, to_state=body.to_state,
-            actor=body.actor or (getattr(user, "id", None) or "api"),
+            actor=who,
             note=body.note, context_patch=body.context_patch,
             payload=body.payload, due_in_seconds=body.due_in_seconds)
     except ProcessError as exc:
@@ -366,16 +549,19 @@ class InstanceAnnotate(BaseModel):
 
 @router.post("/{process_id}/instances/{instance_id}/annotate")
 async def annotate(process_id: str, instance_id: str, body: InstanceAnnotate,
-                   user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+                   request: Request, user=Depends(get_optional_user),
+                   db: AsyncSession = Depends(get_db)):
     """v88: the agents' memory door - write facts DIRECTLY into the
     entity's running context without moving the machine. On the record
     (an 'annotate' journey row naming the keys) + business.annotated on
     the correlation thread, so a workflow can react to a FACT landing."""
+    owner_id, who = await _door_authority(db, process_id, request, user,
+                                          write=True, body_actor=body.actor)
     try:
         out = await annotate_instance(
-            db, process_id, instance_id, owner_id=getattr(user, "id", None),
+            db, process_id, instance_id, owner_id=owner_id,
             context_patch=body.context_patch,
-            actor=body.actor or (getattr(user, "id", None) or "api"),
+            actor=who,
             note=body.note)
     except ProcessError as exc:
         raise _http(exc) from exc
@@ -409,6 +595,7 @@ class PolicyPreview(BaseModel):
 
 @router.post("/{process_id}/escalation-preview")
 async def preview_policy(process_id: str, body: PolicyPreview,
+                         request: Request,
                          user=Depends(get_optional_user),
                          db: AsyncSession = Depends(get_db)):
     """v93: the SLA digest preview - what the door would do RIGHT NOW
@@ -417,9 +604,11 @@ async def preview_policy(process_id: str, body: PolicyPreview,
     the held episodes (acked / snoozed / capped) and the honest delivery
     note (event-only / no target / no endpoint bound). Nothing is saved,
     sent or recorded - the door's next move, typeset for the editor."""
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=False)
     try:
         return await escalation_preview(
-            db, process_id, owner_id=getattr(user, "id", None),
+            db, process_id, owner_id=owner_id,
             policy=body.policy)
     except ProcessError as exc:
         raise _http(exc) from exc
@@ -427,15 +616,18 @@ async def preview_policy(process_id: str, body: PolicyPreview,
 
 @router.patch("/{process_id}/escalation-policy")
 async def edit_policy(process_id: str, body: PolicyUpdate,
+                      request: Request,
                       user=Depends(get_optional_user),
                       db: AsyncSession = Depends(get_db)):
     """v91: edit (or remove) the machine's escalation policy - the door
     reads the policy fresh at every sweep, so the new rhythm takes effect
     on the next tick without touching the running instances."""
+    owner_id, who = await _door_authority(db, process_id, request, user,
+                                          write=True, body_actor=body.actor)
     try:
         out = await update_escalation_policy(
-            db, process_id, owner_id=getattr(user, "id", None),
-            policy=body.policy, actor=body.actor)
+            db, process_id, owner_id=owner_id,
+            policy=body.policy, actor=who)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()
@@ -464,15 +656,21 @@ class EscalationAck(BaseModel):
 
 @router.post("/{process_id}/instances/{instance_id}/escalations/ack")
 async def ack_escalation(process_id: str, instance_id: str, body: EscalationAck,
-                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+                         request: Request, user=Depends(get_optional_user),
+                         db: AsyncSession = Depends(get_db)):
     """v88: acknowledge the instance's escalation episode - the door goes
     quiet (the handler who said 'I have this' owns it); the receipt is on
     the record and business.escalation_acknowledged lands on the
     correlation thread. v89: snooze_hours re-arms the door after N hours.
-    v96: reschedule_in_minutes re-arms it at an explicit moment."""
+    v96: reschedule_in_minutes re-arms it at an explicit moment.
+    v105: the named door rides the system's credentials - the system's
+    own key and the binding's editors take the escalations of the
+    machines bound to their system (the front door's work surface)."""
+    owner_id, _who = await _door_authority(db, process_id, request, user,
+                                           write=True)
     try:
         out = await acknowledge_escalation(
-            db, process_id, instance_id, owner_id=getattr(user, "id", None),
+            db, process_id, instance_id, owner_id=owner_id,
             by=body.by, note=body.note, snooze_hours=body.snooze_hours,
             reschedule_in_minutes=body.reschedule_in_minutes)
     except ProcessError as exc:

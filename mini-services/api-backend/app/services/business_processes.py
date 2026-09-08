@@ -425,12 +425,22 @@ async def advance_instance(db: AsyncSession, instance_id: str, *, owner_id: str 
                            actor: str = "", note: str = "",
                            context_patch: dict | None = None,
                            payload: dict | None = None,
-                           due_in_seconds: int | None = None) -> dict:
+                           due_in_seconds: int | None = None,
+                           process_id: str | None = None) -> dict:
     """Move the instance. Resolve by transition name OR direct to_state;
     anything the machine does not allow is a loud refusal naming the
     allowed moves. The context patch MERGES into the running memory (fresh
-    dicts - the JSON column is never mutated in place)."""
+    dicts - the JSON column is never mutated in place).
+
+    v105: when the caller names the process on the path (the API always
+    does), the instance must belong to it - the same cross-check every
+    other instance door keeps, because v105's system-scoped authority is
+    decided on the NAMED machine and must never move another machine's
+    entity through a mismatched path."""
     row = await _load_instance(db, instance_id, owner_id)
+    if process_id is not None and row.process_id != process_id:
+        raise ProcessError(
+            f"instance {instance_id!r} is not in process {process_id!r}")
     p = await _load_process(db, row.process_id, owner_id)
     definition = p.definition or {}
     current = row.state
@@ -1120,6 +1130,99 @@ async def attention_feed(db: AsyncSession, owner_id: str | None, *,
         })
     return {"attention": out, "count": len(out),
             "machines": len({r["process_id"] for r in out}),
+            "now": now.isoformat()}
+
+
+async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
+                              limit: int = 50,
+                              now: datetime | None = None) -> dict:
+    """v105: the system's own work surface - what needs doing on the
+    machines THIS system binds, composed for the front door.
+
+    A company's people land on their own address and see their own
+    pending work, not the builder's estate: every bound machine with its
+    live operation (open / stuck, the same derivation every view uses)
+    and the attention rows - open instances past their SLA, most-overdue
+    first, each carrying the escalation book the door keeps (is it
+    knocking, has a human taken it, is a loan holding). The SAME
+    predicate the estate feed runs, scoped to the system's machines:
+    terminal states are skipped (a closed entity is not asking for
+    attention) and the clock is compared in Python - SQLite returns
+    naive datetimes and a naive/aware comparison lies (v38 GOTCHA)."""
+    now = _aware(now) or _now()
+    ids = [p for p in (process_ids or []) if p]
+    empty = {"machines": [], "attention": [],
+             "totals": {"machines": 0, "open": 0, "stuck": 0, "attention": 0},
+             "now": now.isoformat()}
+    if not ids:
+        return empty
+    procs = (await db.execute(
+        select(BusinessProcess).where(BusinessProcess.id.in_(ids))
+        .order_by(BusinessProcess.created_at.asc()))).scalars().all()
+    if not procs:
+        return empty
+    by_id = {p.id: p for p in procs}
+    definitions = {p.id: (p.definition or {}) for p in procs}
+    inst_rows = (await db.execute(
+        select(BusinessProcessInstance)
+        .where(BusinessProcessInstance.process_id.in_(ids))
+        .order_by(BusinessProcessInstance.created_at.desc()))).scalars().all()
+    counts = {p.id: {"open": 0, "stuck": 0} for p in procs}
+    picked: list[tuple[BusinessProcessInstance, BusinessProcess, float]] = []
+    for r in inst_rows:
+        proc = by_id.get(r.process_id)
+        if proc is None:
+            continue
+        stuck, overdue = _stuck_state(r, definitions.get(r.process_id) or {}, now)
+        if r.ended_at is not None:
+            continue  # terminal rows sit in the journey, not the work list
+        counts[r.process_id]["open"] += 1
+        if stuck:
+            counts[r.process_id]["stuck"] += 1
+            picked.append((r, proc, overdue))
+    picked.sort(key=lambda t: t[2], reverse=True)  # most overdue first
+    picked = picked[:max(1, min(int(limit or 50), 200))]
+    attention_rows: list[dict] = []
+    for r, proc, overdue in picked:
+        book = escalations_svc.episode_book(r)
+        acked = _ack_summary(book, now) if book else None
+        res_at = escalations_svc.parse_iso(
+            (book.get("acked") or {}).get("reschedule_at")
+            if isinstance(book.get("acked"), dict) else None)
+        attention_rows.append({
+            "process_id": proc.id, "process_name": proc.name,
+            "instance_id": r.id, "ref": r.ref, "title": r.title,
+            "state": r.state,
+            "entered_state_at": r.entered_state_at.isoformat()
+                                if r.entered_state_at else None,
+            "due_at": r.due_at.isoformat() if r.due_at else None,
+            "overdue_seconds": round(overdue),
+            "escalation": {
+                "count": int(book.get("count") or 0),
+                "acked": acked,
+                "reschedule_at": str((book.get("acked") or {}).get(
+                    "reschedule_at") or "")
+                if isinstance(book.get("acked"), dict) else "",
+                "reschedule_remaining_seconds":
+                    round((res_at - now).total_seconds())
+                    if res_at is not None and res_at > now else 0,
+            } if book else None,
+        })
+    machines_out: list[dict] = []
+    open_total = stuck_total = 0
+    for p in procs:
+        c = counts[p.id]
+        open_total += c["open"]
+        stuck_total += c["stuck"]
+        machines_out.append({
+            "process_id": p.id, "name": p.name,
+            "open": c["open"], "stuck": c["stuck"],
+            "escalation_summary": escalations_svc.describe_policy(
+                escalations_svc.policy_from_definition(definitions[p.id])),
+        })
+    return {"machines": machines_out, "attention": attention_rows,
+            "totals": {"machines": len(procs), "open": open_total,
+                       "stuck": stuck_total, "attention": len(attention_rows)},
             "now": now.isoformat()}
 
 

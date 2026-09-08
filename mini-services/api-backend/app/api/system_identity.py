@@ -20,13 +20,17 @@ viewer); nothing about users is stored here.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import get_optional_user
+from ..config import settings
 from ..db import get_db
-from ..models import Py8nSystem
+from ..models import Py8nSystem, SystemComponent
+from ..services import business_processes as bp_svc
 from ..services import system_deployment as deploy_svc
+from ..services import system_keys as keys_svc
 from ..services.system_governance import member_role
 
 router = APIRouter(prefix="/systems/by-domain", tags=["systems"])
@@ -52,3 +56,59 @@ async def by_domain(domain: str, user=Depends(get_optional_user), db: AsyncSessi
             detail="this system's deployment is not live - the identity surface is dark")
     identity["my_role"] = await member_role(db, system, user)
     return identity
+
+
+@router.get("/{domain}/work")
+async def domain_work(domain: str, request: Request,
+                      user=Depends(get_optional_user),
+                      db: AsyncSession = Depends(get_db)):
+    """v105: the system's own WORK SURFACE - the front door stops being a
+    hallway and becomes the workplace. The same live deployment the
+    identity door resolves, now carrying the pending work on the
+    machines the system binds: every machine with its live operation
+    (open / stuck) and the attention rows (open instances past their
+    SLA, most-overdue first, the escalation book per row).
+
+    The authority is the system's own:
+    * the system's key (``py8n_sys_``) reads its own system's work - a
+      key on a foreign system looks nonexistent (404), never a
+      fall-through to the anonymous owner;
+    * the system's people (any v62 member role) read it with their token;
+    * the enforced-mode anonymous caller is told to sign in (401); a
+      signed-in stranger is honestly refused (403); auth-off's anonymous
+      single-operator caller is the owner (the platform convention).
+    """
+    try:
+        row = await deploy_svc.get_by_domain(db, domain)
+    except deploy_svc.DeploymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if row is None:
+        raise HTTPException(status_code=404, detail="No system answers on this domain")
+    system = await db.get(Py8nSystem, row.system_id)
+    if system is None:
+        raise HTTPException(status_code=404, detail="No system answers on this domain")
+    identity = deploy_svc.public_identity(row, system)
+    if identity is None:
+        raise HTTPException(
+            status_code=404,
+            detail="this system's deployment is not live - the work surface is dark")
+    key_info = getattr(request.state, "py8n_system_key", None)
+    if key_info is not None:
+        if key_info.get("system_id") != row.system_id:
+            raise HTTPException(status_code=404,
+                                detail="No system answers on this domain")
+        my_role = keys_svc.role_for(key_info.get("scopes"))
+    else:
+        if user is None and settings.require_auth:
+            raise HTTPException(status_code=401,
+                                detail="sign in to see this system's work")
+        my_role = await member_role(db, system, user)
+        if my_role is None:
+            raise HTTPException(status_code=403,
+                                detail="you are not a member of this system")
+    machine_ids = (await db.execute(
+        select(SystemComponent.ref_id).where(
+            SystemComponent.system_id == row.system_id,
+            SystemComponent.kind == "process"))).scalars().all()
+    work = await bp_svc.system_work_surface(db, list(machine_ids))
+    return {**identity, "my_role": my_role, "work": work}

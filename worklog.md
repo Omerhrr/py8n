@@ -1780,3 +1780,89 @@ VERIFIED: 573 passed + 7 deliberate skips (568 -> 573, no regressions) + bun run
 Stage Summary:
 - Py8n v1.104.0: the deployed system has a REAL ADDRESS (the Caddyfile maps hostnames onto /go/{host}; the route sheet is derived from the estate), a health dot fed by evidence on a rhythm (the probes run themselves, loud only on lost/recovered), and a machine voice of its own (py8n_sys_... keys speaking AS the system, scoped to it, airtight at the boundary).
 - Next candidates: the system-scoped key riding the process doors (advance/ack for the machines bound to the system), per-domain TLS/email the operator's concern but documented on the route sheet, and the landing gaining the system's own work surface.
+
+## Task 89 (v105 - the keys ride the process doors, and the front door gains the system's own work surface)
+
+Date: 2026-09-09 · Version: 1.105.0 · Baseline: 573 passed + 7 skipped -> 577 passed + 7 skipped
+
+THE KEYS RIDE THE PROCESS DOORS (v105): the py8n_sys_ credential can now DO the
+system's work, not just describe it. The processes API grew an authority layer
+(_door_authority) consulted by every door, decided UPFRONT:
+
+* a SYSTEM key answers only for the machines bound to its system
+  (SystemComponent kind=process): advance / ack / start / annotate / reads ride
+  the key when the machine is bound; an unbound (or nonexistent) machine looks
+  nonexistent (404) - never the anonymous fall-through, because auth-off's
+  anonymous is an owner and a machine credential must not inherit that. Writes
+  need the write scope (its role tops out at editor; the router-level scope gate
+  covers the rest). The key's moves NAME the key: the journey receipt says
+  "key:<name>" - provenance a spoofable actor string cannot fake.
+* the ESTATE-WIDE views (list, attention, chains, history.csv, chain-report
+  CRUD + send-now, escalation-history grid) are the OWNER's cross-machine
+  picture: a key gets an honest 403 naming the doors it does get.
+* the system's PEOPLE act with the same boundary: a human who is not the
+  machine's owner may advance/ack (editor+) or read (viewer+) when they hold
+  the role on a system that BINDS the machine - the system's users operate the
+  system's machines, the authority the work surface stands on. A member below
+  the move's role gets an honest 403; a stranger keeps the old behavior.
+* advance_instance grew the instance-process cross-check (optional process_id
+  kwarg; the API passes it) every other instance door already kept - authority
+  decided on one machine must never move another machine's entity through a
+  mismatched path.
+
+THE FRONT DOOR'S WORK SURFACE (v105): GET /systems/by-domain/{domain}/work - the
+public domain router's second door, self-gated: the system's own key reads its
+work (foreign key 404); the system's people read it with their token (any v62
+role); enforced-mode anonymous is told to sign in (401); a signed-in stranger is
+honestly refused (403); auth-off's anonymous is the owner (platform convention).
+The payload is system_work_surface (business_processes.py): every bound machine
+with its live operation (open / stuck, _stuck_state - the same derivation every
+view uses) and the attention rows - open instances past their SLA, most-overdue
+first, the escalation book per row (count, the ack receipt, the reschedule loan)
+- the SAME predicate the estate feed runs, scoped to the system's machines,
+terminal states skipped, the clock compared in Python (v38 GOTCHA).
+pages/go/[domain].vue stopped being a hallway: sign-in (or "Continue as
+<role>") now lands ON the work surface - the totals strip (machines / open /
+past SLA / attention), the attention list (ref, machine, state, overdue
+humanized, the door's knocks, "taken by X"), and the take form for editor+
+(handler, note, snooze hours OR reschedule minutes - one clock per receipt)
+riding the machine-board's own ack door. The branded header and the dark page
+are untouched; a viewer gets the read-only surface.
+
+TESTS: tests/test_v105_features.py (4 tests) - the keys round (key start +
+advance + read on the bound machine, the receipt naming the key, unbound 404,
+read-only 403, five estate-wide doors 403, the mismatched-path cross-check, the
+key's ack on a knocked instance, the unbound ack 404); the people round (editor
+advance + ack through the binding, viewer read / honest 403 write, stranger
+keeps the old honesty, membership never reaches unbound machines); the work
+surface round (owner token payload + scoping to the system's machines, auth-off
+anonymous = owner, the system's key reads its work / a foreign key 404s,
+stranger 403, enforced anonymous 401, paused = dark 404, the ack answering
+"taken by"); the pin. FOUND LIVE: the double-clock race - the knock rode the
+injected clock (base+15s) while the surface reads the REAL one, and the whole
+block ran in under a second, so the 1s-SLA instance was not yet overdue to the
+surface; the v96 discipline applies (await asyncio.sleep(2.0)). Also re-learned:
+the advance door maps ProcessError to 400 (the stranger's move refuses 400, not
+404 - the old behavior, now pinned).
+
+Version 1.105.0 (config + 25 test pins re-pinned + sidebar v1.105).
+VERIFIED: 577 passed + 7 deliberate skips (573 -> 577, no regressions) + bun run
+build green (1.94 MB) + scripts/smoke_v105_live.py 3/3 green on a real uvicorn -
+(1) KEYS ON THE DOORS: the key advanced the bound machine over the wire (a ->
+b), read it, the unbound machine 404'd, the read-only move 403'd, the
+estate-wide views refused the key; (2) THE SYSTEM'S PEOPLE: the invited editor
+moved the owner's machine (the binding is the authority), the viewer read and
+their move refused honestly; (3) THE WORK SURFACE: the tick door knocked the
+overdue instance on the real clock, {domain}/work resolved the system's pending
+work (2 machines, 1 attention row with the book), the system's own key took the
+turn, the surface answered "taken by erp-job". Smoke sqlite artifacts cleaned.
+
+Stage Summary:
+- Py8n v1.105.0: the deployed system is OPERABLE - its key moves its own
+  machines' work AS the system, its people advance and take their own
+  escalations, and signing in at the company's address lands on the company's
+  pending work. The commercial arc (customer.com -> System -> Users -> Business
+  operations) now closes inside the front door itself.
+- Next candidates: per-domain TLS notes on the route sheet, the work surface
+  gaining advance actions beside the acks, and the deployment evidence riding
+  the surface (the domain's own liveness where the people are).
