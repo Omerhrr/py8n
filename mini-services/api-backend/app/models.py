@@ -1772,11 +1772,16 @@ class ChainReportSchedule(Base):
     digest's subject names its shape.
 
     One row per owner (unique): the report is an ESTATE concern - the
-    whole chain map, one filtered chain (``chain`` names it, the same
-    filter the plot's per-chain CSV button sends) or one SYSTEM's slice
+    whole chain map, a LIST of chains (v101: ``chains`` is the tag list -
+    comma/semicolon-separated like the recipients, normalized and
+    ceilinged, the file covers every chain it names; the legacy single
+    ``chain`` stays truthful for one-name scopes) or one SYSTEM's slice
     (v100: ``system`` names it, the same filter the systems page's
     per-system export sends - the report breaks down by the systems the
-    machines actually bind). The report rides to ONE envelope with
+    machines actually bind). The named rhythm (v101: hourly | daily |
+    weekly in ``cadence_seconds``) paces the beat - the WEEKLY digest
+    rides the SAME envelope path to the report's OWN list, only slower.
+    The report rides to ONE envelope with
     EVERY name on it (v100: ``to`` carries the recipient LIST,
     comma/semicolon-separated, normalized and ceilinged - one SMTP
     conversation, one attachment, all of the names). The schedule stamps
@@ -1802,8 +1807,14 @@ class ChainReportSchedule(Base):
     # one envelope carries every name
     to: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     history_limit: Mapped[int] = mapped_column(Integer, default=50)
-    # optional single-chain filter ("" = the whole estate map)
+    # optional single-chain filter ("" = the whole estate map) - kept
+    # truthful for one-name scopes (v99/v100 readers); the v101 TAG LIST
+    # below is the scope's real home
     chain: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    # v101: the chain TAG LIST - comma-joined, parsed like the recipient
+    # list (strip, dedupe case-insensitively, ceiling loud); the report
+    # covers every chain the list names, "" = the whole estate map
+    chains: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     # v100: optional single-system scope ("" = every system) - the report
     # covers only the machines the named system binds
     system: Mapped[str] = mapped_column(String(120), nullable=False, default="")

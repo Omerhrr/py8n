@@ -22,8 +22,9 @@ from ..services.business_processes import (
     attention_feed, chain_history_csv, chain_map, create_process,
     delete_chain_report, escalation_day_detail, escalation_history_grid,
     escalation_preview, get_chain_report, get_instance, get_process,
-    list_instances, list_processes, process_analytics, send_chain_report_now,
-    start_instance, update_escalation_policy, upsert_chain_report,
+    list_instances, list_processes, parse_report_chains, process_analytics,
+    send_chain_report_now, start_instance, update_escalation_policy,
+    upsert_chain_report,
 )
 from .auth import get_optional_user
 
@@ -107,6 +108,7 @@ async def chains_history_csv_route(history_limit: int = 50,
                                    chain: str = "",
                                    leg: str = "",
                                    system: str = "",
+                                   chains: str = "",
                                    user=Depends(get_optional_user),
                                    db: AsyncSession = Depends(get_db)):
     """v98: the per-leg chain history as a CSV download - the SAME map the
@@ -122,19 +124,28 @@ async def chains_history_csv_route(history_limit: int = 50,
     honest empty file. v100: ``system`` names one SYSTEM (the systems
     page's per-system export - a leg rides in when the machine firing it
     binds that system) and every row names its machine's systems (the
-    breakdown dimension). The response names the filters it honored."""
+    breakdown dimension). v101: ``chains`` names a LIST of chains - the
+    report's own tag list, comma-separated (the schedule's scope is
+    reproducible over the wire, zero drift with the email's file). The
+    response names the filters it honored."""
+    chain_list = parse_report_chains(chains, ceiling=None)
     out = await chain_history_csv(db, getattr(user, "id", None),
                                   history_limit=history_limit,
                                   chain=chain or None, leg=leg or None,
-                                  system=system or None)
+                                  system=system or None,
+                                  chains=chain_list or None)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    slug = ""
-    if out["chain_filter"]:
+    if out["chains_filter"]:
+        slug = "-" + "".join(c if c.isalnum() else "-" for c in
+                              out["chains_filter"].replace(", ", ",").lower())[:40].strip("-")
+    elif out["chain_filter"]:
         slug = "-" + "".join(c if c.isalnum() else "-"
                              for c in out["chain_filter"].lower())[:40].strip("-")
     elif out["system_filter"]:
         slug = "-sys-" + "".join(c if c.isalnum() else "-"
-                                 for c in out["system_filter"].lower())[:36].strip("-")
+                                  for c in out["system_filter"].lower())[:36].strip("-")
+    else:
+        slug = ""
     headers = {"Content-Disposition":
                f'attachment; filename="py8n-chain-history{slug}-{stamp}.csv"',
                "X-Py8n-Leg-Count": str(out["leg_count"]),
@@ -145,27 +156,40 @@ async def chains_history_csv_route(history_limit: int = 50,
         headers["X-Py8n-Leg-Filter"] = out["leg_filter"]
     if out["system_filter"]:
         headers["X-Py8n-System-Filter"] = out["system_filter"]
+    if out["chains_filter"]:
+        headers["X-Py8n-Chains-Filter"] = out["chains_filter"]
     return Response(content=out["csv"], media_type="text/csv; charset=utf-8",
                     headers=headers)
 
 
 class ChainReportUpsert(BaseModel):
     """v99: the chain-report schedule - the digest pattern applied to the
-    FILE. One per owner: cadence floor 300s (a file dispatch is a minutes
-    concern), a real RECIPIENT LIST (v100: comma/semicolon-separated,
-    every name carries an @, ceiling enforced loud), the depth clamped to
-    the map's 1..50, one optional chain name and one optional SYSTEM
-    scope ("" = every chain / every system)."""
+    FILE. One per owner: cadence at the floor (300s) or a named rhythm
+    (v101: hourly | daily | weekly - the weekly digest rides the SAME
+    envelope path to the report's own list), a real RECIPIENT LIST
+    (v100: comma/semicolon-separated, every name carries an @, ceiling
+    enforced loud), the depth clamped to the map's 1..50, the chain TAG
+    LIST (v101: comma/semicolon-separated, deduped, ceiling 8; the
+    legacy single ``chain`` folds in when no list is given), and one
+    optional SYSTEM scope ("" = every chain / every system)."""
     enabled: bool = True
     cadence_seconds: int = Field(default=86400, description=(
-        "how often the file rides the wire (floor 300s)"))
+        "how often the file rides the wire (floor 300s); overridden by "
+        "a named cadence"))
+    cadence: str = Field(default="", description=(
+        "optional named rhythm: hourly | daily | weekly (weekly = the "
+        "weekly digest - same envelope, same list, the file on its "
+        "weekly beat)"))
     to: str = Field(default="", description=(
         "the recipient list - comma/semicolon-separated email addresses; "
         "one envelope carries every name"))
     history_limit: int = Field(default=50, ge=1, le=50, description=(
         "the per-leg traversal window (the map's own clamp)"))
     chain: str = Field(default="", description=(
-        "optional single-chain filter (\"\" = every chain)"))
+        "optional single-chain filter (legacy form; folds into chains)"))
+    chains: str = Field(default="", description=(
+        "the chain TAG LIST - comma/semicolon-separated chain names the "
+        "report covers (\"\" = every chain)"))
     system: str = Field(default="", description=(
         "optional single-system scope - the report covers only the "
         "machines that system binds (\"\" = every system)"))
@@ -190,7 +214,7 @@ async def put_chain_report_route(body: ChainReportUpsert,
             db, getattr(user, "id", None), enabled=body.enabled,
             cadence_seconds=body.cadence_seconds, to=body.to,
             history_limit=body.history_limit, chain=body.chain,
-            system=body.system)
+            system=body.system, chains=body.chains, cadence=body.cadence)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

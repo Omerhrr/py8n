@@ -819,7 +819,17 @@ const chainReport = ref<any>(null)
 // envelope, every name) and an optional SYSTEM scope (the file covers only
 // the machines that system binds, the same filter the systems page's
 // per-system export sends)
-const crForm = ref({ enabled: true, cadence_minutes: 1440, to: '', history_limit: 50, chain: '', system: '' })
+// v101: the scope is a CHAIN TAG LIST (comma-separated - the file covers
+// every chain the list names) and the rhythm speaks its named beats
+// (hourly / daily / the weekly digest - the same envelope, the report's own
+// list, the file on its weekly beat - or custom minutes)
+const CR_PRESETS = [
+  { key: 'hourly', label: 'hourly', seconds: 3600 },
+  { key: 'daily', label: 'daily', seconds: 86400 },
+  { key: 'weekly', label: 'weekly digest', seconds: 604800 },
+  { key: 'custom', label: 'custom', seconds: 0 },
+]
+const crForm = ref({ enabled: true, cadence: 'daily', cadence_minutes: 1440, to: '', history_limit: 50, chains: '', system: '' })
 const crEditing = ref(false)
 const crBusy = ref(false)
 const crSending = ref(false)
@@ -831,6 +841,10 @@ function crCadence(sec: number): string {
   return `${Math.round(sec / 60)}m`
 }
 
+function crPresetFor(sec: number): string {
+  return CR_PRESETS.find(p => p.seconds && p.seconds === sec)?.key || 'custom'
+}
+
 async function loadChainReport() {
   try {
     const out = await api.get<any>('/processes/chain-report')
@@ -838,10 +852,11 @@ async function loadChainReport() {
     if (chainReport.value) {
       crForm.value = {
         enabled: !!chainReport.value.enabled,
+        cadence: chainReport.value.cadence || crPresetFor(chainReport.value.cadence_seconds || 86400),
         cadence_minutes: Math.max(5, Math.round((chainReport.value.cadence_seconds || 86400) / 60)),
         to: chainReport.value.to || '',
         history_limit: chainReport.value.history_limit || 50,
-        chain: chainReport.value.chain || '',
+        chains: (chainReport.value.chains || []).join(', ') || chainReport.value.chain || '',
         system: chainReport.value.system || '',
       }
     }
@@ -852,12 +867,14 @@ async function saveChainReport() {
   crBusy.value = true
   crError.value = ''
   try {
+    const preset = CR_PRESETS.find(p => p.key === crForm.value.cadence)
+    const named = preset && preset.seconds ? { cadence: preset.key, cadence_seconds: preset.seconds } : { cadence: '', cadence_seconds: Math.max(300, Math.round(crForm.value.cadence_minutes * 60)) }
     const out = await api.put<any>('/processes/chain-report', {
       enabled: crForm.value.enabled,
-      cadence_seconds: Math.max(300, Math.round(crForm.value.cadence_minutes * 60)),
+      ...named,
       to: crForm.value.to.trim(),
       history_limit: crForm.value.history_limit,
-      chain: crForm.value.chain.trim(),
+      chains: crForm.value.chains.trim(),
       system: crForm.value.system.trim(),
     })
     chainReport.value = out.schedule
@@ -1090,12 +1107,13 @@ async function removeChainReport() {
               :title="chainReport.enabled ? 'the door dispatches the file when the window elapses' : 'paused - the schedule stays but nothing dispatches'">
               {{ chainReport.enabled ? 'scheduled' : 'paused' }}
             </span>
-            <span class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[9px] font-bold text-cyan-300" :title="`every ${chainReport.cadence_seconds}s the file rides the wire`">
-              every {{ crCadence(chainReport.cadence_seconds) }}
+            <span class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[9px] font-bold text-cyan-300" :title="chainReport.cadence === 'weekly' ? 'the weekly digest - the same envelope path, the report\'s own list, the file on its weekly beat' : `every ${chainReport.cadence_seconds}s the file rides the wire`">
+              {{ chainReport.cadence === 'weekly' ? 'weekly digest' : `every ${crCadence(chainReport.cadence_seconds)}` }}
             </span>
             <span class="text-[10px] text-zinc-500">to <span class="text-zinc-300">{{ chainReport.to }}</span></span>
             <span v-if="chainReport.recipient_count > 1" class="rounded-full bg-sky-500/10 px-2 py-0.5 text-[9px] font-bold text-sky-300" title="one envelope carries every name - one SMTP conversation, the whole list on it">{{ chainReport.recipient_count }} recipients</span>
-            <span v-if="chainReport.chain" class="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-bold text-fuchsia-300" title="the report watches one chain only">chain: {{ chainReport.chain }}</span>
+            <span v-if="chainReport.chain_count > 1" class="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-bold text-fuchsia-300" title="the report's tag list - the file covers every chain it names">chains: {{ chainReport.chains.join(' + ') }}</span>
+            <span v-else-if="chainReport.chain" class="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-bold text-fuchsia-300" title="the report watches one chain only">chain: {{ chainReport.chain }}</span>
             <span v-if="chainReport.system" class="rounded-full bg-violet-500/10 px-2 py-0.5 text-[9px] font-bold text-violet-300" title="the report covers only the machines this system binds">system: {{ chainReport.system }}</span>
             <span class="ml-auto flex items-center gap-1.5">
               <button class="flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
@@ -1133,29 +1151,48 @@ async function removeChainReport() {
         </div>
         <p v-if="crError" class="mt-2 text-[10px] text-rose-300">{{ crError }}</p>
         <!-- the form - the same fields the backend validates loud -->
-        <div v-if="crEditing" class="mt-3 grid gap-2 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3 sm:grid-cols-[1fr_120px_1fr_110px_140px_140px_auto]">
-          <label class="flex items-center gap-1.5 text-[10px] text-zinc-400">
-            <input v-model="crForm.enabled" type="checkbox" class="accent-cyan-500" /> scheduled
-          </label>
-          <input v-model="crForm.cadence_minutes" type="number" min="5" step="5" placeholder="cadence (min)"
-            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="how often the file rides the wire, in minutes (floor 5 - a file dispatch is a minutes concern)" />
-          <input v-model="crForm.to" placeholder="to (a@co.com, b@co.com)"
-            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="the recipient LIST - commas or semicolons separate the names; ONE envelope carries every name (ceiling 8); delivered over your bound email endpoint (bind one on /channels)" />
-          <input v-model="crForm.history_limit" type="number" min="1" max="50" placeholder="depth"
-            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="the per-leg traversal window (1..50, the map's own clamp)" />
-          <input v-model="crForm.chain" placeholder="chain (optional)"
-            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="watch ONE chain only (e.g. Revenue chain) - empty = the whole estate map" />
-          <input v-model="crForm.system" placeholder="system (optional)"
-            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
-            title="break the report down by ONE system - the file covers only the machines that system binds (empty = every system); the email names the rides per system either way" />
-          <button class="flex items-center justify-center gap-1 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
-            :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
-            <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
-          </button>
+        <div v-if="crEditing" class="mt-3 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3">
+          <div class="grid gap-2 sm:grid-cols-[1fr_140px_1fr_110px_1fr_140px_auto]">
+            <label class="flex items-center gap-1.5 text-[10px] text-zinc-400">
+              <input v-model="crForm.enabled" type="checkbox" class="accent-cyan-500" /> scheduled
+            </label>
+            <input v-model="crForm.to" placeholder="to (a@co.com, b@co.com)"
+              class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+              title="the recipient LIST - commas or semicolons separate the names; ONE envelope carries every name (ceiling 8); delivered over your bound email endpoint (bind one on /channels)" />
+            <input v-model="crForm.chains" placeholder="chains (Revenue, Supply)"
+              class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+              title="the chain TAG LIST - commas separate the names; the file covers every chain it names (ceiling 8); empty = the whole estate map" />
+            <input v-model="crForm.history_limit" type="number" min="1" max="50" placeholder="depth"
+              class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+              title="the per-leg traversal window (1..50, the map's own clamp)" />
+            <input v-model="crForm.system" placeholder="system (optional)"
+              class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+              title="break the report down by ONE system - the file covers only the machines that system binds (empty = every system); the email names the rides per system either way" />
+            <input v-if="crForm.cadence === 'custom'" v-model="crForm.cadence_minutes" type="number" min="5" step="5" placeholder="cadence (min)"
+              class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+              title="how often the file rides the wire, in minutes (floor 5 - a file dispatch is a minutes concern)" />
+            <button v-else class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+              :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
+              <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
+            </button>
+          </div>
+          <!-- v101: the named rhythms - the weekly digest rides the same envelope path to the report's own list -->
+          <div class="mt-2 flex flex-wrap items-center gap-1.5">
+            <span class="text-[10px] text-zinc-500">rhythm</span>
+            <button v-for="p in CR_PRESETS" :key="p.key" type="button"
+              class="rounded-full px-2.5 py-1 text-[10px] font-bold transition"
+              :class="crForm.cadence === p.key ? 'bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-500/60' : 'bg-zinc-800/70 text-zinc-400 hover:text-zinc-200'"
+              :title="p.key === 'weekly' ? 'the weekly digest - ONE envelope path, the report\'s own recipient list, the file attached, every 7 days' : p.key === 'custom' ? 'speak the cadence in minutes (floor 5)' : `every ${p.label === 'hourly' ? 'hour' : p.key} the file rides the wire`"
+              @click="crForm.cadence = p.key">
+              {{ p.label }}
+            </button>
+          </div>
+          <div v-if="crForm.cadence === 'custom'" class="mt-2">
+            <button class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+              :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
+              <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
+            </button>
+          </div>
         </div>
       </div>
 

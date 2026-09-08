@@ -512,4 +512,4 @@ def test_v90_clinic_billed_visit_opens_invoice():
 # ---------------------------------------------------------------------------
 
 def test_v90_version_pin():
-    assert settings.version == "1.100.0"
+    assert settings.version == "1.101.0"

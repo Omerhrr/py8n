@@ -456,4 +456,4 @@ def test_v86_scheduler_door_escalates_the_new_machines():
 # ---------------------------------------------------------------------------
 
 def test_v86_version_pin():
-    assert settings.version == "1.100.0"
+    assert settings.version == "1.101.0"

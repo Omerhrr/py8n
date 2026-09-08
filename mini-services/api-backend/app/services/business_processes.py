@@ -1904,10 +1904,15 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int, dict]:
     "system" column, "|"-joined) and the ride count is broken down BY
     system - {system_name: rides} with a ride landing in every bucket its
     machine binds (a pivot's own arithmetic); machines bound to no system
-    ride outside the breakdown, exactly as the file shows."""
+    ride outside the breakdown, exactly as the file shows.
+
+    v101: the rides break down BY CHAIN the same way ({chain_name: rides}
+    - the first column IS the chain, so the pivot reads the file's own
+    grouping); the weekly digest's body summarizes from it."""
     rows = [list(CHAIN_CSV_HEADER)]
     rides = 0
     by_system: dict[str, int] = {}
+    by_chain: dict[str, int] = {}
     seen_legs: set[tuple[str, str]] = set()
     for ch in chains:
         for leg in ch.get("legs") or []:
@@ -1932,6 +1937,9 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int, dict]:
                 continue
             for h in hist:
                 rides += 1
+                ch_name = str(ch.get("name") or "")
+                if ch_name:
+                    by_chain[ch_name] = by_chain.get(ch_name, 0) + 1
                 for sname in leg.get("systems") or []:
                     by_system[sname] = by_system.get(sname, 0) + 1
                 overdue = h.get("overdue_seconds")
@@ -1946,14 +1954,15 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int, dict]:
                     snooze if snooze is not None else "",
                     h.get("instance_id") or "", h.get("process_id") or ""
                 ] + [sys_cell])
-    return rows, rides, by_system
+    return rows, rides, by_system, by_chain
 
 
 async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
                             history_limit: int = 50,
                             chain: str | None = None,
                             leg: str | None = None,
-                            system: str | None = None) -> dict:
+                            system: str | None = None,
+                            chains: list[str] | None = None) -> dict:
     """v98: the per-leg chain history as a CSV download - the same map
     the operator-detail chain draws (chain_map, zero drift), rendered as
     one row per traversal with the chain and the leg named on every row.
@@ -1977,13 +1986,28 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
     bound to no system never matches a named filter. All three compose;
     an unknown name is an HONEST EMPTY file (header only, leg_count 0) -
     the absence reads as data, never a 404, because the map the operator
-    is looking at is the truth."""
+    is looking at is the truth.
+
+    v101: ``chains`` names a LIST of chains - the report's own tag list
+    (case-insensitive, composing with everything else; the wire param is
+    comma-separated, the schedule stores it parsed). One want-set against
+    the map: a chain rides in when its name is on the list. The output
+    grows by_chain (the ride buckets per chain - the digest body's own
+    breakdown) and the chains_filter echo (the REQUESTED names, the way
+    chain_filter echoes what was asked, not what matched)."""
     out = await chain_map(db, owner_id, history_limit=history_limit)
-    chains = out.get("chains") or []
+    requested_chains = [str(c).strip() for c in (chains or [])
+                        if str(c).strip()]
+    all_chains = out.get("chains") or []
+    want_chain: set[str] = set()
     if chain is not None and str(chain).strip():
-        want = str(chain).strip().lower()
-        chains = [c for c in chains
-                  if (c.get("name") or "").strip().lower() == want]
+        want_chain.add(str(chain).strip().lower())
+    for cname in requested_chains:
+        want_chain.add(cname.lower())
+    if want_chain:
+        all_chains = [c for c in all_chains
+                      if (c.get("name") or "").strip().lower() in want_chain]
+    chains = all_chains
     if leg is not None and str(leg).strip():
         raw = str(leg).strip().lower()
         if "|" in raw:
@@ -2008,16 +2032,18 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
             if legs:
                 filtered.append({**c, "legs": legs})
         chains = filtered
-    rows, rides, by_system = _chain_csv_rows(chains)
+    rows, rides, by_system, by_chain = _chain_csv_rows(chains)
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerows(rows)
     leg_count = sum(len(c.get("legs") or []) for c in chains)
     return {"csv": buf.getvalue(), "leg_count": leg_count,
             "ride_count": rides, "by_system": by_system,
+            "by_chain": by_chain,
             "chain_filter": (str(chain).strip() if chain else ""),
             "leg_filter": (str(leg).strip() if leg else ""),
-            "system_filter": (str(system).strip() if system else "")}
+            "system_filter": (str(system).strip() if system else ""),
+            "chains_filter": ", ".join(requested_chains)}
 
 
 # ---------------------------------------------------------------------------
@@ -2027,6 +2053,17 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
 # v100: the recipient LIST's honest ceiling - a report is a staff brief,
 # not a mailing list (the loud refusal names the count either way)
 CHAIN_REPORT_MAX_RECIPIENTS = 8
+# v101: the same honesty for the chain TAG LIST - name the chains that
+# matter, or leave the scope empty and the whole estate map rides
+CHAIN_REPORT_MAX_CHAINS = 8
+# v101: the named rhythms the schedule speaks (the weekly digest is the
+# report on its slowest honest beat - the SAME envelope path, the SAME
+# recipient list, the file on a weekly cadence)
+CHAIN_REPORT_CADENCES: dict[str, int] = {
+    "hourly": 3600,
+    "daily": 86400,
+    "weekly": 7 * 86400,
+}
 
 
 def parse_report_recipients(raw: str) -> list[str]:
@@ -2048,18 +2085,58 @@ def parse_report_recipients(raw: str) -> list[str]:
     return out
 
 
+def parse_report_chains(raw: str, *, ceiling: int | None = CHAIN_REPORT_MAX_CHAINS) -> list[str]:
+    """v101: the chain TAG LIST out of whatever the form carried - the same
+    discipline the recipient list obeys: commas, semicolons and newlines
+    all separate, whitespace stripped, empties dropped, duplicates collapsed
+    case-insensitively (first spelling wins), order preserved. The ceiling
+    is loud (8 - a report is a staff brief; pass ``ceiling=None`` when the
+    caller just wants the parse, the way the CSV endpoint does)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for piece in str(raw or "").replace("\n", ",").replace(";", ",").split(","):
+        name = piece.strip()
+        if not name:
+            continue
+        if name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        out.append(name)
+    if ceiling is not None and len(out) > ceiling:
+        raise ProcessError(
+            f"a chain report watches at most {ceiling} chains (got {len(out)}) "
+            "- name the ones that matter, or leave the scope empty and the "
+            "whole estate map rides")
+    return out
+
+
 def _chain_report_out(row: ChainReportSchedule) -> dict:
     """The schedule as the API serves it - the state the board reads
     (v100: the parsed recipient LIST and its count ride along, so the
-    board can say "one file, N names" without re-parsing)."""
+    board can say "one file, N names" without re-parsing; v101: the
+    chain TAG LIST too, plus the named cadence when the seconds match
+    one of the schedule's own rhythms)."""
     recips = parse_report_recipients(row.to or "")
+    chains_scope = parse_report_chains(
+        getattr(row, "chains", None) or "", ceiling=None)
+    if not chains_scope and (row.chain or "").strip():
+        chains_scope = [row.chain.strip()]  # pre-v101 rows, defensively
+    cadence_name = ""
+    try:
+        cadence_name = next((name for name, secs in
+                             CHAIN_REPORT_CADENCES.items()
+                             if secs == int(row.cadence_seconds)), "")
+    except (TypeError, ValueError):
+        pass
     return {
         "id": row.id, "owner_id": row.owner_id, "enabled": bool(row.enabled),
         "cadence_seconds": int(row.cadence_seconds),
+        "cadence": cadence_name,
         "to": row.to or "", "recipients": recips,
         "recipient_count": len(recips),
         "history_limit": int(row.history_limit),
         "chain": row.chain or "", "system": row.system or "",
+        "chains": chains_scope, "chain_count": len(chains_scope),
         "last_sent_at": row.last_sent_at.isoformat() if row.last_sent_at else None,
         "next_due": row.next_due.isoformat() if row.next_due else None,
         "last_result": row.last_result or None,
@@ -2068,12 +2145,26 @@ def _chain_report_out(row: ChainReportSchedule) -> dict:
 
 
 def chain_report_subject(legs: int, rides: int, chain: str = "",
-                         system: str = "") -> str:
+                         system: str = "", *, chains: list[str] | None = None,
+                         cadence: str = "") -> str:
     """The scan line the subject carries (the digest's own pattern):
-    '[py8n] Chain history - N ride(s) across M leg(s)' - the chain and/or
-    the system named when the report watches one."""
-    base = f"[py8n] Chain history - {rides} ride(s) across {legs} leg(s)"
-    suffixes = [s for s in (chain.strip(),
+    '[py8n] Chain history - N ride(s) across M leg(s)' - the chain(s)
+    and/or the system named when the report watches them (v101: the tag
+    list reads 'Chains: A, B' while one name keeps the v99 shape; the
+    WEEKLY rhythm renames the scan line to the weekly digest's own -
+    the same envelope, the same list, the file on its weekly beat)."""
+    named = (cadence or "").strip().lower()
+    base_name = ("[py8n] Weekly chain digest" if named == "weekly"
+                 else "[py8n] Chain history")
+    base = f"{base_name} - {rides} ride(s) across {legs} leg(s)"
+    scope = [str(c).strip() for c in (chains or []) if str(c).strip()]
+    if len(scope) > 1:
+        chain_scope = f"Chains: {', '.join(scope)}"  # the tag list, named
+    elif scope:
+        chain_scope = scope[0]  # one chain keeps the v99 suffix shape
+    else:
+        chain_scope = chain.strip()
+    suffixes = [s for s in (chain_scope,
                             f"System: {system.strip()}" if system.strip() else "")
                 if s]
     return f"{base} - {' - '.join(suffixes)}" if suffixes else base
@@ -2097,16 +2188,23 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
                               to: str = "",
                               history_limit: int = 50,
                               chain: str = "",
-                              system: str = "") -> dict:
+                              system: str = "",
+                              chains: str = "",
+                              cadence: str = "") -> dict:
     """Create or update the owner's ONE chain-report schedule - the same
     loud validation every definition carries: cadence at the floor (a
     file dispatch is a minutes concern), a real RECIPIENT LIST (v100:
     commas/semicolons separate the names; every name carries an "@",
     duplicates collapse, the ceiling is loud), the depth clamped to the
-    map's own 1..50, one optional chain name and one optional SYSTEM
-    scope (v100: the report covers only the machines that system binds).
-    The new cadence rules the NEXT window: next_due re-anchors to now +
-    cadence the way the digest's window re-anchors on a mode switch."""
+    map's own 1..50, and the SCOPE (v101: a chain TAG LIST - the same
+    parse the recipients obey, the ceiling loud; the legacy single
+    ``chain`` folds into the list when no list is given, one name keeps
+    the legacy column truthful so v99/v100 readers never drift). The
+    named RHYTHM (v101: hourly | daily | weekly) rules the seconds when
+    spoken - the weekly digest rides the SAME envelope path to the
+    report's own list, only the beat is slower. The new cadence rules
+    the NEXT window: next_due re-anchors to now + cadence the way the
+    digest's window re-anchors on a mode switch."""
     recips = parse_report_recipients(to)
     if not recips:
         raise ProcessError("a chain report names its recipient (to) - an "
@@ -2125,6 +2223,14 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
         cadence_seconds = int(cadence_seconds)
     except (TypeError, ValueError):
         raise ProcessError("cadence_seconds must be a number of seconds") from None
+    named = (cadence or "").strip().lower()
+    if named:
+        if named not in CHAIN_REPORT_CADENCES:
+            raise ProcessError(
+                f"unknown cadence {named!r} - the named rhythms are "
+                f"{', '.join(sorted(CHAIN_REPORT_CADENCES))} (or speak "
+                "cadence_seconds directly)")
+        cadence_seconds = CHAIN_REPORT_CADENCES[named]
     if cadence_seconds < CHAIN_REPORT_MIN_CADENCE:
         raise ProcessError(f"cadence_seconds must be >= "
                            f"{CHAIN_REPORT_MIN_CADENCE} (a file dispatch is a "
@@ -2135,6 +2241,12 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
         history_limit = 50
     chain = (chain or "").strip()[:120]
     system = (system or "").strip()[:120]
+    # v101: the chain TAG LIST - the same parse the recipients obey, the
+    # ceiling loud; the legacy single chain folds in when no list came
+    scope = parse_report_chains(chains)
+    if not scope and chain:
+        scope = [chain]
+    scope = [name[:120] for name in scope]
 
     q = select(ChainReportSchedule)
     if owner_id is not None:
@@ -2150,8 +2262,9 @@ async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
     row.cadence_seconds = cadence_seconds
     row.to = ", ".join(recips)
     row.history_limit = history_limit
-    row.chain = chain
+    row.chain = scope[0] if len(scope) == 1 else ""
     row.system = system
+    row.chains = ", ".join(scope)
     row.next_due = now + timedelta(seconds=cadence_seconds)
     row.updated_at = now
     await db.flush()
@@ -2178,11 +2291,20 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
                                 now: datetime) -> dict:
     """One dispatch: render the SAME file the plot exports
     (chain_history_csv, zero drift - the schedule's own depth and its
-    chain/system filters), then deliver it over the owner's bound EMAIL
+    chain/system scopes), then deliver it over the owner's bound EMAIL
     endpoint as a real MIME attachment. v100: ONE envelope carries EVERY
     recipient the schedule names (one SMTP conversation, the names on the
-    To header and on the envelope) and the body breaks the rides down BY
-    system - the report's own summary of the file it carries.
+    To header and on the envelope). v101: the scope is the chain TAG
+    LIST - the file covers every chain the list names (composing with
+    the system scope) - and the body breaks the rides down BY chain as
+    well as BY system.
+
+    The named rhythm (hourly | daily | weekly) only renames the scan
+    line and adds the Rhythm line: the weekly digest rides the SAME
+    envelope path to the report's OWN list - same endpoint, same
+    recipients, same attachment, same conversation - only the beat is
+    slower. Nothing about the wire changes, because a weekly digest is
+    the report on its weekly beat, not a different message.
 
     Every outcome is an honest record - delivered, skipped (no endpoint,
     no recipient, an empty window) or failed (smtp refused) - and the
@@ -2198,24 +2320,39 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
     from . import system_events as events_svc
 
     recips = parse_report_recipients(row.to or "")
+    scope = parse_report_chains(getattr(row, "chains", None) or "",
+                                ceiling=None)
+    if not scope and (row.chain or "").strip():
+        scope = [row.chain.strip()]  # pre-v101 rows, defensively
+    cadence_name = (row.cadence_seconds and next(
+        (name for name, secs in CHAIN_REPORT_CADENCES.items()
+         if secs == int(row.cadence_seconds)), "")) or ""
     csv_out = await chain_history_csv(
         db, row.owner_id, history_limit=row.history_limit,
-        chain=row.chain or None, system=row.system or None)
+        system=row.system or None, chains=scope or None)
     legs, rides = csv_out["leg_count"], csv_out["ride_count"]
     by_system = csv_out.get("by_system") or {}
+    by_chain = csv_out.get("by_chain") or {}
     stamp = now.strftime("%Y%m%d")
-    slug = ""
-    if row.chain:
-        slug = "".join(c if c.isalnum() else "-" for c in row.chain.lower())[:40].strip("-")
+    if len(scope) > 1:
+        slug = "".join(
+            c if c.isalnum() else "-" for c in
+            "-".join(scope).lower())[:40].strip("-")
+    elif scope:
+        slug = "".join(c if c.isalnum() else "-"
+                       for c in scope[0].lower())[:40].strip("-")
     elif row.system:
         slug = "sys-" + "".join(
             c if c.isalnum() else "-" for c in row.system.lower())[:36].strip("-")
+    else:
+        slug = ""
     slug = f"-{slug}" if slug else ""
     filename = f"py8n-chain-history{slug}-{stamp}.csv"
 
     result = {"at": now.isoformat(), "legs": legs, "rides": rides,
               "filename": filename, "to": ", ".join(recips),
-              "recipients": len(recips)}
+              "recipients": len(recips), "chains": scope,
+              "cadence": cadence_name}
     if not recips:
         result.update({"delivery": "skipped",
                        "detail": "the schedule names no recipient (to) - "
@@ -2233,19 +2370,27 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
                                      "/channels and the file crosses the wire"})
         else:
             subject = chain_report_subject(legs, rides, row.chain or "",
-                                           row.system or "")
-            breakdown = ", ".join(f"{name} {count} ride(s)"
-                                  for name, count in sorted(
-                                      by_system.items(),
-                                      key=lambda kv: -kv[1]))
+                                           row.system or "", chains=scope,
+                                           cadence=cadence_name)
+            def _buckets(b: dict[str, int]) -> str:
+                return ", ".join(f"{name} {count} ride(s)"
+                                 for name, count in sorted(
+                                     b.items(), key=lambda kv: -kv[1]))
+            sys_breakdown = _buckets(by_system)
+            chain_breakdown = _buckets(by_chain)
             body = (
                 f"The chain history, as the map draws it.\n\n"
                 f"Window: every leg, the {row.history_limit} most recent "
                 f"ride(s) each\n"
-                + (f"Chain: {row.chain}\n" if row.chain else "")
+                + (f"Chains: {', '.join(scope)}\n" if len(scope) > 1 else "")
+                + (f"Chain: {scope[0]}\n" if len(scope) == 1 else "")
                 + (f"System: {row.system}\n" if row.system else "")
+                + (f"Rhythm: weekly digest - the same envelope that carries "
+                   f"the report, to the report's own list\n"
+                   if cadence_name == "weekly" else "")
                 + f"Shape: {legs} leg(s), {rides} ride(s) in the file\n"
-                + (f"By system: {breakdown}\n" if breakdown else "")
+                + (f"By chain: {chain_breakdown}\n" if chain_breakdown else "")
+                + (f"By system: {sys_breakdown}\n" if sys_breakdown else "")
                 + f"Recipients: {len(recips)}\n"
                 f"Attachment: {filename}\n\n"
                 f"Download the file any time from the chain views "
@@ -2261,9 +2406,7 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
             except Exception as exc:  # noqa: BLE001 - an honest failure IS a result
                 result.update({"delivery": "failed",
                                "detail": f"the dispatch refused loud: {exc}",
-                               "subject": chain_report_subject(
-                                   legs, rides, row.chain or "",
-                                   row.system or "")})
+                               "subject": subject})
     row.last_sent_at = now
     row.next_due = now + timedelta(seconds=int(row.cadence_seconds))
     row.last_result = result
@@ -2276,6 +2419,7 @@ async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
                  "detail": result.get("detail", ""), "legs": legs,
                  "rides": rides, "filename": filename,
                  "chain": row.chain or "", "system": row.system or "",
+                 "chains": scope, "cadence": cadence_name,
                  "history_limit": row.history_limit,
                  "sent_at": result["at"]})
     return result

@@ -139,5 +139,15 @@ async def init_db() -> None:
             cr_cols = {c["name"] for c in insp.get_columns("chain_report_schedules")}
             if "system" not in cr_cols:
                 sync_conn.execute(text("ALTER TABLE chain_report_schedules ADD COLUMN system VARCHAR(120) DEFAULT ''"))
+            # v101: the chain report's MULTI-CHAIN scope (the tag list) -
+            # the legacy single-chain filter copies into the list ONCE, so
+            # the read path never branches (fresh installs get the column
+            # from create_all)
+            if "chains" not in cr_cols:
+                sync_conn.execute(text("ALTER TABLE chain_report_schedules ADD COLUMN chains VARCHAR(500) DEFAULT ''"))
+                sync_conn.execute(text(
+                    "UPDATE chain_report_schedules SET chains = chain "
+                    "WHERE (chains IS NULL OR chains = '') "
+                    "AND chain IS NOT NULL AND chain != ''"))
 
         await conn.run_sync(_add_missing_columns)
