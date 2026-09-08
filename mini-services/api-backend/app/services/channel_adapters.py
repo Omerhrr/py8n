@@ -1071,7 +1071,8 @@ def email_parse_mime(raw_mime: str | bytes) -> dict:
     }
 
 
-def email_build_outbound(config: dict, to: str, text: str, subject: str = "") -> dict:
+def email_build_outbound(config: dict, to: str, text: str, subject: str = "",
+                         attachments: list[dict] | None = None) -> dict:
     """The SMTP delivery: an RFC 5322 message + envelope (``transport: smtp``).
 
     Email does not ride HTTP - the request shape carries the fully built
@@ -1092,6 +1093,22 @@ def email_build_outbound(config: dict, to: str, text: str, subject: str = "") ->
     msg["Subject"] = subject or "Message from py8n"
     msg["X-Py8n-Channel"] = "email"
     msg.set_content(text)
+    # v99: real MIME attachments - the chain-history report rides the same
+    # wire the knocks and digests ride, the file as a named part. Each
+    # attachment: {filename, content (str), maintype="text", subtype="csv"}.
+    # set_content first (the body part), add_attachment after - the message
+    # becomes multipart/mixed only when a part actually joins.
+    for att in (attachments or []):
+        if not isinstance(att, dict) or not str(att.get("filename") or "").strip():
+            raise ValueError("an attachment names its file (filename)")
+        if att.get("content") is None:
+            raise ValueError(f"attachment {att.get('filename')!r} carries no content")
+        msg.add_attachment(
+            str(att["content"]).encode("utf-8"),
+            maintype=str(att.get("maintype") or "text"),
+            subtype=str(att.get("subtype") or "csv"),
+            filename=str(att["filename"]).strip(),
+        )
     if from_address:
         msg["Message-ID"] = make_msgid(domain=(from_address.split("@")[-1] or "py8n.local"))
     return {
@@ -1103,6 +1120,7 @@ def email_build_outbound(config: dict, to: str, text: str, subject: str = "") ->
         "to": to,
         "from": from_address,
         "subject": msg["Subject"],
+        "attachment_names": [str(a.get("filename")) for a in (attachments or [])],
     }
 
 

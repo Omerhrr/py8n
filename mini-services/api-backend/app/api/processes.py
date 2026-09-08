@@ -20,10 +20,10 @@ from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
     attention_feed, chain_history_csv, chain_map, create_process,
-    escalation_day_detail, escalation_history_grid,
-    escalation_preview, get_instance,
-    get_process, list_instances, list_processes, process_analytics,
-    start_instance, update_escalation_policy,
+    delete_chain_report, escalation_day_detail, escalation_history_grid,
+    escalation_preview, get_chain_report, get_instance, get_process,
+    list_instances, list_processes, process_analytics, send_chain_report_now,
+    start_instance, update_escalation_policy, upsert_chain_report,
 )
 from .auth import get_optional_user
 
@@ -104,6 +104,8 @@ async def chains(history_limit: int = 5, user=Depends(get_optional_user),
 
 @router.get("/chains/history.csv")
 async def chains_history_csv_route(history_limit: int = 50,
+                                   chain: str = "",
+                                   leg: str = "",
                                    user=Depends(get_optional_user),
                                    db: AsyncSession = Depends(get_db)):
     """v98: the per-leg chain history as a CSV download - the SAME map the
@@ -111,16 +113,97 @@ async def chains_history_csv_route(history_limit: int = 50,
     traversal with the chain and the leg named on every row (a leg with no
     rides yet still ships one row, the absence reading as data).
     history_limit rides the map's own clamp (1..50); the default is the
-    deepest window. Declared BEFORE /{process_id} (alongside /chains)."""
+    deepest window. Declared BEFORE /{process_id} (alongside /chains).
+
+    v99: the PLOT's own filters - ``chain`` names one chain (the per-chain
+    CSV button), ``leg`` names one leg as "from_name|on_state" (the
+    per-leg CSV chip); both compose, case-insensitive, an unknown name an
+    honest empty file. The response names the filters it honored."""
     out = await chain_history_csv(db, getattr(user, "id", None),
-                                  history_limit=history_limit)
+                                  history_limit=history_limit,
+                                  chain=chain or None, leg=leg or None)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
-    return Response(
-        content=out["csv"], media_type="text/csv; charset=utf-8",
-        headers={"Content-Disposition":
-                 f'attachment; filename="py8n-chain-history-{stamp}.csv"',
-                 "X-Py8n-Leg-Count": str(out["leg_count"]),
-                 "X-Py8n-Ride-Count": str(out["ride_count"])})
+    slug = ""
+    if out["chain_filter"]:
+        slug = "-" + "".join(c if c.isalnum() else "-"
+                             for c in out["chain_filter"].lower())[:40].strip("-")
+    headers = {"Content-Disposition":
+               f'attachment; filename="py8n-chain-history{slug}-{stamp}.csv"',
+               "X-Py8n-Leg-Count": str(out["leg_count"]),
+               "X-Py8n-Ride-Count": str(out["ride_count"])}
+    if out["chain_filter"]:
+        headers["X-Py8n-Chain-Filter"] = out["chain_filter"]
+    if out["leg_filter"]:
+        headers["X-Py8n-Leg-Filter"] = out["leg_filter"]
+    return Response(content=out["csv"], media_type="text/csv; charset=utf-8",
+                    headers=headers)
+
+
+class ChainReportUpsert(BaseModel):
+    """v99: the chain-report schedule - the digest pattern applied to the
+    FILE. One per owner: cadence floor 300s (a file dispatch is a minutes
+    concern), a real recipient, the depth clamped to the map's 1..50, one
+    optional chain name ("" = the whole estate map)."""
+    enabled: bool = True
+    cadence_seconds: int = Field(default=86400, description=(
+        "how often the file rides the wire (floor 300s)"))
+    to: str = Field(default="", description="the recipient (email address)")
+    history_limit: int = Field(default=50, ge=1, le=50, description=(
+        "the per-leg traversal window (the map's own clamp)"))
+    chain: str = Field(default="", description=(
+        "optional single-chain filter (\"\" = every chain)"))
+
+
+@router.get("/chain-report")
+async def get_chain_report_route(user=Depends(get_optional_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """v99: the owner's chain-report schedule, or the honest absence."""
+    return await get_chain_report(db, getattr(user, "id", None))
+
+
+@router.put("/chain-report")
+async def put_chain_report_route(body: ChainReportUpsert,
+                                 user=Depends(get_optional_user),
+                                 db: AsyncSession = Depends(get_db)):
+    """v99: create or update the schedule - validated loud, next_due
+    re-anchored to now + cadence (the new cadence rules the NEXT window,
+    the digest's own re-anchor)."""
+    try:
+        out = await upsert_chain_report(
+            db, getattr(user, "id", None), enabled=body.enabled,
+            cadence_seconds=body.cadence_seconds, to=body.to,
+            history_limit=body.history_limit, chain=body.chain)
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
+
+
+@router.delete("/chain-report")
+async def delete_chain_report_route(user=Depends(get_optional_user),
+                                    db: AsyncSession = Depends(get_db)):
+    """v99: remove the schedule - removing is not pausing, the file stops
+    riding the door entirely."""
+    try:
+        out = await delete_chain_report(db, getattr(user, "id", None))
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
+
+
+@router.post("/chain-report/send-now")
+async def send_chain_report_now_route(user=Depends(get_optional_user),
+                                      db: AsyncSession = Depends(get_db)):
+    """v99: the manual door - one dispatch NOW, whatever next_due says
+    (a real send is a real send: last_sent_at/next_due/last_result all
+    stamp). The same renderer the scheduled walk uses, zero drift."""
+    try:
+        out = await send_chain_report_now(db, getattr(user, "id", None))
+    except ProcessError as exc:
+        raise _http(exc) from exc
+    await db.commit()
+    return out
 
 
 @router.get("/escalation-history")

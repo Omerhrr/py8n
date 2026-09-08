@@ -477,21 +477,29 @@ function fmtOverdue(sec: number): string {
   return `${sec}s`
 }
 
-// ---- v98: the per-leg chain history as a CSV download --------------------
+// ---- v98/v99: the chain history as a CSV download -------------------------
 // the SAME owner-wide map the chain views draw (chain_map, zero drift),
 // one row per traversal with the chain and the leg named on every row so a
 // spreadsheet can filter or pivot per leg; a leg with no rides still ships
-// its inventory row. Exported at the deepest window (50 rides per leg) -
-// the endpoint rides the map's own clamp, so the file honors exactly the
-// window a deeper toggle chose elsewhere.
+// its inventory row. v99: the PLOT's own filters ride the file - a chain
+// name (the per-chain button) and/or a leg "from|state" (the per-leg chip)
+// hit the SAME endpoint, so the file is exactly the slice you are looking
+// at; the deepest window (50 rides per leg) rides every export.
 const chainCsvBusy = ref(false)
 const chainCsvError = ref('')
-async function exportChainCsv() {
+function _csvSlug(s: string): string {
+  return s.toLowerCase().split('').map(c => /[a-z0-9]/.test(c) ? c : '-').join('').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+}
+async function exportChainCsv(chain?: string, leg?: string) {
   chainCsvBusy.value = true
   chainCsvError.value = ''
   try {
-    await download('/processes/chains/history.csv?history_limit=50',
-      `py8n-chain-history-${new Date().toISOString().slice(0, 10)}.csv`)
+    const params = new URLSearchParams({ history_limit: '50' })
+    if (chain) params.set('chain', chain)
+    if (leg) params.set('leg', leg)
+    const tag = chain ? `-${_csvSlug(chain)}` : leg ? `-leg-${_csvSlug(leg.replace('|', '-'))}` : ''
+    await download(`/processes/chains/history.csv?${params.toString()}`,
+      `py8n-chain-history${tag}-${new Date().toISOString().slice(0, 10)}.csv`)
   } catch (e: any) {
     chainCsvError.value = e?.message || 'the export was refused'
   } finally { chainCsvBusy.value = false }
@@ -830,7 +838,7 @@ onMounted(async () => {
               <button class="ml-auto flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
                 :disabled="chainCsvBusy"
                 title="export the per-leg chain history as CSV - one row per traversal with the chain and the leg named on every row (deepest window, 50 rides per leg)"
-                @click="exportChainCsv">
+                @click="exportChainCsv()">
                 <Loader2 v-if="chainCsvBusy" class="h-3 w-3 animate-spin" />
                 <Download v-else class="h-3 w-3" /> Export CSV
               </button>
@@ -840,6 +848,13 @@ onMounted(async () => {
                 <div class="flex flex-wrap items-center gap-2">
                   <span class="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-bold text-fuchsia-300">{{ chain.name }} chain</span>
                   <p class="text-[11px] text-zinc-500">{{ chain.story }}</p>
+                  <!-- v99: the plot's own filter - this chain, and only this chain, in the file -->
+                  <button class="flex items-center gap-0.5 rounded-full border border-cyan-500/30 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300/90 transition hover:bg-cyan-500/10 disabled:opacity-50"
+                    :disabled="chainCsvBusy"
+                    :title="`export THIS chain's per-leg history as CSV (every leg, the 50 most recent rides each)`"
+                    @click="exportChainCsv(chain.name)">
+                    <Download class="h-2.5 w-2.5" /> CSV
+                  </button>
                   <span v-if="chain.complete" class="ml-auto flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[9px] font-bold text-emerald-300">
                     <CheckCircle2 class="h-2.5 w-2.5" /> live end to end
                   </span>
@@ -906,7 +921,8 @@ onMounted(async () => {
                   </g>
                 </svg>
                 <div class="mt-1 space-y-0.5">
-                  <p v-for="leg in chain.legs" :key="`row-${leg.from_process}-${leg.on_state}`" class="text-[10px] text-zinc-600">
+                  <div v-for="leg in chain.legs" :key="`row-${leg.from_process}-${leg.on_state}`" class="flex items-start gap-1.5 text-[10px] text-zinc-600">
+                  <p class="min-w-0 flex-1">
                     <template v-if="legArmed(leg)">
                       <span class="font-semibold text-fuchsia-300">armed</span> - when {{ leg.from_process }} lands on
                       <span class="text-zinc-400">{{ leg.on_state }}</span>, {{ leg.opens }} opens itself:
@@ -922,6 +938,14 @@ onMounted(async () => {
                       {{ leg.from_process }} is not installed - nothing arms this leg yet.
                     </template>
                   </p>
+                  <!-- v99: the plot's own filter - this leg, and only this leg, in the file -->
+                  <button class="shrink-0 rounded-full border border-cyan-500/30 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300/90 transition hover:bg-cyan-500/10 disabled:opacity-50"
+                    :disabled="chainCsvBusy"
+                    :title="`export THIS leg's rides as CSV (the 50 most recent)`"
+                    @click="exportChainCsv(undefined, `${leg.from_process}|${leg.on_state}`)">
+                    <Download class="inline h-2.5 w-2.5" /> CSV
+                  </button>
+                  </div>
                 </div>
                 <!-- v94: ack/snooze ON the chain nodes - the node's overdue
                   entities named under the drawing, each with its door state

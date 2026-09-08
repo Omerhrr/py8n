@@ -432,6 +432,15 @@ async def _resolve_endpoint(db: AsyncSession, owner_id: str | None,
     return (await db.execute(q)).scalars().first()
 
 
+async def resolve_endpoint(db: AsyncSession, owner_id: str | None,
+                           channel: str) -> ChannelEndpoint | None:
+    """v99 public door on the resolution the escalation delivery uses -
+    the policy (or schedule) names the CHANNEL, the endpoints name the
+    providers; the owner's first enabled endpoint on the channel wins
+    (a global endpoint serves every owner)."""
+    return await _resolve_endpoint(db, owner_id, channel)
+
+
 async def deliver_escalation(db: AsyncSession, instance: BusinessProcessInstance,
                              policy: dict, *, process_name: str,
                              overdue_seconds: int, attempt: int,

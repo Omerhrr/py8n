@@ -177,15 +177,25 @@ async function toggleDepth() {
 
 // v98: the per-leg chain history as a CSV download - the SAME map this page
 // draws, one row per traversal with the chain and the leg named on every
-// row; the file honors the depth toggle's window (the server clamps 1..50)
+// row; the file honors the depth toggle's window (the server clamps 1..50).
+// v99: the PLOT's own filters ride the file - a chain name (the per-chain
+// button) and/or a leg "from|state" (the per-leg chip) hit the SAME
+// endpoint, so the file is exactly the slice you are looking at.
 const csvBusy = ref(false)
 const csvError = ref('')
-async function exportChainCsv() {
+function _csvSlug(s: string): string {
+  return s.toLowerCase().split('').map(c => /[a-z0-9]/.test(c) ? c : '-').join('').replace(/-+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
+}
+async function exportChainCsv(chain?: string, leg?: string) {
   csvBusy.value = true
   csvError.value = ''
   try {
-    await download(`/processes/chains/history.csv?history_limit=${histDepth.value}`,
-      `py8n-chain-history-depth${histDepth.value}.csv`)
+    const params = new URLSearchParams({ history_limit: String(histDepth.value) })
+    if (chain) params.set('chain', chain)
+    if (leg) params.set('leg', leg)
+    const tag = chain ? `-${_csvSlug(chain)}` : leg ? `-leg-${_csvSlug(leg.replace('|', '-'))}` : ''
+    await download(`/processes/chains/history.csv?${params.toString()}`,
+      `py8n-chain-history${tag}-depth${histDepth.value}.csv`)
   } catch (e: any) {
     csvError.value = e?.message || 'the export was refused'
   } finally { csvBusy.value = false }
@@ -373,6 +383,13 @@ onMounted(async () => {
               <div class="flex flex-wrap items-center gap-2">
                 <span class="rounded-full bg-fuchsia-500/15 px-2 py-0.5 text-[10px] font-bold text-fuchsia-300">{{ chain.name }} chain</span>
                 <p class="text-[11px] text-zinc-500">{{ chain.story }}</p>
+                <!-- v99: the plot's own filter - this chain, and only this chain, in the file -->
+                <button class="flex items-center gap-0.5 rounded-full border border-cyan-500/30 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300/90 transition hover:bg-cyan-500/10 disabled:opacity-50"
+                  :disabled="csvBusy"
+                  :title="`export THIS chain's per-leg history as CSV (at depth ${histDepth})`"
+                  @click="exportChainCsv(chain.name)">
+                  <Download class="h-2.5 w-2.5" /> CSV
+                </button>
                 <span class="ml-auto text-[10px] text-zinc-600">{{ stopLabel(chain) }}</span>
               </div>
               <svg :viewBox="`0 0 ${chainW(chain.operators.length)} 116`"
@@ -457,6 +474,13 @@ onMounted(async () => {
                       <span class="font-semibold text-zinc-400">{{ leg.from_process }} --{{ leg.on_state }}--> {{ leg.opens }}</span>:
                       {{ legLive(leg)!.opened }} opened · {{ legLive(leg)!.open_now }} still moving
                       <span v-if="legLive(leg)!.stuck" class="font-bold text-rose-400">· {{ legLive(leg)!.stuck }} past SLA</span>
+                      <!-- v99: the plot's own filter - this leg, and only this leg, in the file -->
+                      <button class="ml-1 inline-flex items-center gap-0.5 rounded-full border border-cyan-500/30 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300/90 transition hover:bg-cyan-500/10 disabled:opacity-50"
+                        :disabled="csvBusy"
+                        :title="`export THIS leg's rides as CSV (at depth ${histDepth})`"
+                        @click="exportChainCsv(undefined, `${leg.from_process}|${leg.on_state}`)">
+                        <Download class="h-2.5 w-2.5" /> CSV
+                      </button>
                     </p>
                     <p v-if="legLive(leg)!.history_truncated" class="text-[9px] text-amber-400/80">
                       showing the {{ legLive(leg)!.history.length }} most recent of {{ legLive(leg)!.opened }} rides - switch the depth to go deeper

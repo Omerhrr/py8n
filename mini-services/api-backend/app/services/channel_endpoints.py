@@ -113,13 +113,18 @@ def _email_subject_from(msg: adapters.NormalizedInbound) -> str:
 
 async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
                            buttons: list[dict] | None = None,
-                           *, subject: str = "") -> dict:
+                           *, subject: str = "",
+                           attachments: list[dict] | None = None) -> dict:
     """Build the provider request and (when possible) actually send it.
 
     ``buttons`` (v70) switches the request to the provider's INTERACTIVE
     shape - WhatsApp reply buttons only; other providers refuse loudly
     instead of silently degrading to plain text. ``subject`` (v71) rides
-    the email SMTP request; other providers ignore it.
+    the email SMTP request; other providers ignore it. ``attachments``
+    (v99) rides the email SMTP request as real MIME parts - the
+    chain-history report dispatches its file through the SAME bound
+    endpoint the knocks and digests use; any other provider refuses
+    loud (files-by-chat is not a silent text downgrade).
 
     Returns a delivery record: {delivery, detail, request} where request
     carries the url + json body (auth headers masked) for traceability.
@@ -133,8 +138,14 @@ async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
                     "only meta_cloud_api (WhatsApp) carries reply buttons")
             request = adapters.meta_build_interactive(config, to, text, buttons)
         elif endpoint.provider == "email_inbound":
-            request = adapters.email_build_outbound(config, to, text, subject=subject)
+            request = adapters.email_build_outbound(config, to, text,
+                                                    subject=subject,
+                                                    attachments=attachments)
         else:
+            if attachments:
+                raise ChannelEndpointError(
+                    f"provider {endpoint.provider} does not carry attachments - "
+                    "files dispatch over email only")
             request = adapters.build_outbound(endpoint.provider, config, to, text)
     except ChannelEndpointError:
         raise
@@ -146,6 +157,7 @@ async def deliver_outbound(endpoint: ChannelEndpoint, to: str, text: str,
         masked_request = {"transport": "smtp", "host": request.get("host"),
                           "port": request.get("port"), "to": request.get("to"),
                           "subject": request.get("subject"),
+                          "attachments": request.get("attachment_names") or [],
                           "message_bytes": len(request.get("message") or "")}
         cred_keys = adapters.REQUIRED_CONFIG.get(endpoint.provider, {}).get("credential", [])
         missing = [k for k in cred_keys if not str(config.get(k) or "").strip()

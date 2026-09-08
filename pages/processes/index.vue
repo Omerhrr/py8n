@@ -4,7 +4,7 @@ import {
   Flame,
   GitBranch, Loader2, AlertTriangle, Plus, Clock, CheckCircle2, XCircle,
   Flag, RefreshCw, ChevronRight, ListChecks, BellRing, PenLine, CheckCheck,
-  Siren, SlidersHorizontal, Radio, Eye,
+  Siren, SlidersHorizontal, Radio, Eye, Mail, Send, Trash2, Pencil,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -804,8 +804,85 @@ onMounted(async () => {
   }
   await loadAttention()  // v91: the overdue view opens with the page
   loadHeat()             // v95: the cross-machine heatmap opens with it
+  loadChainReport()      // v99: the file-on-a-cadence board reads its schedule
   connectLiveTail()      // v93: and it refreshes ITSELF from here on
 })
+
+// ---- v99: the chain report - the digest pattern applied to the FILE -------
+// one schedule per owner: every window the SAME per-leg chain history the
+// plots export rides the owner's bound email endpoint as a real MIME
+// attachment - the subject carries the scan line, the outcome (delivered /
+// skipped / failed) stamps the schedule row honestly, and an empty window
+// consumes itself without emailing an empty spreadsheet.
+const chainReport = ref<any>(null)
+const crForm = ref({ enabled: true, cadence_minutes: 1440, to: '', history_limit: 50, chain: '' })
+const crEditing = ref(false)
+const crBusy = ref(false)
+const crSending = ref(false)
+const crError = ref('')
+
+function crCadence(sec: number): string {
+  if (sec >= 86400) return `${Math.round(sec / 86400)}d`
+  if (sec >= 3600) return `${Math.round(sec / 3600)}h`
+  return `${Math.round(sec / 60)}m`
+}
+
+async function loadChainReport() {
+  try {
+    const out = await api.get<any>('/processes/chain-report')
+    chainReport.value = out.schedule || null
+    if (chainReport.value) {
+      crForm.value = {
+        enabled: !!chainReport.value.enabled,
+        cadence_minutes: Math.max(5, Math.round((chainReport.value.cadence_seconds || 86400) / 60)),
+        to: chainReport.value.to || '',
+        history_limit: chainReport.value.history_limit || 50,
+        chain: chainReport.value.chain || '',
+      }
+    }
+  } catch { /* the card reads its absence honestly */ }
+}
+
+async function saveChainReport() {
+  crBusy.value = true
+  crError.value = ''
+  try {
+    const out = await api.put<any>('/processes/chain-report', {
+      enabled: crForm.value.enabled,
+      cadence_seconds: Math.max(300, Math.round(crForm.value.cadence_minutes * 60)),
+      to: crForm.value.to.trim(),
+      history_limit: crForm.value.history_limit,
+      chain: crForm.value.chain.trim(),
+    })
+    chainReport.value = out.schedule
+    crEditing.value = false
+  } catch (e: any) {
+    crError.value = e?.data?.detail || e?.message || 'the schedule was refused'
+  } finally { crBusy.value = false }
+}
+
+async function sendChainReportNow() {
+  crSending.value = true
+  crError.value = ''
+  try {
+    const out = await api.post<any>('/processes/chain-report/send-now')
+    chainReport.value = out.schedule
+  } catch (e: any) {
+    crError.value = e?.data?.detail || e?.message || 'the dispatch was refused'
+  } finally { crSending.value = false }
+}
+
+async function removeChainReport() {
+  crBusy.value = true
+  crError.value = ''
+  try {
+    await api.del('/processes/chain-report')
+    chainReport.value = null
+    crEditing.value = false
+  } catch (e: any) {
+    crError.value = e?.data?.detail || e?.message || 'the removal was refused'
+  } finally { crBusy.value = false }
+}
 </script>
 
 <template>
@@ -992,6 +1069,82 @@ onMounted(async () => {
               </div>
             </div>
           </template>
+        </div>
+      </div>
+
+      <!-- v99: the chain report - the chain-history FILE on a cadence (the digest pattern applied to the file) -->
+      <div v-if="!loading" class="mb-5 rounded-2xl border border-cyan-900/60 bg-zinc-900/50 p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <Mail class="h-3.5 w-3.5 text-cyan-400" />
+          <h2 class="text-xs font-bold uppercase tracking-wide text-zinc-300">Chain report</h2>
+          <span class="text-[10px] text-zinc-500">the chain-history file on a cadence - every window the same per-leg CSV the plots export rides your bound email endpoint as an attachment; an empty window consumes itself quietly</span>
+          <template v-if="chainReport">
+            <span class="rounded-full px-2 py-0.5 text-[9px] font-bold"
+              :class="chainReport.enabled ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-700/60 text-zinc-400'"
+              :title="chainReport.enabled ? 'the door dispatches the file when the window elapses' : 'paused - the schedule stays but nothing dispatches'">
+              {{ chainReport.enabled ? 'scheduled' : 'paused' }}
+            </span>
+            <span class="rounded-full bg-cyan-500/10 px-2 py-0.5 text-[9px] font-bold text-cyan-300" :title="`every ${chainReport.cadence_seconds}s the file rides the wire`">
+              every {{ crCadence(chainReport.cadence_seconds) }}
+            </span>
+            <span class="text-[10px] text-zinc-500">to <span class="text-zinc-300">{{ chainReport.to }}</span></span>
+            <span v-if="chainReport.chain" class="rounded-full bg-fuchsia-500/10 px-2 py-0.5 text-[9px] font-bold text-fuchsia-300" title="the report watches one chain only">chain: {{ chainReport.chain }}</span>
+            <span class="ml-auto flex items-center gap-1.5">
+              <button class="flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
+                :disabled="crSending" title="one dispatch NOW, whatever the window says - the same renderer the schedule uses"
+                @click="sendChainReportNow">
+                <Loader2 v-if="crSending" class="h-3 w-3 animate-spin" />
+                <Send v-else class="h-3 w-3" /> Send now
+              </button>
+              <button class="flex items-center gap-1 rounded-lg border border-zinc-700 px-2 py-1 text-[10px] font-bold text-zinc-300 transition hover:border-zinc-500" @click="crEditing = !crEditing">
+                <Pencil class="h-3 w-3" /> {{ crEditing ? 'Close' : 'Edit' }}
+              </button>
+              <button class="flex items-center gap-1 rounded-lg border border-rose-500/40 px-2 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-50"
+                :disabled="crBusy" title="remove the schedule - removing is not pausing, the file stops riding the door"
+                @click="removeChainReport">
+                <Trash2 class="h-3 w-3" />
+              </button>
+            </span>
+          </template>
+          <button v-else class="ml-auto flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20"
+            @click="crEditing = true">
+            <Plus class="h-3 w-3" /> Schedule the file
+          </button>
+        </div>
+        <!-- the schedule's own bookkeeping - "did the file actually go out?" without grepping logs -->
+        <div v-if="chainReport && !crEditing" class="mt-2 flex flex-wrap items-center gap-2">
+          <span class="text-[10px] text-zinc-500">depth {{ chainReport.history_limit }} rides per leg</span>
+          <span class="text-[10px] text-zinc-500">· next due {{ chainReport.next_due ? chainReport.next_due.slice(0, 16).replace('T', ' ') : 'on the next sweep' }}</span>
+          <span v-if="chainReport.last_result" class="rounded-full px-2 py-0.5 text-[9px] font-bold"
+            :class="chainReport.last_result.delivery === 'delivered' ? 'bg-emerald-500/15 text-emerald-300'
+              : chainReport.last_result.delivery === 'failed' ? 'bg-rose-500/15 text-rose-300'
+              : 'bg-amber-500/15 text-amber-300'"
+            :title="`${chainReport.last_result.detail || ''} (${chainReport.last_result.legs} leg(s), ${chainReport.last_result.rides} ride(s))`">
+            last: {{ chainReport.last_result.delivery }} · {{ chainReport.last_result.rides }} ride(s) · {{ chainReport.last_result.filename }}
+          </span>
+        </div>
+        <p v-if="crError" class="mt-2 text-[10px] text-rose-300">{{ crError }}</p>
+        <!-- the form - the same fields the backend validates loud -->
+        <div v-if="crEditing" class="mt-3 grid gap-2 rounded-xl border border-cyan-500/25 bg-cyan-500/5 p-3 sm:grid-cols-[1fr_120px_1fr_110px_140px_auto]">
+          <label class="flex items-center gap-1.5 text-[10px] text-zinc-400">
+            <input v-model="crForm.enabled" type="checkbox" class="accent-cyan-500" /> scheduled
+          </label>
+          <input v-model="crForm.cadence_minutes" type="number" min="5" step="5" placeholder="cadence (min)"
+            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+            title="how often the file rides the wire, in minutes (floor 5 - a file dispatch is a minutes concern)" />
+          <input v-model="crForm.to" placeholder="to (owner@company.com)"
+            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+            title="the recipient - delivered over your bound email endpoint (bind one on /channels)" />
+          <input v-model="crForm.history_limit" type="number" min="1" max="50" placeholder="depth"
+            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+            title="the per-leg traversal window (1..50, the map's own clamp)" />
+          <input v-model="crForm.chain" placeholder="chain (optional)"
+            class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
+            title="watch ONE chain only (e.g. Revenue chain) - empty = the whole estate map" />
+          <button class="flex items-center justify-center gap-1 rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+            :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
+            <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
+          </button>
         </div>
       </div>
 

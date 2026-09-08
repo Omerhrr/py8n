@@ -127,7 +127,8 @@ async def event_contracts():
                          "business.escalation_digest",  # v89: one summary per window
                          "business.journey_opened",  # v89: the next leg opens itself
                          "business.journey_skipped",  # v89: the honest skip
-                         "business.policy_updated"],  # v91: the rhythm, re-tuned
+                         "business.policy_updated",  # v91: the rhythm, re-tuned
+                         "business.chain_report_dispatched"],  # v99: the file rides the wire
         },
         "trigger_node": {
             "type": "event_trigger",

@@ -1757,3 +1757,49 @@ class BusinessProcessTransitionLog(Base):
     note: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     payload: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class ChainReportSchedule(Base):
+    """The chain-history file on a cadence (v99) - one per owner.
+
+    The digest pattern applied to the FILE: the escalation door's sweep
+    already walks every owner's machines on a cadence; when a chain
+    report is due it renders the SAME per-leg chain history the
+    operator-detail chain draws (chain_history_csv, zero drift) and
+    dispatches it over the owner's bound EMAIL endpoint as a real
+    MIME attachment - the subject carries the scan line
+    ("[py8n] Chain history - N ride(s) across M leg(s)") the way the
+    digest's subject names its shape.
+
+    One row per owner (unique): the report is an ESTATE concern - the
+    whole chain map or one filtered chain (``chain`` names it, the same
+    filter the plot's per-chain CSV button sends). The schedule stamps
+    its own bookkeeping: last_sent_at / next_due (advanced on EVERY due
+    attempt - an honest skip consumes the window, the same way the
+    digest's window elapses when the bucket stays empty) and
+    last_result (the delivery record: delivered | skipped | failed with
+    the detail and the counts - "did the file actually go out?" without
+    grepping logs).
+    """
+
+    __tablename__ = "chain_report_schedules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True,
+                                                 unique=True, index=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # the minimum honest cadence: a file dispatch is a minutes concern,
+    # not a seconds one (the door's own tick defaults to 300s)
+    cadence_seconds: Mapped[int] = mapped_column(Integer, default=86400)
+    to: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+    history_limit: Mapped[int] = mapped_column(Integer, default=50)
+    # optional single-chain filter ("" = the whole estate map)
+    chain: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                          nullable=True)
+    next_due: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                      nullable=True)
+    last_result: Mapped[dict | None] = mapped_column(JSONVariant, nullable=True,
+                                                     default=None)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

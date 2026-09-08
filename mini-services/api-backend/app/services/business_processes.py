@@ -24,12 +24,16 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (BusinessProcess, BusinessProcessInstance,
-                      BusinessProcessTransitionLog)
+                      BusinessProcessTransitionLog, ChainReportSchedule)
 from . import escalations as escalations_svc  # v87: the channel + repeat policy layer
 
 # v98: a machine with more out-legs than one chain walk carries ships the
 # leftovers under this honest group name (never a silent drop)
 SIDE_LEGS_CHAIN = "side legs"
+
+# v99: the chain-report cadence floor - a file dispatch is a minutes
+# concern, not a seconds one (the door's own tick defaults to 300s)
+CHAIN_REPORT_MIN_CADENCE = 300
 
 
 class ProcessError(ValueError):
@@ -1925,7 +1929,9 @@ def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
 
 
 async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
-                            history_limit: int = 50) -> dict:
+                            history_limit: int = 50,
+                            chain: str | None = None,
+                            leg: str | None = None) -> dict:
     """v98: the per-leg chain history as a CSV download - the same map
     the operator-detail chain draws (chain_map, zero drift), rendered as
     one row per traversal with the chain and the leg named on every row.
@@ -1936,15 +1942,270 @@ async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
     the leg's live counts (opened / open_now / stuck, history_truncated),
     then the ride itself (ref, title, state, opened_at, due_at, is_stuck,
     overdue_seconds, acked_by, snooze_remaining_seconds) and the row's
-    own ids. Returns {csv, leg_count, ride_count}."""
+    own ids. Returns {csv, leg_count, ride_count}.
+
+    v99: the PLOT's own filters ride the SAME map - ``chain`` names one
+    chain (case-insensitive; the per-chain CSV button), ``leg`` names
+    one leg as "from_name|on_state" (case-insensitive; the per-leg CSV
+    chip). Both compose; an unknown chain or leg is an HONEST EMPTY
+    file (header only, leg_count 0) - the absence reads as data, never
+    a 404, because the map the operator is looking at is the truth."""
     out = await chain_map(db, owner_id, history_limit=history_limit)
-    rows, rides = _chain_csv_rows(out.get("chains") or [])
+    chains = out.get("chains") or []
+    if chain is not None and str(chain).strip():
+        want = str(chain).strip().lower()
+        chains = [c for c in chains
+                  if (c.get("name") or "").strip().lower() == want]
+    if leg is not None and str(leg).strip():
+        raw = str(leg).strip().lower()
+        if "|" in raw:
+            want_from, want_state = (p.strip() for p in raw.split("|", 1))
+        else:
+            want_from, want_state = raw, ""
+        filtered: list[dict] = []
+        for c in chains:
+            legs = [l for l in (c.get("legs") or [])
+                    if (l.get("from_name") or "").strip().lower() == want_from
+                    and (l.get("on_state") or "").strip().lower() == want_state]
+            if legs:
+                filtered.append({**c, "legs": legs})
+        chains = filtered
+    rows, rides = _chain_csv_rows(chains)
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerows(rows)
-    leg_count = sum(len(c.get("legs") or []) for c in out.get("chains") or [])
+    leg_count = sum(len(c.get("legs") or []) for c in chains)
     return {"csv": buf.getvalue(), "leg_count": leg_count,
-            "ride_count": rides}
+            "ride_count": rides,
+            "chain_filter": (str(chain).strip() if chain else ""),
+            "leg_filter": (str(leg).strip() if leg else "")}
+
+
+# ---------------------------------------------------------------------------
+# v99: the chain report - the digest pattern applied to the FILE
+# ---------------------------------------------------------------------------
+
+def _chain_report_out(row: ChainReportSchedule) -> dict:
+    """The schedule as the API serves it - the state the board reads."""
+    return {
+        "id": row.id, "owner_id": row.owner_id, "enabled": bool(row.enabled),
+        "cadence_seconds": int(row.cadence_seconds),
+        "to": row.to or "", "history_limit": int(row.history_limit),
+        "chain": row.chain or "",
+        "last_sent_at": row.last_sent_at.isoformat() if row.last_sent_at else None,
+        "next_due": row.next_due.isoformat() if row.next_due else None,
+        "last_result": row.last_result or None,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+    }
+
+
+def chain_report_subject(legs: int, rides: int, chain: str = "") -> str:
+    """The scan line the subject carries (the digest's own pattern):
+    '[py8n] Chain history - N ride(s) across M leg(s)' - the filter named
+    when the report watches one chain."""
+    base = f"[py8n] Chain history - {rides} ride(s) across {legs} leg(s)"
+    return f"{base} - {chain}" if chain else base
+
+
+async def get_chain_report(db: AsyncSession, owner_id: str | None) -> dict:
+    """The owner's chain-report schedule, or the honest absence - there is
+    nothing to configure until the owner asks for it."""
+    q = select(ChainReportSchedule)
+    if owner_id is not None:
+        q = q.where(ChainReportSchedule.owner_id == owner_id)
+    else:
+        q = q.where(ChainReportSchedule.owner_id.is_(None))
+    row = (await db.execute(q)).scalars().first()
+    return {"schedule": _chain_report_out(row) if row else None}
+
+
+async def upsert_chain_report(db: AsyncSession, owner_id: str | None, *,
+                              enabled: bool = True,
+                              cadence_seconds: int = 86400,
+                              to: str = "",
+                              history_limit: int = 50,
+                              chain: str = "") -> dict:
+    """Create or update the owner's ONE chain-report schedule - the same
+    loud validation every definition carries: cadence at the floor (a
+    file dispatch is a minutes concern), a real recipient, the depth
+    clamped to the map's own 1..50, one optional chain name. The new
+    cadence rules the NEXT window: next_due re-anchors to now + cadence
+    the way the digest's window re-anchors on a mode switch."""
+    to = (to or "").strip()
+    if not to or "@" not in to:
+        raise ProcessError("a chain report names its recipient (to) - an "
+                           "email address, or the file has nowhere to land")
+    try:
+        cadence_seconds = int(cadence_seconds)
+    except (TypeError, ValueError):
+        raise ProcessError("cadence_seconds must be a number of seconds") from None
+    if cadence_seconds < CHAIN_REPORT_MIN_CADENCE:
+        raise ProcessError(f"cadence_seconds must be >= "
+                           f"{CHAIN_REPORT_MIN_CADENCE} (a file dispatch is a "
+                           "minutes concern - the door will not spam)")
+    try:
+        history_limit = max(1, min(int(history_limit), 50))
+    except (TypeError, ValueError):
+        history_limit = 50
+    chain = (chain or "").strip()[:120]
+
+    q = select(ChainReportSchedule)
+    if owner_id is not None:
+        q = q.where(ChainReportSchedule.owner_id == owner_id)
+    else:
+        q = q.where(ChainReportSchedule.owner_id.is_(None))
+    row = (await db.execute(q)).scalars().first()
+    now = _now()
+    if row is None:
+        row = ChainReportSchedule(owner_id=owner_id, created_at=now)
+        db.add(row)
+    row.enabled = bool(enabled)
+    row.cadence_seconds = cadence_seconds
+    row.to = to
+    row.history_limit = history_limit
+    row.chain = chain
+    row.next_due = now + timedelta(seconds=cadence_seconds)
+    row.updated_at = now
+    await db.flush()
+    return {"schedule": _chain_report_out(row)}
+
+
+async def delete_chain_report(db: AsyncSession, owner_id: str | None) -> dict:
+    """Remove the schedule - the v85 semantics return: the file stops
+    riding the door entirely (removing is not pausing)."""
+    q = select(ChainReportSchedule)
+    if owner_id is not None:
+        q = q.where(ChainReportSchedule.owner_id == owner_id)
+    else:
+        q = q.where(ChainReportSchedule.owner_id.is_(None))
+    row = (await db.execute(q)).scalars().first()
+    if row is None:
+        raise ProcessError("no chain-report schedule to remove")
+    await db.delete(row)
+    await db.flush()
+    return {"removed": True}
+
+
+async def dispatch_chain_report(db: AsyncSession, row: ChainReportSchedule, *,
+                                now: datetime) -> dict:
+    """One dispatch: render the SAME file the plot exports
+    (chain_history_csv, zero drift - the schedule's own depth and
+    optional chain filter), then deliver it over the owner's bound EMAIL
+    endpoint as a real MIME attachment. Every outcome is an honest
+    record - delivered, skipped (no endpoint, no recipient, an empty
+    window) or failed (smtp refused) - and the schedule stamps them all.
+
+    The digest's own discipline, applied to the file: a due attempt with
+    NOTHING to summarize is a skip that still consumes the window (the
+    file would be inventory-only; the door will not email an empty
+    spreadsheet) - next_due advances on every due attempt, whatever the
+    outcome, so a broken endpoint cannot turn into a per-tick retry
+    storm."""
+    from . import channel_endpoints as cep_svc
+    from . import system_events as events_svc
+
+    csv_out = await chain_history_csv(
+        db, row.owner_id, history_limit=row.history_limit,
+        chain=row.chain or None)
+    legs, rides = csv_out["leg_count"], csv_out["ride_count"]
+    stamp = now.strftime("%Y%m%d")
+    slug = ""
+    if row.chain:
+        slug = "".join(c if c.isalnum() else "-" for c in row.chain.lower())[:40].strip("-")
+        slug = f"-{slug}"
+    filename = f"py8n-chain-history{slug}-{stamp}.csv"
+
+    result = {"at": now.isoformat(), "legs": legs, "rides": rides,
+              "filename": filename, "to": row.to or ""}
+    if not (row.to or "").strip():
+        result.update({"delivery": "skipped",
+                       "detail": "the schedule names no recipient (to) - "
+                                 "the file stayed home"})
+    elif rides == 0:
+        result.update({"delivery": "skipped",
+                       "detail": "nothing to summarize - no ride in the "
+                                 "window (the file would be inventory-only)"})
+    else:
+        endpoint = await escalations_svc.resolve_endpoint(db, row.owner_id,
+                                                          "email")
+        if endpoint is None:
+            result.update({"delivery": "skipped",
+                           "detail": "no email endpoint bound - bind one on "
+                                     "/channels and the file crosses the wire"})
+        else:
+            subject = chain_report_subject(legs, rides, row.chain or "")
+            body = (
+                f"The chain history, as the map draws it.\n\n"
+                f"Window: every leg, the {row.history_limit} most recent "
+                f"ride(s) each\n"
+                + (f"Chain: {row.chain}\n" if row.chain else "")
+                + f"Shape: {legs} leg(s), {rides} ride(s) in the file\n"
+                f"Attachment: {filename}\n\n"
+                f"Download the file any time from the chain views "
+                f"(Export CSV) - this copy is the schedule's own.")
+            try:
+                delivery = await cep_svc.deliver_outbound(
+                    endpoint, row.to.strip(), body, subject=subject,
+                    attachments=[{"filename": filename, "content": csv_out["csv"],
+                                  "maintype": "text", "subtype": "csv"}])
+                result.update({"delivery": delivery.get("delivery", "failed"),
+                               "detail": delivery.get("detail", ""),
+                               "subject": subject})
+            except Exception as exc:  # noqa: BLE001 - an honest failure IS a result
+                result.update({"delivery": "failed",
+                               "detail": f"the dispatch refused loud: {exc}",
+                               "subject": chain_report_subject(legs, rides,
+                                                               row.chain or "")})
+    row.last_sent_at = now
+    row.next_due = now + timedelta(seconds=int(row.cadence_seconds))
+    row.last_result = result
+    row.updated_at = now
+    await events_svc.emit(
+        db, row.owner_id, "business.chain_report_dispatched", source="business",
+        actor="scheduler", target_type="chain_report", target_id=row.id,
+        payload={"to": result.get("to"), "delivery": result["delivery"],
+                 "detail": result.get("detail", ""), "legs": legs,
+                 "rides": rides, "filename": filename,
+                 "chain": row.chain or "", "history_limit": row.history_limit,
+                 "sent_at": result["at"]})
+    return result
+
+
+async def dispatch_due_chain_reports(db: AsyncSession, owner_id: str | None,
+                                     *, now: datetime | None = None) -> list[dict]:
+    """Every enabled schedule whose window has elapsed - the door's sweep
+    rides this after the escalation walk (same session, same commit, the
+    same injectable clock the tests replay)."""
+    now = _aware(now) or _now()
+    q = (select(ChainReportSchedule)
+         .where(ChainReportSchedule.enabled.is_(True),
+                ChainReportSchedule.next_due.is_not(None)))
+    if owner_id is not None:
+        q = q.where(ChainReportSchedule.owner_id == owner_id)
+    rows = (await db.execute(q)).scalars().all()
+    out = []
+    for row in rows:
+        due = _aware(row.next_due)
+        if due is None or now < due:
+            continue
+        out.append(await dispatch_chain_report(db, row, now=now))
+    return out
+
+
+async def send_chain_report_now(db: AsyncSession, owner_id: str | None) -> dict:
+    """The manual door (v99): one dispatch NOW, whatever next_due says -
+    a real send is a real send (last_sent_at/next_due/last_result all
+    stamp). The same renderer the scheduled walk uses, zero drift."""
+    q = select(ChainReportSchedule)
+    if owner_id is not None:
+        q = q.where(ChainReportSchedule.owner_id == owner_id)
+    else:
+        q = q.where(ChainReportSchedule.owner_id.is_(None))
+    row = (await db.execute(q)).scalars().first()
+    if row is None:
+        raise ProcessError("no chain-report schedule to send - save one first")
+    result = await dispatch_chain_report(db, row, now=_now())
+    return {"result": result, "schedule": _chain_report_out(row)}
 
 
 async def escalation_history_grid(db: AsyncSession, owner_id: str | None,

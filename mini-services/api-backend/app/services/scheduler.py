@@ -63,12 +63,17 @@ def _register_escalation_sweep(sched: AsyncIOScheduler) -> None:
 async def _tick_escalations() -> None:
     """Job callback: run the escalation sweep against the whole platform
     (owner_id=None - the door serves every owner's stuck entities; the
-    v81 lifecycle gate holds the sweep for paused/stopped systems)."""
+    v81 lifecycle gate holds the sweep for paused/stopped systems).
+    v99: the due chain-report schedules dispatch after the walk - the
+    digest pattern applied to the chain-history FILE, every outcome an
+    honest record on the schedule row."""
     from . import business_processes
 
     try:
         async with AsyncSessionLocal() as session:
             out = await business_processes.escalate_stuck(session, None)
+            reports = await business_processes.dispatch_due_chain_reports(
+                session, None)
             await session.commit()
         n = len(out.get("escalated") or []) + len(out.get("recorded") or [])
         if n or out.get("held"):
@@ -76,6 +81,10 @@ async def _tick_escalations() -> None:
                 "Escalation sweep: %s stuck (%s moved, %s recorded, %s held)",
                 out.get("stuck", 0), len(out.get("escalated") or []),
                 len(out.get("recorded") or []), len(out.get("held") or []))
+        for r in reports:
+            logger.info("Chain report: %s to %s (%s leg(s), %s ride(s)) - %s",
+                        r.get("delivery"), r.get("to"), r.get("legs"),
+                        r.get("rides"), r.get("filename"))
     except Exception:  # noqa: BLE001 - a sweep bug must never wedge the scheduler
         logger.exception("Escalation sweep failed")
 

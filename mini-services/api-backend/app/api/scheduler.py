@@ -13,7 +13,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..services.business_processes import escalate_stuck
+from ..services.business_processes import (dispatch_due_chain_reports,
+                                           escalate_stuck)
 from .auth import get_optional_user
 
 router = APIRouter(prefix="/scheduler", tags=["scheduler"])
@@ -26,8 +27,14 @@ async def tick_escalations(user=Depends(get_optional_user),
     each once per state stint: through the machine's own ``escalate``
     move when it defines one, otherwise as a no-move escalation on the
     record. Emits business.stuck either way. Processes bound to a
-    paused/stopped system are held honestly."""
-    out = await escalate_stuck(db, getattr(user, "id", None),
-                               actor=getattr(user, "id", None) or "scheduler")
+    paused/stopped system are held honestly.
+
+    v99: after the escalation walk, every due chain-report schedule
+    dispatches - the digest pattern applied to the chain-history FILE
+    (one summary per window, the CSV attached, every outcome honest).
+    The response carries the dispatch records under ``chain_report``."""
+    caller = getattr(user, "id", None)
+    out = await escalate_stuck(db, caller, actor=caller or "scheduler")
+    out["chain_report"] = await dispatch_due_chain_reports(db, caller)
     await db.commit()
     return out
