@@ -98,6 +98,11 @@ installed from a marketplace solution (`as_system=true`). From there:
   with an environment and branding; `GET /api/v1/systems/by-domain/
   {domain}` is the public door that resolves a live domain back to the
   identity a login surface shows before authentication;
+* the **front door** (v103) is the branded landing that door feeds: a
+  visitor to the system's address sees the system's own face (accent,
+  tagline, headline, logo) before signing in - and `POST /api/v1/
+  systems/{id}/deployment/ping` asks the domain if it answers, keeping
+  the evidence on the record (an honest answer even when it fails);
 * the **update lifecycle** (v102) previews an upgrade from the source
   solution's pack (the same reconcile plan the upgrade runs), and
   leaves every applied upgrade PENDING until a human accepts it or
@@ -155,6 +160,7 @@ POST   /api/v1/systems/{id}/start|pause|resume|stop
 GET    /api/v1/systems/health/overview   ← the estate health rows
 GET/PUT /api/v1/systems/{id}/deployment  ← domain · environment · branding
 POST   /api/v1/systems/{id}/deployment/deploy|pause|retire
+POST   /api/v1/systems/{id}/deployment/ping ← ask the domain if it answers
 GET    /api/v1/systems/{id}/update/preview
 POST   /api/v1/systems/{id}/update/accept|rollback
 GET    /api/v1/systems/by-domain/{domain} ← the public identity door
