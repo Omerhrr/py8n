@@ -143,7 +143,7 @@ async function submit() {
       </form>
 
       <p class="mt-6 text-center text-[10px] text-zinc-600">
-        Py8n - Python-native workflow automation
+        Py8n - the Python-native business operations platform
       </p>
     </div>
   </div>

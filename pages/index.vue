@@ -532,7 +532,7 @@ watch(
       <div class="mx-auto flex max-w-7xl items-center justify-between gap-3 px-4 py-3.5 sm:px-6">
         <div class="min-w-0">
           <h1 class="text-lg font-bold tracking-tight">Dashboard</h1>
-          <p class="-mt-0.5 text-[11px] text-zinc-500">Python-native workflow automation</p>
+          <p class="-mt-0.5 text-[11px] text-zinc-500">The Python-native business operations platform</p>
         </div>
         <div class="flex items-center gap-2">
           <input

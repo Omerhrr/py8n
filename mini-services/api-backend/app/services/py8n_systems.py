@@ -433,6 +433,12 @@ async def health_overview(db: AsyncSession, user) -> dict:
                 "url": f"https://{dep.domain}" if dep.domain else "",
                 "environment": dep.environment,
                 "status": dep.status,
+                # v103: what the domain answered the last time somebody
+                # asked (compact - the full evidence lives on the record)
+                "last_ping": (
+                    {"at": dep.last_ping_at.isoformat(), "ok": bool(dep.last_ping_ok),
+                     "ms": dep.last_ping_ms}
+                    if dep.last_ping_at is not None else None),
             } if dep else None),
         })
 

@@ -254,6 +254,7 @@ async function loadHealth() {
 interface Deployment {
   system_id: string; domain: string; url: string; environment: string; status: string
   branding: { accent?: string; tagline?: string; login_headline?: string; logo?: string }
+  last_ping?: { at: string; ok: boolean; ms: number | null; code: number | null; detail: string } | null
   deployed_at: string | null; updated_at: string | null
 }
 const deployment = ref<Deployment | null>(null)
@@ -327,6 +328,26 @@ async function deploymentVerb(verb: string) {
   } catch (e: any) {
     deployNote.value = ''
     pageError.value = e?.data?.detail || e?.message || `Could not ${verb}`
+  } finally { deployBusy.value = false }
+}
+
+// v103: the liveness probe - ask the domain if it answers, keep the
+// evidence on the record (an honest answer even when it does not)
+async function pingDeployment() {
+  if (!detail.value) return
+  deployBusy.value = true
+  deployNote.value = ''
+  try {
+    const res = await api.post<any>(`/systems/${detail.value.id}/deployment/ping`, {})
+    _syncDeployForm(res.deployment)
+    const p = res.ping
+    deployNote.value = p?.ok
+      ? `the domain answered: HTTP ${p.code} in ${p.ms}ms`
+      : `no answer: ${p?.detail || 'the probe failed'}`
+    await loadHealth()
+  } catch (e: any) {
+    deployNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || 'Could not ping the domain'
   } finally { deployBusy.value = false }
 }
 
@@ -1015,6 +1036,12 @@ onMounted(async () => {
               </span>
               <span v-else class="text-zinc-500">no custom domain set - the system answers only inside the estate</span>
               <span v-if="deployment.deployed_at" class="text-zinc-600">live since {{ new Date(deployment.deployed_at).toLocaleString() }}</span>
+              <span v-if="deployment.last_ping" class="flex items-center gap-1 rounded-xl px-2.5 py-1.5"
+                :class="deployment.last_ping.ok ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'">
+                <Activity class="h-3 w-3" />
+                {{ deployment.last_ping.ok ? `answered HTTP ${deployment.last_ping.code} · ${deployment.last_ping.ms}ms` : 'no answer' }}
+                <span class="text-zinc-600">{{ new Date(deployment.last_ping.at).toLocaleTimeString() }}</span>
+              </span>
             </div>
 
             <div v-if="canEdit" class="mt-3 grid gap-2 sm:grid-cols-2">
@@ -1070,6 +1097,9 @@ onMounted(async () => {
                 <button v-if="deployment && deployment.status !== 'offline'"
                   class="flex items-center gap-1 rounded-xl border border-zinc-700 px-3 py-1.5 text-[11px] font-bold text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('retire')">
                   <Square class="h-3 w-3" /> Retire
+                </button>
+                <button v-if="deployment?.domain" class="flex items-center gap-1 rounded-xl border border-sky-500/40 px-3 py-1.5 text-[11px] font-bold text-sky-300 transition hover:bg-sky-500/10 disabled:opacity-50" :disabled="deployBusy" title="Ask the domain if it answers - the result is kept on the record" @click="pingDeployment">
+                  <Loader2 v-if="deployBusy" class="h-3 w-3 animate-spin" /> <Activity v-else class="h-3 w-3" /> Ping now
                 </button>
               </template>
               <span class="text-[10px] text-zinc-600">who can use this system is the membership list above - owner / editor / viewer ride the deployed surface too</span>

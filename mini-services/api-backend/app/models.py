@@ -1871,6 +1871,15 @@ class SystemDeployment(Base):
     branding: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
                                                          nullable=True)
+    # v103: the liveness probe - what the domain answered the last time
+    # somebody asked. Derived evidence (stamped per probe), never a stored
+    # "healthy" flag that could silently rot.
+    last_ping_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                          nullable=True)
+    last_ping_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    last_ping_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_ping_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    last_ping_detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
                                                  onupdate=_now)

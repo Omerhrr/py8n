@@ -1,13 +1,14 @@
 // Global auth guard (v37, client-only - the app runs with ssr:false).
 //
-// Public surfaces (login, published app runners, standalone forms, public
-// dashboards) never redirect. Everywhere else, an enforced backend
-// (PY8N_REQUIRE_AUTH=true) demands a validated token; the default open mode
-// lets everyone through exactly as before.
+// Public surfaces (login, the branded system landing, published app
+// runners, standalone forms, public dashboards) never redirect.
+// Everywhere else, an enforced backend (PY8N_REQUIRE_AUTH=true) demands a
+// validated token; the default open mode lets everyone through exactly
+// as before.
 export default defineNuxtRouteMiddleware(async (to) => {
   if (import.meta.server) return
 
-  const PUBLIC = ['/login', '/run/', '/d/', '/f/']
+  const PUBLIC = ['/login', '/go/', '/run/', '/d/', '/f/']
   if (PUBLIC.some(p => to.path === p || to.path.startsWith(p))) return
 
   const auth = useAuthStore()

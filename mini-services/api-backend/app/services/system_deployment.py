@@ -33,11 +33,14 @@ that door is 404, not a pretty error.
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..models import Py8nSystem, SystemDeployment
 from . import system_runtime
 
@@ -149,9 +152,20 @@ async def get_by_domain(db: AsyncSession, domain: str) -> SystemDeployment | Non
 
 
 def deployment_out(row: SystemDeployment | None) -> dict | None:
-    """The read projection - the url DERIVED from the domain, never stored."""
+    """The read projection - the url DERIVED from the domain, never stored.
+    The last probe's evidence rides along (v103) - what the domain
+    answered the last time somebody asked, or null when never asked."""
     if row is None:
         return None
+    last_ping = None
+    if row.last_ping_at is not None:
+        last_ping = {
+            "at": row.last_ping_at.isoformat() if row.last_ping_at else None,
+            "ok": bool(row.last_ping_ok),
+            "ms": row.last_ping_ms,
+            "code": row.last_ping_code,
+            "detail": row.last_ping_detail or "",
+        }
     return {
         "system_id": row.system_id,
         "domain": row.domain or "",
@@ -159,6 +173,7 @@ def deployment_out(row: SystemDeployment | None) -> dict | None:
         "environment": row.environment,
         "status": row.status,
         "branding": row.branding or {},
+        "last_ping": last_ping,
         "deployed_at": row.deployed_at.isoformat() if row.deployed_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
@@ -284,3 +299,57 @@ def public_identity(row: SystemDeployment, system: Py8nSystem) -> dict | None:
             "logo": branding.get("logo") or system.icon,
         },
     }
+
+
+# ------------------------------------------------------------------ v103
+# the liveness probe - "does this system's domain actually answer?"
+
+def _probe_target(domain: str) -> str:
+    """Where the probe goes. Production derives the URL from the domain
+    (the same derivation ``deployment_out`` speaks - zero drift); the
+    dev/test override (PY8N_DEPLOY_PING_OVERRIDE) exists because custom
+    domains do not resolve inside a sandbox."""
+    override = (settings.deploy_ping_override or "").strip()
+    return override or f"https://{domain}"
+
+
+async def probe_url(url: str) -> dict:
+    """One outbound GET, timed. NEVER raises: a domain that does not
+    answer is an honest answer (ok=False + what happened), not a 500.
+    Only the status line is read - the body is a stranger's."""
+    started = time.perf_counter()
+    try:
+        async with httpx.AsyncClient(
+            timeout=settings.deploy_ping_timeout_seconds, follow_redirects=True,
+        ) as client:
+            res = await client.get(url)
+        ms = int((time.perf_counter() - started) * 1000)
+        return {"ok": res.status_code < 500, "ms": ms, "code": res.status_code,
+                "detail": f"HTTP {res.status_code}"}
+    except Exception as exc:  # noqa: BLE001 - the failure IS the evidence
+        ms = int((time.perf_counter() - started) * 1000)
+        detail = f"{type(exc).__name__}: {exc}"[:200]
+        return {"ok": False, "ms": ms, "code": None, "detail": detail}
+
+
+async def ping_deployment(db: AsyncSession, system: Py8nSystem, *,
+                          actor: str = "") -> tuple[SystemDeployment, dict]:
+    """Ask the domain if it answers, and keep the answer on the record.
+    Refuses loud when there is nothing to ask (no deployment record, no
+    domain). The result is stamped on the row (last_ping_*) and written
+    to the operations log - evidence, not a stored 'healthy' flag."""
+    row = await get_deployment(db, system.id)
+    if row is None or not row.domain:
+        raise DeploymentError(
+            "no custom domain to ping - set one on the deployment record first")
+    result = await probe_url(_probe_target(row.domain))
+    row.last_ping_at = _now()
+    row.last_ping_ok = result["ok"]
+    row.last_ping_ms = result["ms"]
+    row.last_ping_code = result["code"]
+    row.last_ping_detail = result["detail"][:200]
+    await system_runtime.record_operation(
+        db, system, "deployment_ping", actor or "system",
+        {"domain": row.domain, "ok": result["ok"], "code": result["code"],
+         "ms": result["ms"], "detail": result["detail"][:120]})
+    return row, result

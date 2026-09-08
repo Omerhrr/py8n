@@ -489,6 +489,27 @@ async def put_deployment(system_id: str, body: DeploymentPut,
     return {"deployment": deploy_svc.deployment_out(row)}
 
 
+# v103: the liveness probe. Declared BEFORE /{verb} on purpose - "ping"
+# is its own resource, not a status verb.
+@router.post("/{system_id}/deployment/ping")
+async def deployment_ping(system_id: str,
+                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Ask the system's custom domain if it answers: one outbound GET to
+    the derived URL, timed, the result stamped on the deployment record
+    and written to the operations log. Editors only (it costs an
+    outbound call). A domain that does not answer is an HONEST answer
+    (ok=false + what happened), never a 500."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        row, result = await deploy_svc.ping_deployment(
+            db, s, actor=getattr(user, "id", None) or "system")
+    except deploy_svc.DeploymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return {"ping": result, "deployment": deploy_svc.deployment_out(row)}
+
+
 @router.post("/{system_id}/deployment/{verb}")
 async def deployment_verb(system_id: str, verb: str,
                           user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):

@@ -150,4 +150,20 @@ async def init_db() -> None:
                     "WHERE (chains IS NULL OR chains = '') "
                     "AND chain IS NOT NULL AND chain != ''"))
 
+            # v103: the deployment liveness probe - what the domain answered
+            # the last time somebody asked (evidence stamped per probe, not a
+            # stored flag); fresh installs get the columns from create_all
+            if "system_deployments" in insp.get_table_names():
+                dep_cols = {c["name"] for c in insp.get_columns("system_deployments")}
+                if "last_ping_at" not in dep_cols:
+                    sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_at TIMESTAMP"))
+                if "last_ping_ok" not in dep_cols:
+                    sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_ok BOOLEAN"))
+                if "last_ping_ms" not in dep_cols:
+                    sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_ms INTEGER"))
+                if "last_ping_code" not in dep_cols:
+                    sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_code INTEGER"))
+                if "last_ping_detail" not in dep_cols:
+                    sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_detail VARCHAR(200)"))
+
         await conn.run_sync(_add_missing_columns)

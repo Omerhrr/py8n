@@ -100,7 +100,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         <Py8nLogo :size="32" />
         <span class="min-w-0" :class="collapsed && 'lg:hidden'">
           <span class="block text-sm font-bold leading-tight tracking-tight">Py8n</span>
-          <span class="block truncate text-[10px] leading-tight text-zinc-500">Workflow automation</span>
+          <span class="block truncate text-[10px] leading-tight text-zinc-500">Business operations</span>
         </span>
       </NuxtLink>
       <button
@@ -214,7 +214,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.102 · 68 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.103 · 68 node types</span>
       </div>
     </div>
   </aside>

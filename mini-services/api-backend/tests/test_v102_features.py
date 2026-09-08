@@ -556,4 +556,4 @@ def test_v102_units_and_version():
     with pytest.raises(DeploymentError):
         validate_branding({"tagline": "x" * 200})
 
-    assert settings.version == "1.102.0"
+    assert settings.version == "1.103.0"

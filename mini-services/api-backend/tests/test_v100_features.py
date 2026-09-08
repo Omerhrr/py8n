@@ -496,4 +496,4 @@ def test_v100_smtp_envelope_multi_rcpt():
     assert req["to"] == "a@y.test, b@y.test", req
 
     # and the pin
-    assert settings.version == "1.102.0", settings.version
+    assert settings.version == "1.103.0", settings.version
