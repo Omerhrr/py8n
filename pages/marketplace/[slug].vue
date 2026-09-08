@@ -54,7 +54,7 @@ interface OperatorResult {
   notes: string[]
 }
 
-const { api, streamUrl } = useApi()
+const { api, streamUrl, download } = useApi()
 const route = useRoute()
 const slug = computed(() => String(route.params.slug || ''))
 const loading = ref(true)
@@ -173,6 +173,22 @@ async function loadChainMap() {
 async function toggleDepth() {
   histDepth.value = histDepth.value >= 50 ? 5 : 50
   await loadChainMap()
+}
+
+// v98: the per-leg chain history as a CSV download - the SAME map this page
+// draws, one row per traversal with the chain and the leg named on every
+// row; the file honors the depth toggle's window (the server clamps 1..50)
+const csvBusy = ref(false)
+const csvError = ref('')
+async function exportChainCsv() {
+  csvBusy.value = true
+  csvError.value = ''
+  try {
+    await download(`/processes/chains/history.csv?history_limit=${histDepth.value}`,
+      `py8n-chain-history-depth${histDepth.value}.csv`)
+  } catch (e: any) {
+    csvError.value = e?.message || 'the export was refused'
+  } finally { csvBusy.value = false }
 }
 
 // v97: the chain map is LIVE on business.journey_opened - when any
@@ -423,6 +439,14 @@ onMounted(async () => {
                     :title="histDepth >= 50 ? 'back to the 5 most recent rides' : 'load rides beyond the recent 5 (up to 50 per leg)'"
                     @click="toggleDepth">
                     {{ histDepth >= 50 ? 'depth 50 · deeper' : 'depth 5 · go deeper' }}
+                  </button>
+                  <!-- v98: the same history as a CSV download, at the depth chosen -->
+                  <button class="flex items-center gap-1 rounded-full border border-cyan-500/40 px-2 py-0.5 text-[9px] font-bold normal-case tracking-normal text-cyan-300 transition hover:bg-cyan-500/10 disabled:opacity-50"
+                    :disabled="csvBusy"
+                    :title="`export the per-leg chain history as CSV - one row per traversal, the chain and the leg named on every row (depth ${histDepth})`"
+                    @click="exportChainCsv">
+                    <Loader2 v-if="csvBusy" class="h-2.5 w-2.5 animate-spin" />
+                    <Download v-else class="h-2.5 w-2.5" /> CSV
                   </button>
                 </p>
                 <div v-for="leg in chain.legs" :key="`hist-${leg.from_process}-${leg.on_state}`" class="mt-1.5">

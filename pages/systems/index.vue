@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import {
-  Loader2, Boxes, Plus, CheckCircle2, XCircle, AlertTriangle, X,
+  Loader2, Boxes, Plus, CheckCircle2, XCircle, AlertTriangle, X, Download,
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
   Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video, GitBranch,
@@ -81,7 +81,7 @@ interface SystemChainView {
   complete: boolean
 }
 
-const { api } = useApi()
+const { api, download } = useApi()
 const loading = ref(true)
 const pageError = ref('')
 const systems = ref<SystemCard[]>([])
@@ -432,6 +432,7 @@ const chainAckForId = ref('')
 const chainAckBy = ref('')
 const chainAckNote = ref('')
 const chainAckSnooze = ref('')
+const chainAckReschedule = ref('')  // v98: the SAME reschedule clock the attention rows (v96) and the machine board (v98) carry - every ack surface posts one receipt
 const chainAcking = ref(false)
 const chainAckError = ref('')
 
@@ -446,6 +447,7 @@ function openChainAck(inst: ChainOverdueInstance) {
   chainAckBy.value = ''
   chainAckNote.value = ''
   chainAckSnooze.value = ''
+  chainAckReschedule.value = ''
   chainAckError.value = ''
 }
 
@@ -457,7 +459,8 @@ async function ackFromChain(inst: ChainOverdueInstance) {
     await api.post(
       `/processes/${inst.process_id}/instances/${inst.instance_id}/escalations/ack`,
       { by: chainAckBy.value.trim(), note: chainAckNote.value.trim(),
-        snooze_hours: chainAckSnooze.value.trim() ? Number(chainAckSnooze.value) : null })
+        snooze_hours: chainAckSnooze.value.trim() ? Number(chainAckSnooze.value) : null,
+        reschedule_in_minutes: chainAckReschedule.value.trim() ? Number(chainAckReschedule.value) : null })  // v98: one clock per receipt - the door refuses both together
     chainAckForId.value = ''
     await openDetail(detail.value.id)  // the node re-reads wearing the ack
   } catch (e: any) {
@@ -472,6 +475,26 @@ function fmtOverdue(sec: number): string {
   if (sec >= 3600) return `${Math.floor(sec / 3600)}h`
   if (sec >= 60) return `${Math.floor(sec / 60)}m`
   return `${sec}s`
+}
+
+// ---- v98: the per-leg chain history as a CSV download --------------------
+// the SAME owner-wide map the chain views draw (chain_map, zero drift),
+// one row per traversal with the chain and the leg named on every row so a
+// spreadsheet can filter or pivot per leg; a leg with no rides still ships
+// its inventory row. Exported at the deepest window (50 rides per leg) -
+// the endpoint rides the map's own clamp, so the file honors exactly the
+// window a deeper toggle chose elsewhere.
+const chainCsvBusy = ref(false)
+const chainCsvError = ref('')
+async function exportChainCsv() {
+  chainCsvBusy.value = true
+  chainCsvError.value = ''
+  try {
+    await download('/processes/chains/history.csv?history_limit=50',
+      `py8n-chain-history-${new Date().toISOString().slice(0, 10)}.csv`)
+  } catch (e: any) {
+    chainCsvError.value = e?.message || 'the export was refused'
+  } finally { chainCsvBusy.value = false }
 }
 
 function ackAge(title: string, until: string): string {
@@ -803,6 +826,14 @@ onMounted(async () => {
               <GitBranch class="h-4 w-4 text-fuchsia-400" />
               <h3 class="text-xs font-bold text-fuchsia-200">Journey chains</h3>
               <span class="text-[10px] text-zinc-600">the cross-department walks this system's machines sit in - counts are the LIVE instances right now</span>
+              <!-- v98: the per-leg history as a CSV download -->
+              <button class="ml-auto flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2 py-1 text-[10px] font-bold text-cyan-300 transition hover:bg-cyan-500/20 disabled:opacity-50"
+                :disabled="chainCsvBusy"
+                title="export the per-leg chain history as CSV - one row per traversal with the chain and the leg named on every row (deepest window, 50 rides per leg)"
+                @click="exportChainCsv">
+                <Loader2 v-if="chainCsvBusy" class="h-3 w-3 animate-spin" />
+                <Download v-else class="h-3 w-3" /> Export CSV
+              </button>
             </div>
             <div class="space-y-3">
               <div v-for="chain in detail.chains" :key="chain.slug" class="rounded-2xl border border-fuchsia-900/50 bg-zinc-900/40 p-4">
@@ -935,6 +966,7 @@ onMounted(async () => {
                       <input v-model="chainAckBy" placeholder="acknowledged by" class="w-32 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
                       <input v-model="chainAckNote" placeholder="note (optional)" class="w-40 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
                       <input v-model="chainAckSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
+                      <input v-model="chainAckReschedule" type="number" min="0" step="5" placeholder="reschedule in min" class="w-32 rounded-lg border border-fuchsia-500/30 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-fuchsia-500/60" title="v98: re-knock the door at an EXPLICIT moment - now + N minutes (leave empty if you set snooze hrs - one clock per receipt)" />
                       <button class="flex items-center gap-1 rounded-lg bg-emerald-500 px-2.5 py-1 text-[10px] font-bold text-white transition hover:bg-emerald-400 disabled:opacity-50"
                         :disabled="chainAcking || !chainAckBy.trim()" @click="ackFromChain(inst)">
                         <Loader2 v-if="chainAcking" class="h-3 w-3 animate-spin" />

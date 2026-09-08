@@ -10,17 +10,17 @@ mean time in state, advance counts - all derived).
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
-    attention_feed, chain_map, create_process, escalation_day_detail,
-    escalation_history_grid,
+    attention_feed, chain_history_csv, chain_map, create_process,
+    escalation_day_detail, escalation_history_grid,
     escalation_preview, get_instance,
     get_process, list_instances, list_processes, process_analytics,
     start_instance, update_escalation_policy,
@@ -100,6 +100,27 @@ async def chains(history_limit: int = 5, user=Depends(get_optional_user),
     ridden for months."""
     return await chain_map(db, getattr(user, "id", None),
                            history_limit=history_limit)
+
+
+@router.get("/chains/history.csv")
+async def chains_history_csv_route(history_limit: int = 50,
+                                   user=Depends(get_optional_user),
+                                   db: AsyncSession = Depends(get_db)):
+    """v98: the per-leg chain history as a CSV download - the SAME map the
+    operator-detail chain draws (chain_map, zero drift), one row per
+    traversal with the chain and the leg named on every row (a leg with no
+    rides yet still ships one row, the absence reading as data).
+    history_limit rides the map's own clamp (1..50); the default is the
+    deepest window. Declared BEFORE /{process_id} (alongside /chains)."""
+    out = await chain_history_csv(db, getattr(user, "id", None),
+                                  history_limit=history_limit)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return Response(
+        content=out["csv"], media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition":
+                 f'attachment; filename="py8n-chain-history-{stamp}.csv"',
+                 "X-Py8n-Leg-Count": str(out["leg_count"]),
+                 "X-Py8n-Ride-Count": str(out["ride_count"])})
 
 
 @router.get("/escalation-history")

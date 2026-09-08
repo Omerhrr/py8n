@@ -16,6 +16,8 @@ workflows + data + interactions = long-running autonomy.
 
 from __future__ import annotations
 
+import csv
+import io
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -24,6 +26,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models import (BusinessProcess, BusinessProcessInstance,
                       BusinessProcessTransitionLog)
 from . import escalations as escalations_svc  # v87: the channel + repeat policy layer
+
+# v98: a machine with more out-legs than one chain walk carries ships the
+# leftovers under this honest group name (never a silent drop)
+SIDE_LEGS_CHAIN = "side legs"
 
 
 class ProcessError(ValueError):
@@ -1846,7 +1852,99 @@ async def chain_map(db: AsyncSession, owner_id: str | None, *,
             or f"Chain via {head_proc.name}"
         chains.append({"name": name, "head": head,
                        "head_name": head_proc.name, "legs": walk})
+        for leg in walk:
+            leg["chain"] = name
+    # v98: a machine with MORE than one journey fires more legs than one
+    # chain walk can carry (the walk rides the first out-leg per machine) -
+    # the leftovers are honest legs with real history, so they ship as a
+    # "side legs" group instead of vanishing; the CSV export reads them.
+    side = [leg for leg in legs if "chain" not in leg]
+    if side:
+        chains.append({"name": SIDE_LEGS_CHAIN, "head": None,
+                       "head_name": "", "legs": side})
+        for leg in side:
+            leg["chain"] = SIDE_LEGS_CHAIN
     return {"chains": chains, "nodes": nodes}
+
+
+CHAIN_CSV_HEADER = [
+    "chain", "leg_from", "leg_on_state", "leg_to", "leg_sla_seconds",
+    "leg_opened", "leg_open_now", "leg_stuck", "history_truncated",
+    "ref", "title", "state", "opened_at", "due_at", "is_stuck",
+    "overdue_seconds", "acked_by", "snooze_remaining_seconds",
+    "instance_id", "process_id",
+]
+
+
+def _chain_csv_rows(chains: list[dict]) -> tuple[list[list], int]:
+    """v98: the per-leg chain history as CSV rows - one row per traversal,
+    the leg (and its live counts) named on every row so a spreadsheet can
+    filter or pivot per leg; a leg with no rides yet still ships one row
+    with the ride columns empty (the leg inventory is in the file, the
+    absence reads as data).
+
+    A leg two walks both carry (two machines firing into the same target -
+    a diamond the map honestly draws twice) is written ONCE, under the
+    first chain that reached it: a pivot over this file must never count
+    the same ride twice."""
+    rows = [list(CHAIN_CSV_HEADER)]
+    rides = 0
+    seen_legs: set[tuple[str, str]] = set()
+    for ch in chains:
+        for leg in ch.get("legs") or []:
+            leg_id = (str(leg.get("from_process_id") or ""),
+                      str(leg.get("on_state") or ""))
+            if leg_id in seen_legs:
+                continue
+            seen_legs.add(leg_id)
+            sla = leg.get("due_in_seconds")
+            base = [ch.get("name") or "", leg.get("from_name") or "",
+                    leg.get("on_state") or "", leg.get("to_name") or "",
+                    sla if sla is not None else "",
+                    leg.get("opened") or 0, leg.get("open_now") or 0,
+                    leg.get("stuck") or 0,
+                    "yes" if leg.get("history_truncated") else "no"]
+            hist = leg.get("history") or []
+            if not hist:
+                rows.append(base + [""] * len(CHAIN_CSV_HEADER[9:]))
+                continue
+            for h in hist:
+                rides += 1
+                overdue = h.get("overdue_seconds")
+                snooze = h.get("snooze_remaining_seconds")
+                rows.append(base + [
+                    h.get("ref") or "", h.get("title") or "",
+                    h.get("state") or "", h.get("opened_at") or "",
+                    h.get("due_at") or "",
+                    "yes" if h.get("is_stuck") else "no",
+                    overdue if overdue is not None else "",
+                    h.get("acked_by") or "",
+                    snooze if snooze is not None else "",
+                    h.get("instance_id") or "", h.get("process_id") or ""])
+    return rows, rides
+
+
+async def chain_history_csv(db: AsyncSession, owner_id: str | None, *,
+                            history_limit: int = 50) -> dict:
+    """v98: the per-leg chain history as a CSV download - the same map
+    the operator-detail chain draws (chain_map, zero drift), rendered as
+    one row per traversal with the chain and the leg named on every row.
+    history_limit rides the same clamp the map uses (1..50, default the
+    deepest), so the export honors exactly the window the toggle chose.
+
+    Columns: chain, leg identity (from / on_state / to / sla seconds),
+    the leg's live counts (opened / open_now / stuck, history_truncated),
+    then the ride itself (ref, title, state, opened_at, due_at, is_stuck,
+    overdue_seconds, acked_by, snooze_remaining_seconds) and the row's
+    own ids. Returns {csv, leg_count, ride_count}."""
+    out = await chain_map(db, owner_id, history_limit=history_limit)
+    rows, rides = _chain_csv_rows(out.get("chains") or [])
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerows(rows)
+    leg_count = sum(len(c.get("legs") or []) for c in out.get("chains") or [])
+    return {"csv": buf.getvalue(), "leg_count": leg_count,
+            "ride_count": rides}
 
 
 async def escalation_history_grid(db: AsyncSession, owner_id: str | None,

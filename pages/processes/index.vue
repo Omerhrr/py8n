@@ -104,6 +104,7 @@ const ackForId = ref('')
 const ackBy = ref('')
 const ackNote = ref('')
 const ackSnooze = ref('')  // v89: hours - the hold is a loan, then the door re-knocks
+const ackReschedule = ref('')  // v98: minutes - the machine board's receipt carries the SAME clock the attention rows gained in v96 (parity)
 const acking = ref(false)
 const ackError = ref('')
 
@@ -473,7 +474,7 @@ function fmtAge(sec: number): string {
 // v87: the episode bookkeeping the door keeps on the instance's memory
 // v88: the ack rides the same book (the door holds acknowledged episodes)
 // v89: digest sends stamp last_delivery='digest' - the summary receipt
-function escBook(inst: Instance): { count: number; last_delivery: string; acked: { by: string; at: string; note?: string } | null } | null {
+function escBook(inst: Instance): { count: number; last_delivery: string; acked: { by: string; at: string; note?: string; snooze_until?: string; reschedule_at?: string } | null } | null {
   const b = inst.context?.escalations
   if (!b || typeof b !== 'object') return null
   return {
@@ -481,6 +482,15 @@ function escBook(inst: Instance): { count: number; last_delivery: string; acked:
     last_delivery: b.last_delivery || '',
     acked: b.acked && typeof b.acked === 'object' ? b.acked : null,
   }
+}
+
+// v98: seconds until an ISO loan stamp elapses (0 = spent) - the raw book
+// carries the stamps, the attention feed's remaining-seconds come from the
+// server projection; the machine board reads the same book the board owns
+function loanRemaining(iso?: string): number {
+  if (!iso) return 0
+  const t = new Date(iso).getTime()
+  return Number.isFinite(t) ? Math.max(0, Math.round((t - Date.now()) / 1000)) : 0
 }
 
 // v88: journey rows carry paperwork too - color it by what it means
@@ -634,6 +644,7 @@ function openAck(inst: Instance) {
   ackBy.value = ''
   ackNote.value = ''
   ackSnooze.value = ''
+  ackReschedule.value = ''  // v98: the machine board's form opens with the same blank clocks the attention row's does
   ackError.value = ''
 }
 
@@ -645,11 +656,13 @@ async function ackEscalation(inst: Instance) {
     await api.post(
       `/processes/${selected.value.id}/instances/${inst.id}/escalations/ack`,
       { by: ackBy.value.trim(), note: ackNote.value.trim(),
-        snooze_hours: ackSnooze.value.trim() ? Number(ackSnooze.value) : null })
+        snooze_hours: ackSnooze.value.trim() ? Number(ackSnooze.value) : null,
+        reschedule_in_minutes: ackReschedule.value.trim() ? Number(ackReschedule.value) : null })  // v98: the same one-clock-per-receipt the attention rows post - the door refuses both clocks together
     ackForId.value = ''
     ackBy.value = ''
     ackNote.value = ''
     ackSnooze.value = ''
+    ackReschedule.value = ''
     await refreshAll()
   } catch (e: any) {
     ackError.value = e?.data?.detail || e?.message || 'The acknowledgement was refused'
@@ -1286,6 +1299,10 @@ onMounted(async () => {
                   <span v-if="escBook(inst)?.acked" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${escBook(inst)!.acked!.by}${escBook(inst)!.acked!.note ? ` - ${escBook(inst)!.acked!.note}` : ''}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack by {{ escBook(inst)!.acked!.by }}</span>
                   <span v-else-if="escBook(inst)?.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest - one summary per window instead of N knocks">digest ×{{ escBook(inst)!.count }}</span>
                   <span v-else-if="escBook(inst)" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="`last delivery: ${escBook(inst)!.last_delivery || 'n/a'}`">escalated ×{{ escBook(inst)!.count }}</span>
+                  <!-- v98: the loan chips - the machine board wears what the attention rows wear (parity); independent of the primary chip above -->
+                  <span v-if="escBook(inst)?.acked?.snooze_until" class="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold" :class="loanRemaining(escBook(inst)!.acked!.snooze_until) > 0 ? 'text-sky-300' : 'text-zinc-500 line-through'" :title="`the door re-knocks after ${escBook(inst)!.acked!.snooze_until}`">snoozed{{ loanRemaining(escBook(inst)!.acked!.snooze_until) > 0 ? '' : ' (ran out)' }}</span>
+                  <span v-if="escBook(inst)?.acked?.reschedule_at && loanRemaining(escBook(inst)!.acked!.reschedule_at) > 0" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" :title="`the door re-knocks at ${escBook(inst)!.acked!.reschedule_at}`"><Clock class="mr-0.5 inline h-2.5 w-2.5" /> rescheduled · {{ fmtAge(loanRemaining(escBook(inst)!.acked!.reschedule_at)) }}</span>
+                  <span v-else-if="escBook(inst)?.acked?.reschedule_at" class="rounded-full bg-fuchsia-500/10 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300/70" :title="`the reschedule ran out at ${escBook(inst)!.acked!.reschedule_at} - the door re-knocked`">rescheduled (ran out)</span>
                   <span v-if="inst.is_terminal" class="flex items-center gap-1 text-[10px] text-zinc-500"><CheckCircle2 class="h-3 w-3" /> closed</span>
                 </div>
                 <div class="mt-2 flex flex-wrap items-center gap-2">
@@ -1328,6 +1345,7 @@ onMounted(async () => {
                   <input v-model="ackBy" placeholder="acknowledged by" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
                   <input v-model="ackNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
                   <input v-model="ackSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
+                  <input v-model="ackReschedule" type="number" min="0" step="5" placeholder="reschedule in min" class="w-32 rounded-lg border border-fuchsia-500/30 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-fuchsia-500/60" title="v98: re-knock the door at an EXPLICIT moment - now + N minutes (the human picks the time; leave empty if you set snooze hrs - one clock per receipt)" />
                   <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="acking || !ackBy.trim()" @click="ackEscalation(inst)">
                     <Loader2 v-if="acking" class="h-3 w-3 animate-spin" /> Acknowledge
                   </button>
