@@ -111,4 +111,8 @@ async def domain_work(domain: str, request: Request,
             SystemComponent.system_id == row.system_id,
             SystemComponent.kind == "process"))).scalars().all()
     work = await bp_svc.system_work_surface(db, list(machine_ids))
-    return {**identity, "my_role": my_role, "work": work}
+    # v106: the deployment's liveness rides the surface - the people on
+    # this address can see their own door is being watched (the last
+    # probe's evidence, or an honest null when it has never been asked).
+    return {**identity, "my_role": my_role, "work": work,
+            "liveness": deploy_svc.liveness(row)}

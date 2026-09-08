@@ -433,4 +433,4 @@ def test_v94_escalation_history():
 # ---------------------------------------------------------------------------
 
 def test_v94_version_pin():
-    assert settings.version == "1.105.0"
+    assert settings.version == "1.106.0"

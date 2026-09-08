@@ -1148,7 +1148,13 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
     predicate the estate feed runs, scoped to the system's machines:
     terminal states are skipped (a closed entity is not asking for
     attention) and the clock is compared in Python - SQLite returns
-    naive datetimes and a naive/aware comparison lies (v38 GOTCHA)."""
+    naive datetimes and a naive/aware comparison lies (v38 GOTCHA).
+
+    v106: every attention row also carries the moves the machine allows
+    FROM its current state (``transitions`` - name + to), resolved by
+    the SAME ``_allowed_from`` the advance door runs, so the surface can
+    put advance actions beside the acks and the buttons can never offer
+    a move the door would refuse."""
     now = _aware(now) or _now()
     ids = [p for p in (process_ids or []) if p]
     empty = {"machines": [], "attention": [],
@@ -1189,6 +1195,12 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
         res_at = escalations_svc.parse_iso(
             (book.get("acked") or {}).get("reschedule_at")
             if isinstance(book.get("acked"), dict) else None)
+        # v106: the moves the machine allows FROM this row's state - the
+        # same resolution the advance door runs (_allowed_from), so the
+        # surface's buttons and the door's rules can never drift. A state
+        # with no outgoing moves wears an empty list (the surface hides
+        # the control - an honest absence, never a dead button).
+        definition = definitions.get(proc.id) or {}
         attention_rows.append({
             "process_id": proc.id, "process_name": proc.name,
             "instance_id": r.id, "ref": r.ref, "title": r.title,
@@ -1197,6 +1209,8 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
                                 if r.entered_state_at else None,
             "due_at": r.due_at.isoformat() if r.due_at else None,
             "overdue_seconds": round(overdue),
+            "transitions": [{"name": t["name"], "to": t["to"]}
+                            for t in _allowed_from(definition, r.state)],
             "escalation": {
                 "count": int(book.get("count") or 0),
                 "acked": acked,

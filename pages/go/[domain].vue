@@ -15,9 +15,18 @@
 // their SLA, most-overdue first, the escalation book per row). Editors
 // and the owner acknowledge escalations right here; viewers read. This is
 // the company's operations system, not a workflow tool.
+// v106: the rows grow the MOVE beside the take - an Advance control per
+// attention row offering exactly the transitions the machine allows from
+// its current state (the same resolution the advance door runs), and the
+// surface wears the address's own liveness (the last probe's evidence -
+// answered / no answer / never probed), so the people on a custom domain
+// can see their door is watched AND move the work along in one place.
 definePageMeta({ layout: 'plain' })
 
-import { AlertCircle, CheckCircle2, ChevronDown, ExternalLink, Loader2, LogIn } from 'lucide-vue-next'
+import {
+  Activity, AlertCircle, ArrowRight, CheckCircle2, ChevronDown,
+  Clock3, ExternalLink, Loader2, LogIn,
+} from 'lucide-vue-next'
 
 const route = useRoute()
 const router = useRouter()
@@ -40,6 +49,7 @@ interface WorkAttention {
   entered_state_at: string | null
   due_at: string | null
   overdue_seconds: number
+  transitions: { name: string, to: string }[]
   escalation: EscalationBook | null
 }
 interface WorkMachine {
@@ -64,6 +74,12 @@ interface Identity {
   branding: { accent: string, tagline: string, login_headline: string, logo: string }
   my_role: string | null
 }
+interface Liveness {
+  domain: string
+  status: string
+  environment: string
+  last_ping: { at: string, ok: boolean, ms: number | null, code: number | null, detail: string } | null
+}
 
 const identity = ref<Identity | null>(null)
 const state = ref<'loading' | 'live' | 'dark' | 'work'>('loading')
@@ -86,6 +102,17 @@ const myRole = ref<string | null>(null)
 const canAct = computed(() => myRole.value === 'owner' || myRole.value === 'editor')
 const workError = ref('')
 const workBusy = ref(false)
+const liveness = ref<Liveness | null>(null)
+
+// v106: the address's own liveness line - evidence, never a stored flag
+const livenessAge = computed(() => {
+  const lp = liveness.value?.last_ping
+  if (!lp?.at || !work.value?.now) return null
+  const at = new Date(lp.at).getTime()
+  const now = new Date(work.value.now).getTime()
+  if (Number.isNaN(at) || Number.isNaN(now)) return null
+  return Math.max(0, (now - at) / 1000)
+})
 
 // the ack form (one open row at a time, v96 parity: loan or reschedule)
 const ackFor = ref<string | null>(null)
@@ -96,6 +123,14 @@ const ackReschedule = ref<string>('')
 const ackBusy = ref(false)
 const ackError = ref('')
 
+// v106: the advance form - the move beside the take. The choices come
+// from the row itself (the machine's own rules), one open form at a time.
+const advFor = ref<string | null>(null)
+const advTransition = ref('')
+const advNote = ref('')
+const advBusy = ref(false)
+const advError = ref('')
+
 function fmtOverdue(seconds: number): string {
   const s = Math.max(0, Math.round(seconds))
   const d = Math.floor(s / 86400)
@@ -104,6 +139,11 @@ function fmtOverdue(seconds: number): string {
   if (d > 0) return `${d}d ${h}h`
   if (h > 0) return `${h}h ${m}m`
   return `${Math.max(1, m)}m`
+}
+
+function fmtAgo(seconds: number): string {
+  if (seconds < 60) return 'just now'
+  return `${fmtOverdue(seconds)} ago`
 }
 
 async function load() {
@@ -132,6 +172,7 @@ async function loadWork(): Promise<boolean> {
     const res = await api.get<any>(`/systems/by-domain/${encodeURIComponent(domain.value)}/work`)
     work.value = res.work as Work
     myRole.value = (res.my_role as string) || null
+    liveness.value = (res.liveness as Liveness) || null
     state.value = 'work'
     return true
   }
@@ -180,6 +221,43 @@ function openAck(row: WorkAttention) {
   ackReschedule.value = ''
   ackNote.value = ''
   ackBy.value = auth.user?.name || auth.user?.email || ''
+  advFor.value = null // one form at a time on a row
+}
+
+function openAdv(row: WorkAttention) {
+  if (advFor.value === row.instance_id) {
+    advFor.value = null
+    return
+  }
+  advFor.value = row.instance_id
+  advError.value = ''
+  advNote.value = ''
+  advTransition.value = row.transitions?.[0]?.name || ''
+}
+
+async function submitAdv(row: WorkAttention) {
+  advError.value = ''
+  if (!advTransition.value) {
+    advError.value = 'Name the move.'
+    return
+  }
+  advBusy.value = true
+  try {
+    const body: Record<string, any> = {
+      transition: advTransition.value,
+      actor: auth.user?.name || auth.user?.email || '',
+    }
+    if (advNote.value.trim()) body.note = advNote.value.trim()
+    await api.post(`/processes/${row.process_id}/instances/${row.instance_id}/advance`, body)
+    advFor.value = null
+    await loadWork()
+  }
+  catch (e: any) {
+    advError.value = e?.data?.detail || e?.message || 'The door refused the move.'
+  }
+  finally {
+    advBusy.value = false
+  }
 }
 
 async function submitAck(row: WorkAttention) {
@@ -288,6 +366,33 @@ function backToSignIn() {
           </div>
         </div>
 
+        <!-- the address's own liveness (v106) -->
+        <div
+          v-if="liveness"
+          class="mb-4 flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800/80 bg-zinc-900/50 px-3 py-2 text-[11px]"
+        >
+          <Activity class="h-3.5 w-3.5 text-zinc-500" />
+          <span class="font-medium text-zinc-400">This address</span>
+          <template v-if="liveness.last_ping">
+            <span
+              v-if="liveness.last_ping.ok"
+              class="flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 font-bold text-emerald-400"
+            >
+              <span class="relative flex h-1.5 w-1.5"><span class="absolute h-1.5 w-1.5 animate-ping rounded-full bg-emerald-400 opacity-75" /><span class="relative h-1.5 w-1.5 rounded-full bg-emerald-400" /></span>
+              answered HTTP {{ liveness.last_ping.code }} · {{ liveness.last_ping.ms }} ms
+            </span>
+            <span
+              v-else
+              class="flex items-center gap-1.5 rounded-full bg-rose-500/15 px-2 py-0.5 font-bold text-rose-400"
+            >
+              no answer
+            </span>
+            <span v-if="livenessAge !== null" class="text-zinc-500">· probed {{ fmtAgo(livenessAge) }}</span>
+            <span v-if="!liveness.last_ping.ok && liveness.last_ping.detail" class="text-zinc-500">· {{ liveness.last_ping.detail }}</span>
+          </template>
+          <span v-else class="rounded-full bg-zinc-800 px-2 py-0.5 font-bold text-zinc-400">never probed - liveness unknown</span>
+        </div>
+
         <div v-if="workError" class="mb-4 flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-300">
           <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span class="min-w-0 break-words">{{ workError }}</span>
@@ -351,8 +456,8 @@ function backToSignIn() {
                 </div>
               </div>
 
-              <!-- the take (editor+) -->
-              <div v-if="canAct" class="mt-2">
+              <!-- the take and the move (editor+), side by side (v106) -->
+              <div v-if="canAct" class="mt-2 flex flex-wrap items-start gap-1.5">
                 <button
                   class="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-semibold transition active:scale-[0.98]"
                   :style="{ backgroundColor: `${accent}1f`, color: accent }"
@@ -363,11 +468,65 @@ function backToSignIn() {
                   <ChevronDown class="h-3 w-3 transition" :class="ackFor === row.instance_id ? 'rotate-180' : ''" />
                 </button>
 
-                <form
-                  v-if="ackFor === row.instance_id"
-                  class="mt-2 space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3"
-                  @submit.prevent="submitAck(row)"
+                <button
+                  v-if="row.transitions && row.transitions.length > 0"
+                  class="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100 active:scale-[0.98]"
+                  @click="openAdv(row)"
                 >
+                  <ArrowRight class="h-3.5 w-3.5" />
+                  {{ advFor === row.instance_id ? 'Close' : 'Advance' }}
+                  <ChevronDown class="h-3 w-3 transition" :class="advFor === row.instance_id ? 'rotate-180' : ''" />
+                </button>
+              </div>
+
+              <!-- the move's form (v106): the machine's own choices -->
+              <form
+                v-if="advFor === row.instance_id"
+                class="mt-2 space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3"
+                @submit.prevent="submitAdv(row)"
+              >
+                <div v-if="advError" class="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-2 text-[11px] text-rose-300">
+                  {{ advError }}
+                </div>
+                <div class="grid grid-cols-2 gap-2">
+                  <label class="block">
+                    <span class="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Move</span>
+                    <select
+                      v-model="advTransition"
+                      class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 outline-none focus:border-zinc-600"
+                    >
+                      <option v-for="t in row.transitions" :key="t.name" :value="t.name">
+                        {{ t.name }} → {{ t.to }}
+                      </option>
+                    </select>
+                  </label>
+                  <label class="block">
+                    <span class="mb-0.5 block text-[10px] font-medium uppercase tracking-wide text-zinc-500">Note</span>
+                    <input
+                      v-model="advNote"
+                      class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 placeholder-zinc-600 outline-none focus:border-zinc-600"
+                      placeholder="why it moves (optional)"
+                    >
+                  </label>
+                </div>
+                <p class="text-[10px] text-zinc-600">The move rides this system's own door - the journey names you.</p>
+                <button
+                  type="submit"
+                  :disabled="advBusy"
+                  class="flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition active:scale-[0.98] disabled:opacity-60"
+                  :style="{ borderColor: `${accent}66`, color: accent }"
+                >
+                  <Loader2 v-if="advBusy" class="h-3.5 w-3.5 animate-spin" />
+                  <ArrowRight v-else class="h-3.5 w-3.5" />
+                  {{ advBusy ? 'Moving...' : 'Move it along' }}
+                </button>
+              </form>
+
+              <form
+                v-if="ackFor === row.instance_id"
+                class="mt-2 space-y-2 rounded-lg border border-zinc-800 bg-zinc-900/70 p-3"
+                @submit.prevent="submitAck(row)"
+              >
                   <div v-if="ackError" class="rounded-lg border border-rose-500/30 bg-rose-500/10 px-2.5 py-2 text-[11px] text-rose-300">
                     {{ ackError }}
                   </div>
@@ -423,7 +582,6 @@ function backToSignIn() {
                     {{ ackBusy ? 'Taking...' : 'Take it' }}
                   </button>
                 </form>
-              </div>
             </li>
           </ul>
         </div>

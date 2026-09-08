@@ -151,21 +151,41 @@ async def get_by_domain(db: AsyncSession, domain: str) -> SystemDeployment | Non
     ).scalar_one_or_none()
 
 
+def _last_ping_out(row: SystemDeployment) -> dict | None:
+    """The last probe's evidence, in the compact shape every read wears -
+    one writer, so the estate row and the front door can never drift."""
+    if row.last_ping_at is None:
+        return None
+    return {
+        "at": row.last_ping_at.isoformat(),
+        "ok": bool(row.last_ping_ok),
+        "ms": row.last_ping_ms,
+        "code": row.last_ping_code,
+        "detail": row.last_ping_detail or "",
+    }
+
+
+def liveness(row: SystemDeployment) -> dict:
+    """v106: the deployment's liveness, compact - what the front door's
+    work surface wears so the people on a custom domain can see their
+    own address is being watched: the domain, the status, the
+    environment and the last probe's evidence (null when never asked -
+    an honest unknown, never a lying green)."""
+    return {
+        "domain": row.domain or "",
+        "status": row.status,
+        "environment": row.environment,
+        "last_ping": _last_ping_out(row),
+    }
+
+
 def deployment_out(row: SystemDeployment | None) -> dict | None:
     """The read projection - the url DERIVED from the domain, never stored.
     The last probe's evidence rides along (v103) - what the domain
     answered the last time somebody asked, or null when never asked."""
     if row is None:
         return None
-    last_ping = None
-    if row.last_ping_at is not None:
-        last_ping = {
-            "at": row.last_ping_at.isoformat() if row.last_ping_at else None,
-            "ok": bool(row.last_ping_ok),
-            "ms": row.last_ping_ms,
-            "code": row.last_ping_code,
-            "detail": row.last_ping_detail or "",
-        }
+    last_ping = _last_ping_out(row)
     return {
         "system_id": row.system_id,
         "domain": row.domain or "",
@@ -451,6 +471,29 @@ async def ping_due_deployments(db: AsyncSession, *, now: datetime | None = None,
             "interval_seconds": interval}
 
 
+def _tls_note(dep: SystemDeployment) -> str:
+    """v106: the per-domain TLS note - the domain's TLS posture (staging
+    rehearses on the ACME staging issuer; production leans on Caddy's
+    automatic HTTPS) followed by what the liveness probe last SAW for
+    THIS domain. The note is evidence, never a stored flag: a domain
+    whose probe stopped answering reads CHECK on the next regeneration,
+    and a domain nobody has probed yet says so honestly."""
+    if dep.environment == "staging":
+        posture = ("staging - rehearse on the ACME staging issuer "
+                   "(spares the production rate limits)")
+    else:
+        posture = "automatic HTTPS - Caddy answers the ACME challenge on :443"
+    if dep.last_ping_at is None:
+        return f"# tls: {posture} (no probe evidence yet - ping the domain)"
+    stamp = dep.last_ping_at.strftime("%Y-%m-%d %H:%MZ")
+    if dep.last_ping_ok:
+        return (f"# tls: {posture} - certificate live: last probe answered "
+                f"HTTP {dep.last_ping_code} in {dep.last_ping_ms} ms ({stamp})")
+    detail = (dep.last_ping_detail or "probe failed")[:120]
+    return (f"# tls: {posture} - CHECK THE CERTIFICATE: last probe failed "
+            f"({detail}, {stamp})")
+
+
 def routes_sheet(rows: list[tuple[SystemDeployment, Py8nSystem | None]], *,
                  upstream: str = "localhost:3000") -> str:
     """The DERIVED Caddy route sheet (v104) - the estate's host routing
@@ -464,7 +507,13 @@ def routes_sheet(rows: list[tuple[SystemDeployment, Py8nSystem | None]], *,
     verb (``GET /systems/deployment/routes.caddy``) and the edge never
     drifts from the estate. Caddy includes it with a glob import, and a
     glob that matches nothing is not an error - a fresh install routes
-    zero tenants and keeps working."""
+    zero tenants and keeps working.
+
+    v106: every live block carries its domain's own TLS note (the
+    posture - staging's rehearsal issuer vs production's automatic
+    HTTPS - plus what the domain's liveness probe last saw), so the
+    sheet an operator wires at the edge also ANSWERS "is this
+    certificate doing its job" per domain."""
     live = [(d, s) for d, s in rows if d.status == "live"]
     dark = [(d, s) for d, s in rows if d.status != "live"]
     stamp = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -475,6 +524,9 @@ def routes_sheet(rows: list[tuple[SystemDeployment, Py8nSystem | None]], *,
         f"# Caddyfile:  import /etc/caddy/tenants/*.caddy   # zero matches is fine",
         f"# generated {stamp} - {len(live)} live, {len(dark)} dark",
         f"# upstream: {upstream}",
+        "# tls: every site block relies on Caddy's automatic HTTPS - each block",
+        "# carries its domain's own note (the TLS posture + the liveness probe's",
+        "# last evidence for THAT domain; staging names the rehearsal issuer).",
         "",
     ]
     for dep, system in live:
@@ -483,6 +535,7 @@ def routes_sheet(rows: list[tuple[SystemDeployment, Py8nSystem | None]], *,
         lines += [
             f"# {name} ({env}) - live",
             f"{dep.domain} {{",
+            f"\t{_tls_note(dep)}",
             f"\t# map the hostname onto the branded front door (v103): /go/{{host}}",
             f"\trewrite * /go/{dep.domain}",
             f"\treverse_proxy {upstream}",
