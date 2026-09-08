@@ -814,7 +814,8 @@ async def annotate_instance(db: AsyncSession, process_id: str, instance_id: str,
 async def acknowledge_escalation(db: AsyncSession, process_id: str,
                                  instance_id: str, *, owner_id: str | None,
                                  by: str, note: str = "",
-                                 snooze_hours: float | None = None) -> dict:
+                                 snooze_hours: float | None = None,
+                                 reschedule_in_minutes: float | None = None) -> dict:
     """A human takes the escalation: the episode goes quiet (episode_gate
     holds with reason 'acknowledged'), the receipt is ON THE RECORD (an
     'escalation_acknowledged' journey row naming who) and
@@ -826,6 +827,12 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
     snooze_until stamp and the door RE-KNOCKS once it runs out (an ack
     without one still owns the rest of the state stint, v88 semantics).
     Re-acking replaces the loan - snoozing again extends it.
+
+    v96: reschedule_in_minutes names the door's next knock EXPLICITLY -
+    the receipt carries a reschedule_at stamp (the human picked the
+    moment, not a duration) and the door re-knocks when it passes. One
+    clock per receipt: snooze_hours AND a reschedule together refuse
+    loud - the door does not guess which loan it holds.
 
     The door has to have knocked first: an episode bookkeeping with at
     least one attempt in the current stint, or an escalation marker on
@@ -847,6 +854,19 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
         if snooze_hours < 0:
             raise ProcessError("snooze_hours must be >= 0 (0 = the door keeps "
                                "its cadence; omit it to own the rest of the stint)")
+    if reschedule_in_minutes is not None:
+        try:
+            reschedule_in_minutes = float(reschedule_in_minutes)
+        except (TypeError, ValueError):
+            raise ProcessError("reschedule_in_minutes must be a number of "
+                               "minutes") from None
+        if reschedule_in_minutes < 0:
+            raise ProcessError("reschedule_in_minutes must be >= 0 (0 = the "
+                               "door re-knocks on its next sweep)")
+    if snooze_hours is not None and reschedule_in_minutes is not None:
+        raise ProcessError("name ONE loan - snooze_hours OR "
+                           "reschedule_in_minutes, not both (the door refuses "
+                           "to guess which clock holds)")
     book = escalations_svc.episode_book(row)
     has_episode = (int(book.get("count") or 0) >= 1
                    and book.get("state") == row.state)
@@ -857,11 +877,16 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
                            "has not knocked for this stint (state "
                            f"{row.state!r})")
     ack = escalations_svc.record_ack(db, row, by=who, note=note,
-                                     snooze_hours=snooze_hours, now=_now())
+                                     snooze_hours=snooze_hours,
+                                     reschedule_in_minutes=reschedule_in_minutes,
+                                     now=_now())
     payload = {"attempt": int(book.get("count") or 0)}
     if ack.get("snooze_until"):
         payload["snooze_hours"] = ack["snooze_hours"]
         payload["snooze_until"] = ack["snooze_until"]
+    if ack.get("reschedule_at"):
+        payload["reschedule_in_minutes"] = ack["reschedule_in_minutes"]
+        payload["reschedule_at"] = ack["reschedule_at"]
     db.add(BusinessProcessTransitionLog(
         process_id=p.id, instance_id=row.id, from_state=row.state,
         to_state=row.state, transition=ACK_TRANSITION,
@@ -879,7 +904,9 @@ async def acknowledge_escalation(db: AsyncSession, process_id: str,
                  "instance_id": row.id, "ref": row.ref, "title": row.title,
                  "state": row.state, "acknowledged_by": who,
                  "note": (note or "")[:200],
-                 **({k: ack[k] for k in ("snooze_hours", "snooze_until")
+                 **({k: ack[k] for k in ("snooze_hours", "snooze_until",
+                                         "reschedule_in_minutes",
+                                         "reschedule_at")
                      if k in ack})},
         correlation_id=row.id)
     return {"instance": instance_out(row, definition=p.definition,
@@ -1052,6 +1079,9 @@ async def attention_feed(db: AsyncSession, owner_id: str | None, *,
         entered = _aware(row.entered_state_at)
         book = escalations_svc.episode_book(row)
         acked = book.get("acked") if isinstance(book.get("acked"), dict) else None
+        # v96: the reschedule loan - the receipt may name the door's next
+        # knock explicitly; the row carries the stamp + how long it holds
+        res_at = escalations_svc.parse_iso((acked or {}).get("reschedule_at"))
         ctx = row.context or {}
         out.append({
             "process_id": proc.id, "process_name": proc.name,
@@ -1069,6 +1099,10 @@ async def attention_feed(db: AsyncSession, owner_id: str | None, *,
                 "last_detail": str(book.get("last_detail") or ""),
                 "acked_by": str((acked or {}).get("by") or ""),
                 "snooze_until": str((acked or {}).get("snooze_until") or ""),
+                "reschedule_at": str((acked or {}).get("reschedule_at") or ""),
+                "reschedule_remaining_seconds":
+                    round((res_at - now).total_seconds())
+                    if res_at is not None and res_at > now else 0,
             } if book else None,
             "escalation_summary": escalations_svc.describe_policy(
                 escalations_svc.policy_from_definition(proc.definition or {})),
@@ -1190,7 +1224,8 @@ async def escalation_preview(db: AsyncSession, process_id: str, *,
                 held.append({**base, "reason": gate["reason"],
                              **{k: gate[k] for k in
                                 ("attempts", "acked_by", "snooze_until",
-                                 "snooze_remaining_seconds", "next_in_seconds")
+                                 "snooze_remaining_seconds", "next_in_seconds",
+                                 "reschedule_at", "reschedule_remaining_seconds")
                                 if k in gate}})
                 continue
             bucket.append({**base, "attempt": gate["attempt"],
@@ -1202,7 +1237,8 @@ async def escalation_preview(db: AsyncSession, process_id: str, *,
             held.append({**base, "reason": gate["reason"],
                          **{k: gate[k] for k in
                             ("attempts", "acked_by", "snooze_until",
-                             "snooze_remaining_seconds", "next_in_seconds")
+                             "snooze_remaining_seconds", "next_in_seconds",
+                             "reschedule_at", "reschedule_remaining_seconds")
                             if k in gate}})
             continue
         attempt = gate["attempt"]
@@ -1221,11 +1257,19 @@ async def escalation_preview(db: AsyncSession, process_id: str, *,
     if clean is not None and clean["mode"] == "digest":
         window = clean["digest_every_seconds"]
         oldest_waited = max((b["waited_seconds"] for b in bucket), default=0)
-        items = [{"instance_id": b["instance_id"], "ref": b["ref"],
-                  "title": b["title"], "state": b["state"],
-                  "overdue_seconds": b["overdue_seconds"],
-                  "overdue_minutes": b["overdue_minutes"],
-                  "attempt": b["attempt"]} for b in bucket]
+        items = []
+        for b in bucket:
+            # v97: the preview's digest carries the same reschedule evidence
+            # the real render would - the editor sees the whole truth
+            brow = next((r for r, _od in overdue_rows if r.id == b["instance_id"]), None)
+            bbook = escalations_svc.episode_book(brow) if brow is not None else {}
+            items.append({"instance_id": b["instance_id"], "ref": b["ref"],
+                          "title": b["title"], "state": b["state"],
+                          "overdue_seconds": b["overdue_seconds"],
+                          "overdue_minutes": b["overdue_minutes"],
+                          "attempt": b["attempt"],
+                          "reschedule_note": escalations_svc.reschedule_note(
+                              bbook, now)})
         subject = escalations_svc.digest_subject(process_name=p.name,
                                                  item_count=len(items))
         body = (escalations_svc.render_digest(process_name=p.name, items=items)
@@ -1409,7 +1453,9 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                              "reason": gate["reason"],
                              **({k: gate[k] for k in ("attempts", "acked_by",
                                                       "snooze_until",
-                                                      "snooze_remaining_seconds")
+                                                      "snooze_remaining_seconds",
+                                                      "reschedule_at",
+                                                      "reschedule_remaining_seconds")
                                  if k in gate})})
                 continue
             if gate.get("fresh"):
@@ -1445,7 +1491,9 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                              "reason": gate["reason"],
                              **({k: gate[k] for k in ("attempts", "next_in_seconds",
                                                       "acked_by", "snooze_until",
-                                                      "snooze_remaining_seconds")
+                                                      "snooze_remaining_seconds",
+                                                      "reschedule_at",
+                                                      "reschedule_remaining_seconds")
                                  if k in gate})})
                 continue
             attempt = gate["attempt"]
@@ -1541,11 +1589,19 @@ async def escalate_stuck(db: AsyncSession, owner_id: str | None = None, *,
                 "items": len(members),
                 "next_in_seconds": round(policy["digest_every_seconds"] - waited)})
             continue
-        items = [{"instance_id": m["row"].id, "ref": m["row"].ref,
-                  "title": m["row"].title, "state": m["row"].state,
-                  "overdue_seconds": m["overdue"],
-                  "overdue_minutes": max(0, m["overdue"] // 60),
-                  "attempt": m["attempt"]} for m in members]
+        items = []
+        for m in members:
+            # v97: the line carries the receipt's evidence - what the team
+            # already did about this item (the reschedule/snooze the door
+            # holds or held) rides the summary itself
+            book = escalations_svc.episode_book(m["row"])
+            items.append({"instance_id": m["row"].id, "ref": m["row"].ref,
+                          "title": m["row"].title, "state": m["row"].state,
+                          "overdue_seconds": m["overdue"],
+                          "overdue_minutes": max(0, m["overdue"] // 60),
+                          "attempt": m["attempt"],
+                          "reschedule_note": escalations_svc.reschedule_note(
+                              book, now)})
         delivery = await escalations_svc.deliver_digest(
             db, owner_id=b_owner, policy=policy, process_id=b_pid,
             process_name=process_name, items=items, actor=actor, now=now)
@@ -1639,7 +1695,8 @@ def _resolve_leg_target(procs: list[BusinessProcess], want: str) -> BusinessProc
     return hits[0]
 
 
-async def chain_map(db: AsyncSession, owner_id: str | None) -> dict:
+async def chain_map(db: AsyncSession, owner_id: str | None, *,
+                    history_limit: int = 5) -> dict:
     """v93: the cross-machine CHAIN view - the journey legs the installed
     machines thread, drawn as chains with LIVE counts and per-leg HISTORY.
 
@@ -1657,7 +1714,16 @@ async def chain_map(db: AsyncSession, owner_id: str | None) -> dict:
     is watching (stuck), and the recent traversals - the HISTORY the
     operator-detail chain draws: ref, title, where the item is now,
     when the leg opened it, and what the escalation door knows about it
-    (overdue? acknowledged? snoozing?)."""
+    (overdue? acknowledged? snoozing?).
+
+    v96: history_limit stretches the traversal window BEYOND the default
+    5 (clamped 1..50) - a leg that has ridden for months does not lose
+    its older rides just because the first cut drew a short list."""
+    try:
+        limit = max(1, min(int(history_limit)
+                           if history_limit is not None else 5, 50))
+    except (TypeError, ValueError):
+        limit = 5
     procs = (await db.execute(
         select(BusinessProcess).order_by(BusinessProcess.created_at.asc()))).scalars().all()
     if owner_id is not None:
@@ -1738,7 +1804,7 @@ async def chain_map(db: AsyncSession, owner_id: str | None) -> dict:
             stuck, overdue = _stuck_state(r, definitions.get(r.process_id) or {}, now)
             if stuck:
                 leg["stuck"] += 1
-            if len(leg["history"]) < 5:
+            if len(leg["history"]) < limit:
                 book = escalations_svc.episode_book(r)
                 ack = _ack_summary(book, now)
                 leg["history"].append({
@@ -1753,6 +1819,8 @@ async def chain_map(db: AsyncSession, owner_id: str | None) -> dict:
                     "due_at": r.due_at.isoformat() if r.due_at else None})
     for leg in legs:
         leg["history"].sort(key=lambda h: h.get("opened_at") or "", reverse=True)
+        leg["history_limit"] = limit
+        leg["history_truncated"] = leg["opened"] > len(leg["history"])
 
     # the chains - walk from the heads (machines no resolved leg arrives at)
     heads = [p.id for p in procs if p.id not in in_targets and p.id in out_map]
@@ -1827,3 +1895,61 @@ async def escalation_history_grid(db: AsyncSession, owner_id: str | None,
                  key=lambda m: -(m["totals"]["escalations"]
                                  + m["totals"]["acks"] + m["totals"]["digests"]))
     return {"days": day_keys, "machines": out, "days_count": days}
+
+
+async def escalation_day_detail(db: AsyncSession, process_id: str, day: str,
+                                owner_id: str | None) -> dict:
+    """v96: ONE heatmap cell, opened - the machine's DAY. Every escalation
+    row the door wrote on this machine between the day's midnight and the
+    next (its knocks/moves, the team's acks, the digest receipts), read
+    straight off the transition log with the entity each row belongs to
+    (ref/title/state via the instance join). The drill-down the
+    /processes heatmap cell click serves: the grid says WHERE the door
+    pressed; this says WHAT happened, row by row, in order."""
+    p = await _load_process(db, process_id, owner_id)
+    day_s = str(day or "").strip()
+    try:
+        day_start = datetime.fromisoformat(f"{day_s}T00:00:00+00:00")
+    except ValueError:
+        raise ProcessError(
+            f"day {day_s!r} is not an ISO date (YYYY-MM-DD) - the heatmap "
+            "cells name their day") from None
+    day_end = day_start + timedelta(days=1)
+    q = (select(BusinessProcessTransitionLog, BusinessProcessInstance)
+         .join(BusinessProcessInstance,
+               BusinessProcessInstance.id == BusinessProcessTransitionLog.instance_id)
+         .where(BusinessProcessTransitionLog.process_id == p.id,
+                BusinessProcessTransitionLog.transition.in_(
+                    ESCALATION_HISTORY_TRANSITIONS),
+                BusinessProcessTransitionLog.created_at >= day_start,
+                BusinessProcessTransitionLog.created_at < day_end))
+    rows = (await db.execute(q)).all()
+    counts = {"escalations": 0, "acks": 0, "digests": 0}
+    out: list[dict] = []
+    for log, inst in rows:
+        if log.transition == ACK_TRANSITION:
+            kind = "ack"
+            counts["acks"] += 1
+        elif log.transition == DIGEST_TRANSITION:
+            kind = "digest"
+            counts["digests"] += 1
+        else:
+            kind = "escalation"
+            counts["escalations"] += 1
+        payload = log.payload if isinstance(log.payload, dict) else {}
+        at = _aware(log.created_at)
+        out.append({
+            "at": at.isoformat() if at else None,
+            "transition": log.transition, "kind": kind,
+            "instance_id": log.instance_id,
+            "ref": inst.ref if inst else "", "title": inst.title if inst else "",
+            "state": inst.state if inst else "",
+            "actor": log.actor, "note": (log.note or "")[:200],
+            "attempt": payload.get("attempt"),
+            "overdue_seconds": payload.get("overdue_seconds"),
+            "snooze_until": payload.get("snooze_until"),
+            "reschedule_at": payload.get("reschedule_at"),
+        })
+    out.sort(key=lambda r: r["at"] or "")
+    return {"process_id": p.id, "name": p.name, "day": day_s,
+            "rows": out, "counts": counts, "total": len(out)}

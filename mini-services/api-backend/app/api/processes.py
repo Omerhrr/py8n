@@ -10,6 +10,8 @@ mean time in state, advance counts - all derived).
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..services.business_processes import (
     ProcessError, acknowledge_escalation, advance_instance, annotate_instance,
-    attention_feed, chain_map, create_process, escalation_history_grid,
+    attention_feed, chain_map, create_process, escalation_day_detail,
+    escalation_history_grid,
     escalation_preview, get_instance,
     get_process, list_instances, list_processes, process_analytics,
     start_instance, update_escalation_policy,
@@ -86,12 +89,17 @@ async def attention(limit: int = 200, user=Depends(get_optional_user),
 
 
 @router.get("/chains")
-async def chains(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+async def chains(history_limit: int = 5, user=Depends(get_optional_user),
+                 db: AsyncSession = Depends(get_db)):
     """v95: the owner-wide chain map - the cross-machine journey chains
     derived from what is INSTALLED, each node with its live counts, each
     leg with its ride counts and the recent traversals (the HISTORY the
-    operator-detail chain overlays). Declared BEFORE /{process_id}."""
-    return await chain_map(db, getattr(user, "id", None))
+    operator-detail chain overlays). Declared BEFORE /{process_id}.
+    v96: history_limit stretches the per-leg traversal window beyond the
+    default 5 (clamped 1..50) - deeper chain history for legs that have
+    ridden for months."""
+    return await chain_map(db, getattr(user, "id", None),
+                           history_limit=history_limit)
 
 
 @router.get("/escalation-history")
@@ -104,6 +112,31 @@ async def escalation_history_grid_route(days: int = 14,
     per-machine sparkline lives in the analytics; this is the estate
     wide view beside it). Declared BEFORE /{process_id}."""
     return await escalation_history_grid(db, getattr(user, "id", None), days=days)
+
+
+@router.get("/escalation-history/{process_id}/{day}")
+async def escalation_day(process_id: str, day: str,
+                         user=Depends(get_optional_user),
+                         db: AsyncSession = Depends(get_db)):
+    """v96: ONE heatmap cell, opened - the machine's day. Every escalation
+    row the door wrote on that machine between the day's midnight and the
+    next, with the entity each belongs to: the drill-down the /processes
+    heatmap cell click serves. Declared BEFORE /{process_id} so the
+    literal 'escalation-history' prefix is never eaten as an id; a badly
+    shaped day refuses loud (400) before the process is even loaded
+    (unknown machines hide 404, the same as every other read)."""
+    day_s = str(day or "").strip()
+    try:
+        datetime.fromisoformat(f"{day_s}T00:00:00+00:00")
+    except ValueError:
+        raise HTTPException(status_code=400, detail=(
+            f"day {day_s!r} is not an ISO date (YYYY-MM-DD) - the heatmap "
+            "cells name their day")) from None
+    try:
+        return await escalation_day_detail(db, process_id, day_s,
+                                           getattr(user, "id", None))
+    except ProcessError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/{process_id}")
@@ -266,7 +299,10 @@ async def edit_policy(process_id: str, body: PolicyUpdate,
 class EscalationAck(BaseModel):
     """v88: the human's receipt - a named take of the escalation.
     v89: snooze_hours turns the take into a loan - the door re-knocks
-    once the snooze runs out (omit it to own the rest of the stint)."""
+    once the snooze runs out (omit it to own the rest of the stint).
+    v96: reschedule_in_minutes names the door's next knock EXPLICITLY -
+    a reschedule_at stamp on the receipt; one clock per receipt (both
+    together refuse loud)."""
 
     by: str = Field(..., min_length=1, description="who acknowledged (the receipt's name)")
     note: str = Field(default="", description="the handler's own words")
@@ -274,6 +310,10 @@ class EscalationAck(BaseModel):
         "hold the door quiet for N hours, then it re-knocks on its cadence "
         "(re-acking replaces the loan; omitted = the take owns the rest of "
         "the state stint)"))
+    reschedule_in_minutes: float | None = Field(default=None, ge=0, description=(
+        "v96: re-knock the door at an EXPLICIT moment - now + N minutes "
+        "(the human picked the time, not a duration; mutually exclusive "
+        "with snooze_hours)"))
 
 
 @router.post("/{process_id}/instances/{instance_id}/escalations/ack")
@@ -282,11 +322,13 @@ async def ack_escalation(process_id: str, instance_id: str, body: EscalationAck,
     """v88: acknowledge the instance's escalation episode - the door goes
     quiet (the handler who said 'I have this' owns it); the receipt is on
     the record and business.escalation_acknowledged lands on the
-    correlation thread. v89: snooze_hours re-arms the door after N hours."""
+    correlation thread. v89: snooze_hours re-arms the door after N hours.
+    v96: reschedule_in_minutes re-arms it at an explicit moment."""
     try:
         out = await acknowledge_escalation(
             db, process_id, instance_id, owner_id=getattr(user, "id", None),
-            by=body.by, note=body.note, snooze_hours=body.snooze_hours)
+            by=body.by, note=body.note, snooze_hours=body.snooze_hours,
+            reschedule_in_minutes=body.reschedule_in_minutes)
     except ProcessError as exc:
         raise _http(exc) from exc
     await db.commit()

@@ -419,4 +419,4 @@ def test_v83_install_refusals_and_double_install():
 # ---------------------------------------------------------------------------
 
 def test_v83_version_pin():
-    assert settings.version == "1.95.0"
+    assert settings.version == "1.97.0"

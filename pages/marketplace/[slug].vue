@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   Loader2, CheckCircle2, Download, AlertTriangle, ExternalLink, X, Layers,
   Building2, Video, TrendingUp, HeartPulse, Boxes, LayoutDashboard, GitBranch,
   ArrowLeft, BellRing, ListChecks, Database, Bot, Users, PhoneCall, History,
+  Radio,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -53,7 +54,7 @@ interface OperatorResult {
   notes: string[]
 }
 
-const { api } = useApi()
+const { api, streamUrl } = useApi()
 const route = useRoute()
 const slug = computed(() => String(route.params.slug || ''))
 const loading = ref(true)
@@ -136,14 +137,114 @@ interface LiveHistoryRow {
 interface LiveLeg {
   opened: number; open_now: number; stuck: number
   history: LiveHistoryRow[]
+  history_truncated?: boolean
 }
 const liveLegs = ref<Map<string, LiveLeg>>(new Map())
 const liveNodes = ref<Set<string>>(new Set())
 const liveLoading = ref(false)
 
+// v96: DEEPER chain history - the map's per-leg traversal window
+// stretches beyond the recent 5 (the server clamps 1..50); the toggle
+// re-fetches the map at the deeper depth
+const histDepth = ref(5)
+
 function legKey(from: string, onState: string, opens: string): string {
   return `${(from || '').toLowerCase()}|${(onState || '').toLowerCase()}|${(opens || '').toLowerCase()}`
 }
+
+async function loadChainMap() {
+  liveLoading.value = true
+  try {
+    const map = await api.get<any>(`/processes/chains?history_limit=${histDepth.value}`)
+    liveNodes.value = new Set()
+    liveLegs.value = new Map()
+    for (const [pid, n] of Object.entries<any>(map.nodes || {}))
+      if ((n as any)?.name) liveNodes.value.add((n as any).name.toLowerCase())
+    for (const c of map.chains || [])
+      for (const l of c.legs || [])
+        liveLegs.value.set(legKey(l.from_name, l.on_state, l.to_name),
+          { opened: l.opened || 0, open_now: l.open_now || 0,
+            stuck: l.stuck || 0, history: l.history || [],
+            history_truncated: !!l.history_truncated })
+  } catch { /* shelf-only view is honest too */ }
+  finally { liveLoading.value = false }
+}
+
+async function toggleDepth() {
+  histDepth.value = histDepth.value >= 50 ? 5 : 50
+  await loadChainMap()
+}
+
+// v97: the chain map is LIVE on business.journey_opened - when any
+// machine lands on a fire-state and the handoff opens the next leg, the
+// map re-reads itself (debounced) and the leg that just gained a ride
+// flashes. Same owner-scoped live tail every reactive surface rides
+// since v93 (WS /events/stream); reconnect is exponential like home.
+const liveTail = ref<'connecting' | 'live' | 'reconnecting'>('connecting')
+const flashKey = ref('')
+const lastJourneyNote = ref('')
+let tailWs: WebSocket | null = null
+let tailDelay = 2000
+let tailTimer: ReturnType<typeof setTimeout> | null = null
+let flashTimer: ReturnType<typeof setTimeout> | null = null
+let mapRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+function flashLeg(key: string) {
+  flashKey.value = key
+  if (flashTimer) clearTimeout(flashTimer)
+  flashTimer = setTimeout(() => { flashTimer = null; flashKey.value = '' }, 5000)
+}
+
+function connectTail() {
+  if (tailWs) return
+  try {
+    tailWs = new WebSocket(streamUrl('/api/v1/events/stream'))
+  } catch {
+    liveTail.value = 'reconnecting'
+    scheduleTailReconnect()
+    return
+  }
+  liveTail.value = 'connecting'
+  tailWs.onopen = () => { liveTail.value = 'live'; tailDelay = 2000 }
+  tailWs.onmessage = (m) => {
+    try {
+      const msg = JSON.parse(m.data as string)
+      if (msg?.event !== 'system_event' || msg?.type !== 'business.journey_opened') return
+      const p = msg.payload || {}
+      const target = p.target || {}
+      lastJourneyNote.value =
+        `refreshed by business.journey_opened - ${p.process_name || 'a machine'} landed on ${p.on_state || '?'}` +
+        (target.process_name ? ` · ${target.process_name} opened itself` : '')
+      if (!mapRefreshTimer) {
+        mapRefreshTimer = setTimeout(async () => {
+          mapRefreshTimer = null
+          await loadChainMap()
+        }, 600)
+      }
+      if (p.process_name && p.on_state && target.process_name)
+        flashLeg(legKey(p.process_name, p.on_state, target.process_name))
+    } catch { /* a malformed frame is not worth the page's attention */ }
+  }
+  tailWs.onclose = () => { tailWs = null; liveTail.value = 'reconnecting'; scheduleTailReconnect() }
+  tailWs.onerror = () => { try { tailWs?.close() } catch { /* onclose follows */ } }
+}
+
+function scheduleTailReconnect() {
+  if (tailTimer) return
+  tailTimer = setTimeout(() => {
+    tailTimer = null
+    tailDelay = Math.min(tailDelay * 2, 15000)
+    connectTail()
+  }, tailDelay)
+}
+
+onUnmounted(() => {
+  if (flashTimer) clearTimeout(flashTimer)
+  if (mapRefreshTimer) clearTimeout(mapRefreshTimer)
+  if (tailTimer) clearTimeout(tailTimer)
+  if (tailWs) { try { tailWs.onclose = null; tailWs.close() } catch { /* gone */ } }
+  tailWs = null
+})
 function legLive(leg: ChainLeg): LiveLeg | null {
   return liveLegs.value.get(legKey(leg.from_process, leg.on_state, leg.opens)) || null
 }
@@ -172,18 +273,8 @@ onMounted(async () => {
   }
   // the live overlay is a soft read - an absent/empty map just means the
   // machines are not installed yet (the shelf chain stays the story)
-  liveLoading.value = true
-  try {
-    const map = await api.get<any>('/processes/chains')
-    for (const [pid, n] of Object.entries<any>(map.nodes || {}))
-      if ((n as any)?.name) liveNodes.value.add((n as any).name.toLowerCase())
-    for (const c of map.chains || [])
-      for (const l of c.legs || [])
-        liveLegs.value.set(legKey(l.from_name, l.on_state, l.to_name),
-          { opened: l.opened || 0, open_now: l.open_now || 0,
-            stuck: l.stuck || 0, history: l.history || [] })
-  } catch { /* shelf-only view is honest too */ }
-  finally { liveLoading.value = false }
+  await loadChainMap()
+  connectTail()  // v97: and from here the map moves ITSELF on journey_opened
 })
 </script>
 
@@ -252,6 +343,14 @@ onMounted(async () => {
             <GitBranch class="h-4 w-4 text-fuchsia-400" />
             <h2 class="text-xs font-bold uppercase tracking-widest text-fuchsia-300">The chains</h2>
             <span class="text-[10px] text-zinc-600">the cross-department journeys this operator sits in - install both ends of a leg and the next department's case opens ITSELF</span>
+            <!-- v97: the chain map is LIVE on business.journey_opened -->
+            <span class="flex items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold"
+              :class="liveTail === 'live' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-amber-500/10 text-amber-300'"
+              :title="liveTail === 'live' ? 'the chain map re-reads itself when a handoff opens the next leg' : 'the live tail is down - the depth toggle still re-fetches'">
+              <Radio class="h-2.5 w-2.5" :class="liveTail === 'live' ? 'animate-pulse' : ''" />
+              {{ liveTail === 'live' ? 'live - moves on journey_opened' : liveTail === 'reconnecting' ? 'reconnecting...' : 'connecting...' }}
+            </span>
+            <span v-if="lastJourneyNote" class="w-full text-[10px] text-sky-300/80">{{ lastJourneyNote }}</span>
           </div>
           <div class="space-y-4">
             <div v-for="chain in op.chains" :key="chain.slug" class="rounded-2xl border border-fuchsia-900/50 bg-zinc-900/40 p-4">
@@ -318,13 +417,25 @@ onMounted(async () => {
                 <p class="flex items-center gap-1.5 text-[9px] font-bold uppercase tracking-widest text-zinc-500">
                   <History class="h-3 w-3" /> the history so far
                   <Loader2 v-if="liveLoading" class="h-3 w-3 animate-spin text-zinc-600" />
+                  <!-- v96: deeper history - stretch the traversal window beyond the recent 5 -->
+                  <button class="rounded-full border border-zinc-700 px-2 py-0.5 text-[9px] font-bold normal-case tracking-normal transition"
+                    :class="histDepth >= 50 ? 'border-fuchsia-500/60 text-fuchsia-300' : 'text-zinc-400 hover:border-fuchsia-500/60 hover:text-fuchsia-300'"
+                    :title="histDepth >= 50 ? 'back to the 5 most recent rides' : 'load rides beyond the recent 5 (up to 50 per leg)'"
+                    @click="toggleDepth">
+                    {{ histDepth >= 50 ? 'depth 50 · deeper' : 'depth 5 · go deeper' }}
+                  </button>
                 </p>
                 <div v-for="leg in chain.legs" :key="`hist-${leg.from_process}-${leg.on_state}`" class="mt-1.5">
-                  <div v-if="legLive(leg)" class="text-[10px]">
+                  <div v-if="legLive(leg)" class="text-[10px] rounded-xl transition"
+                    :class="flashKey === legKey(leg.from_process, leg.on_state, leg.opens) ? 'ring-1 ring-fuchsia-400/70 bg-fuchsia-500/5 px-2 py-1.5' : ''">
+                    <span v-if="flashKey === legKey(leg.from_process, leg.on_state, leg.opens)" class="float-right rounded-full bg-fuchsia-500/20 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300">just opened</span>
                     <p class="text-zinc-500">
                       <span class="font-semibold text-zinc-400">{{ leg.from_process }} --{{ leg.on_state }}--> {{ leg.opens }}</span>:
                       {{ legLive(leg)!.opened }} opened · {{ legLive(leg)!.open_now }} still moving
                       <span v-if="legLive(leg)!.stuck" class="font-bold text-rose-400">· {{ legLive(leg)!.stuck }} past SLA</span>
+                    </p>
+                    <p v-if="legLive(leg)!.history_truncated" class="text-[9px] text-amber-400/80">
+                      showing the {{ legLive(leg)!.history.length }} most recent of {{ legLive(leg)!.opened }} rides - switch the depth to go deeper
                     </p>
                     <div v-if="legLive(leg)!.history.length" class="mt-1 space-y-0.5">
                       <div v-for="hrow in legLive(leg)!.history" :key="hrow.instance_id"

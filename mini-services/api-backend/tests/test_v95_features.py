@@ -264,4 +264,4 @@ def test_v95_escalation_history_grid():
 # ---------------------------------------------------------------------------
 
 def test_v95_version_pin():
-    assert settings.version == "1.95.0"
+    assert settings.version == "1.97.0"

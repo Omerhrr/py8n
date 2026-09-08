@@ -65,7 +65,8 @@ interface AttentionRow {
   due_at: string | null; overdue_seconds: number
   age_in_state_seconds: number
   escalation: { count: number; last_delivery: string; last_detail: string
-    acked_by: string; snooze_until: string } | null
+    acked_by: string; snooze_until: string
+    reschedule_at?: string; reschedule_remaining_seconds?: number } | null
   escalation_summary: string
   journey_leg: boolean
 }
@@ -195,6 +196,7 @@ const attAckForId = ref('')
 const attAckBy = ref('')
 const attAckNote = ref('')
 const attAckSnooze = ref('')
+const attAckReschedule = ref('')  // v96: minutes - the door's next knock at an explicit moment
 const attAcking = ref(false)
 const attAckError = ref('')
 
@@ -203,6 +205,7 @@ function openAttAck(row: AttentionRow) {
   attAckBy.value = ''
   attAckNote.value = ''
   attAckSnooze.value = ''
+  attAckReschedule.value = ''
   attAckError.value = ''
 }
 
@@ -214,7 +217,8 @@ async function ackFromAttention(row: AttentionRow) {
     await api.post(
       `/processes/${row.process_id}/instances/${row.instance_id}/escalations/ack`,
       { by: attAckBy.value.trim(), note: attAckNote.value.trim(),
-        snooze_hours: attAckSnooze.value.trim() ? Number(attAckSnooze.value) : null })
+        snooze_hours: attAckSnooze.value.trim() ? Number(attAckSnooze.value) : null,
+        reschedule_in_minutes: attAckReschedule.value.trim() ? Number(attAckReschedule.value) : null })
     attAckForId.value = ''
     await loadAttention()  // the row stays on the feed wearing the ack chip
     if (selected.value?.id === row.process_id) await refreshAll()
@@ -728,6 +732,53 @@ function heatCellTitle(name: string, iso: string, cell: HeatCell): string {
   return `${name} · ${iso} - ${cell.escalations} escalation(s) · ${cell.acks} ack(s) · ${cell.digests} digest item(s)`
 }
 
+// v96: the drill-down - ONE heatmap cell opened: the machine's DAY,
+// row by row off the transition log (knocks, acks, digest receipts)
+interface DayRow {
+  at: string | null; transition: string; kind: string
+  instance_id: string; ref: string; title: string; state: string
+  actor: string; note: string; attempt: number | null
+  overdue_seconds: number | null; snooze_until: string | null
+  reschedule_at: string | null
+}
+interface DayDetail {
+  process_id: string; name: string; day: string; rows: DayRow[]
+  counts: { escalations: number; acks: number; digests: number }; total: number
+}
+const drillKey = ref('')  // `${process_id}|${day}` of the open cell ('' = closed)
+const drill = ref<DayDetail | null>(null)
+const drillLoading = ref(false)
+const drillError = ref('')
+
+async function openDrill(m: HeatMachine, day: string) {
+  const key = `${m.process_id}|${day}`
+  if (drillKey.value === key) { drillKey.value = ''; drill.value = null; return }
+  drillKey.value = key
+  drillLoading.value = true
+  drillError.value = ''
+  drill.value = null
+  try {
+    drill.value = await api.get<DayDetail>(
+      `/processes/escalation-history/${m.process_id}/${day}`)
+  } catch (e: any) {
+    drillError.value = e?.data?.detail || e?.message || 'Could not open the machine\'s day'
+  } finally {
+    drillLoading.value = false
+  }
+}
+
+function drillKindClass(kind: string): string {
+  if (kind === 'ack') return 'bg-emerald-500/15 text-emerald-300'
+  if (kind === 'digest') return 'bg-violet-500/15 text-violet-300'
+  return 'bg-amber-500/15 text-amber-300'
+}
+
+function drillAt(iso: string | null): string {
+  if (!iso) return ''
+  try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }
+  catch { return iso }
+}
+
 onMounted(async () => {
   try {
     const res = await api.get<{ processes: ProcessDef[] }>('/processes')
@@ -803,6 +854,7 @@ onMounted(async () => {
               </span>
               <span v-if="row.escalation?.acked_by" class="rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300" :title="`acknowledged by ${row.escalation.acked_by}`"><CheckCheck class="mr-0.5 inline h-2.5 w-2.5" /> ack</span>
               <span v-if="row.escalation?.snooze_until" class="rounded-full bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-bold text-sky-300" :title="`the door re-knocks after ${row.escalation.snooze_until}`">snoozed</span>
+              <span v-if="row.escalation?.reschedule_at && (row.escalation.reschedule_remaining_seconds || 0) > 0" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" :title="`the door re-knocks at ${row.escalation.reschedule_at}`"><Clock class="mr-0.5 inline h-2.5 w-2.5" /> rescheduled · {{ fmtAge(row.escalation.reschedule_remaining_seconds || 0) }}</span>
               <span v-if="row.escalation && !row.escalation.acked_by && row.escalation.last_delivery === 'digest'" class="rounded-full bg-fuchsia-500/15 px-1.5 py-0.5 text-[9px] font-bold text-fuchsia-300" title="listed in the escalation digest">digest ×{{ row.escalation.count }}</span>
               <span v-else-if="row.escalation && !row.escalation.acked_by" class="rounded-full bg-indigo-500/15 px-1.5 py-0.5 text-[9px] font-bold text-indigo-300" :title="row.escalation.last_detail || row.escalation.last_delivery">escalated ×{{ row.escalation.count }}</span>
               <span v-if="row.journey_leg" class="rounded-full bg-fuchsia-500/10 px-1.5 py-0.5 text-[9px] font-semibold text-fuchsia-300" title="this entity opened itself from another department's hand-off">journey leg</span>
@@ -821,6 +873,7 @@ onMounted(async () => {
               <input v-model="attAckBy" placeholder="acknowledged by" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
               <input v-model="attAckNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
               <input v-model="attAckSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
+              <input v-model="attAckReschedule" type="number" min="0" step="5" placeholder="reschedule in min" class="w-32 rounded-lg border border-fuchsia-500/30 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-fuchsia-500/60" title="v96: re-knock the door at an EXPLICIT moment - now + N minutes (the human picks the time; leave empty if you set snooze hrs - one clock per receipt)" />
               <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="attAcking || !attAckBy.trim()" @click="ackFromAttention(row)">
                 <Loader2 v-if="attAcking" class="h-3 w-3 animate-spin" /> Acknowledge
               </button>
@@ -837,7 +890,7 @@ onMounted(async () => {
           <div class="flex items-center gap-2">
             <Flame class="h-3.5 w-3.5 text-amber-400" />
             <h2 class="text-xs font-bold uppercase tracking-wide text-zinc-300">Escalation heatmap</h2>
-            <span class="text-[10px] text-zinc-500">the door's pressure across machines, last 14 days - hover a cell for the counts</span>
+            <span class="text-[10px] text-zinc-500">the door's pressure across machines, last 14 days - hover a cell for the counts, click one to drill into the machine's day</span>
           </div>
           <div class="flex items-center gap-2">
             <span class="flex items-center gap-1 text-[9px] text-zinc-600">
@@ -877,8 +930,10 @@ onMounted(async () => {
               <tr v-for="m in heatData.machines" :key="m.process_id">
                 <td class="max-w-48 truncate px-2 py-1 text-[11px] font-bold text-zinc-300" :title="m.name">{{ m.name }}</td>
                 <td v-for="d in heatData.days" :key="d" class="px-0.5 py-0.5 text-center">
-                  <div class="mx-auto flex h-6 w-7 items-center justify-center rounded text-[9px] font-bold"
-                    :class="heatCellClass(m.cells[d])" :title="heatCellTitle(m.name, d, m.cells[d])">
+                  <div class="mx-auto flex h-6 w-7 cursor-pointer items-center justify-center rounded text-[9px] font-bold transition hover:scale-110"
+                    :class="[heatCellClass(m.cells[d]), drillKey === `${m.process_id}|${d}` ? 'ring-2 ring-cyan-400/80' : '']"
+                    :title="heatCellTitle(m.name, d, m.cells[d])"
+                    @click="openDrill(m, d)">
                     <span v-if="m.cells[d].escalations || m.cells[d].acks || m.cells[d].digests">
                       {{ m.cells[d].escalations + m.cells[d].acks + m.cells[d].digests }}
                     </span>
@@ -894,6 +949,36 @@ onMounted(async () => {
               </tr>
             </tbody>
           </table>
+        </div>
+        <!-- v96: the drill-down - the open cell's machine-day, row by row -->
+        <div v-if="drillKey" class="mt-3 rounded-xl border border-cyan-500/30 bg-cyan-500/5 px-3 py-2.5">
+          <div class="flex flex-wrap items-center gap-2">
+            <p class="text-[10px] font-bold uppercase tracking-widest text-cyan-300">
+              {{ drill?.name || 'machine' }} · {{ drillKey.split('|')[1] }} - the day, row by row
+            </p>
+            <span v-if="drill" class="text-[9.5px] text-zinc-500">{{ drill.total }} row{{ drill.total === 1 ? '' : 's' }}: {{ drill.counts.escalations }} esc · {{ drill.counts.acks }} ack · {{ drill.counts.digests }} dig</span>
+            <button class="ml-auto rounded-lg border border-zinc-700 px-2 py-0.5 text-[10px] font-bold text-zinc-400 transition hover:text-zinc-200" @click="drillKey = ''; drill = null">close</button>
+          </div>
+          <Loader2 v-if="drillLoading" class="mt-2 h-3 w-3 animate-spin text-zinc-600" />
+          <p v-else-if="drillError" class="mt-1 text-[10px] text-rose-300">{{ drillError }}</p>
+          <template v-else-if="drill">
+            <p v-if="!drill.rows.length" class="mt-1.5 text-[10px] text-zinc-600">The door was quiet on this machine that day - nothing to drill into.</p>
+            <div v-else class="mt-1.5 space-y-1">
+              <div v-for="(r, i) in drill.rows" :key="`${r.instance_id}-${r.transition}-${i}`"
+                class="flex flex-wrap items-center gap-x-2 gap-y-0.5 rounded-lg border border-zinc-800/70 bg-zinc-950/50 px-2 py-1 text-[9.5px]">
+                <span class="rounded px-1.5 py-0.5 font-bold capitalize" :class="drillKindClass(r.kind)">{{ r.kind }}</span>
+                <span class="font-mono text-zinc-300">{{ drillAt(r.at) }}</span>
+                <span class="font-semibold text-zinc-200">{{ r.ref }}</span>
+                <span class="truncate text-zinc-500">{{ r.title }}</span>
+                <span class="rounded bg-zinc-800 px-1 py-0.5 text-zinc-400">{{ r.state }}</span>
+                <span v-if="r.attempt" class="text-zinc-500">attempt {{ r.attempt }}</span>
+                <span v-if="r.overdue_seconds" class="text-rose-400/80">+{{ fmtAge(Number(r.overdue_seconds)) }} past SLA</span>
+                <span v-if="r.snooze_until" class="text-sky-300/80" :title="r.snooze_until">snooze → {{ r.snooze_until.slice(0, 16).replace('T', ' ') }}</span>
+                <span v-if="r.reschedule_at" class="text-fuchsia-300/90" :title="r.reschedule_at">rescheduled → {{ r.reschedule_at.slice(0, 16).replace('T', ' ') }}</span>
+                <span v-if="r.actor" class="ml-auto text-zinc-600">by {{ r.actor }}</span>
+              </div>
+            </div>
+          </template>
         </div>
       </div>
 

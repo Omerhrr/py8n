@@ -288,7 +288,10 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
     this" owns it). v89: an ack that carried snooze_hours holds only
     until the snooze runs out - the door RE-KNOCKS on its cadence, the
     attempt count continuing inside the same episode (and its cap).
-    Past 1 + max_repeats the episode is complete; before
+    v96: an ack that carried a RESCHEDULE holds until the named
+    reschedule_at passes (the human picked the moment, not a duration;
+    the reschedule stamp outranks a snooze stamp when both somehow
+    exist). Past 1 + max_repeats the episode is complete; before
     repeat_every_seconds has elapsed since the last attempt the door
     holds (too_soon)."""
     now = _aware(now) or _now()
@@ -296,20 +299,27 @@ def episode_gate(instance: BusinessProcessInstance, policy: dict,
     fresh = book.get("state") != instance.state
     count = 0 if fresh else int(book.get("count") or 0)
     # the human's acknowledgement outranks the cadence and the cap -
-    # until the snooze runs out (v89: the hold is a loan, not a pardon)
+    # until the loan runs out (v89 snooze / v96 reschedule: the hold is
+    # a loan, not a pardon)
     if not fresh and isinstance(book.get("acked"), dict):
         acked = book["acked"]
-        until = _parse_iso(acked.get("snooze_until"))
+        reschedule_at = _parse_iso(acked.get("reschedule_at"))
+        until = reschedule_at or _parse_iso(acked.get("snooze_until"))
         if until is None or now < until:
             hold = {"action": "hold", "reason": "acknowledged",
                     "attempts": count,
                     "acked_by": str(acked.get("by") or "")}
             if until is not None:
-                hold["snooze_until"] = until.isoformat()
-                hold["snooze_remaining_seconds"] = round(
-                    (until - now).total_seconds())
+                if reschedule_at is not None:
+                    hold["reschedule_at"] = until.isoformat()
+                    hold["reschedule_remaining_seconds"] = round(
+                        (until - now).total_seconds())
+                else:
+                    hold["snooze_until"] = until.isoformat()
+                    hold["snooze_remaining_seconds"] = round(
+                        (until - now).total_seconds())
             return hold
-        # the snooze ran out - fall through: the door re-knocks
+        # the loan ran out - fall through: the door re-knocks
     if count >= 1 + policy["max_repeats"]:
         return {"action": "hold", "reason": "episode_complete", "attempts": count}
     last = _parse_iso(book.get("last_at")) if not fresh else None
@@ -337,6 +347,14 @@ def record_episode(db: AsyncSession, instance: BusinessProcessInstance,
              "last_detail": (delivery.get("detail") or "")[:300]}
     if acked:
         entry["acked"] = acked
+    # v96, found live: a knock-mode attempt must not wipe the digest
+    # anchors either - a machine whose policy switches knock -> digest
+    # mid-episode keeps its window through the knocks that came before
+    if book.get("state") == instance.state:
+        if book.get("first_at"):
+            entry["first_at"] = book["first_at"]
+        if book.get("digest_last_at"):
+            entry["digest_last_at"] = book["digest_last_at"]
     new_ctx = dict(instance.context or {})
     new_ctx["escalations"] = entry
     instance.context = new_ctx
@@ -346,6 +364,7 @@ def record_episode(db: AsyncSession, instance: BusinessProcessInstance,
 def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
                *, by: str, note: str = "",
                snooze_hours: float | None = None,
+               reschedule_in_minutes: float | None = None,
                now: datetime | None = None) -> dict:
     """v88: write the acknowledgement onto the episode's bookkeeping -
     the door reads it through episode_gate and holds the episode. The
@@ -353,7 +372,13 @@ def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
 
     v89: snooze_hours turns the hold into a LOAN - the ack carries a
     snooze_until stamp and the door re-knocks once it runs out (an ack
-    without one still owns the rest of the stint)."""
+    without one still owns the rest of the stint).
+
+    v96: reschedule_in_minutes names the door's next knock EXPLICITLY -
+    the receipt carries a reschedule_at stamp and the door re-knocks
+    when it passes (the human picked the time, not a duration). One
+    clock per receipt: the caller hands snooze_hours OR a reschedule,
+    never both - the service layer refuses that loudly."""
     now = _aware(now) or _now()
     ack = {"by": (by or "").strip()[:140], "at": now.isoformat(),
            "note": (note or "").strip()[:500]}
@@ -361,6 +386,10 @@ def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
         hours = max(0.0, float(snooze_hours))
         ack["snooze_hours"] = round(hours, 4)
         ack["snooze_until"] = (now + timedelta(hours=hours)).isoformat()
+    if reschedule_in_minutes is not None:
+        minutes = max(0.0, float(reschedule_in_minutes))
+        ack["reschedule_in_minutes"] = round(minutes, 4)
+        ack["reschedule_at"] = (now + timedelta(minutes=minutes)).isoformat()
     book = episode_book(instance)
     entry = {"count": int(book.get("count") or 0),
              "last_at": book.get("last_at"),
@@ -370,6 +399,15 @@ def record_ack(db: AsyncSession, instance: BusinessProcessInstance,
              "acked": ack}
     if entry["last_at"] is None:
         entry.pop("last_at")
+    # v96, found live by the reschedule round: the receipt must NOT wipe
+    # the digest clock the item's window rides on - an acked digest item
+    # whose loan expires re-enters the bucket on the SAME window (and the
+    # SAME cap count), not a freshly anchored one
+    if book.get("state") == instance.state:
+        if book.get("first_at"):
+            entry["first_at"] = book["first_at"]
+        if book.get("digest_last_at"):
+            entry["digest_last_at"] = book["digest_last_at"]
     new_ctx = dict(instance.context or {})
     new_ctx["escalations"] = entry
     instance.context = new_ctx
@@ -487,7 +525,8 @@ def digest_gate(instance: BusinessProcessInstance, policy: dict,
 
     * hold (acknowledged): the human's take holds, snooze and all (the
       same loan semantics as knock mode - an expired snooze falls back
-      into the bucket);
+      into the bucket); v96: a RESCHEDULED take holds until the named
+      reschedule_at passes, then the item rides the next digest;
     * hold (episode_complete): the item has appeared in 1 + max_repeats
       digests - the team was told, repeatedly;
     * candidate otherwise, with ``pending_since`` - the moment the
@@ -513,17 +552,23 @@ def digest_gate(instance: BusinessProcessInstance, policy: dict,
     # receipt rides the same episode - the switch does not un-take it).
     if not state_fresh and isinstance(book.get("acked"), dict):
         acked = book["acked"]
-        until = _parse_iso(acked.get("snooze_until"))
+        reschedule_at = _parse_iso(acked.get("reschedule_at"))
+        until = reschedule_at or _parse_iso(acked.get("snooze_until"))
         if until is None or now < until:
             hold = {"action": "hold", "reason": "acknowledged",
                     "attempts": count,
                     "acked_by": str(acked.get("by") or "")}
             if until is not None:
-                hold["snooze_until"] = until.isoformat()
-                hold["snooze_remaining_seconds"] = round(
-                    (until - now).total_seconds())
+                if reschedule_at is not None:
+                    hold["reschedule_at"] = until.isoformat()
+                    hold["reschedule_remaining_seconds"] = round(
+                        (until - now).total_seconds())
+                else:
+                    hold["snooze_until"] = until.isoformat()
+                    hold["snooze_remaining_seconds"] = round(
+                        (until - now).total_seconds())
             return hold
-        # the snooze ran out - the item rides the next digest
+        # the loan ran out - the item rides the next digest
     # v91: ``fresh`` is about the DIGEST clock, not just the state - the
     # anchor the window rides on is first_at, and an item switching from
     # knock mode mid-episode has a book WITHOUT one (its knocks kept
@@ -558,9 +603,16 @@ def record_digest_book(db: AsyncSession, instance: BusinessProcessInstance,
     is stamped when a digest actually lists the item; an ack rides along."""
     now = _aware(now) or _now()
     book = episode_book(instance)
+    # v96, found live: a digest send re-using the same state stint carries
+    # the ORIGINAL anchor forward - re-stamping first_at here would slide
+    # the window every time a digest lists the item (the book stores the
+    # stamp as an isoformat STRING - parse it before re-using it)
+    prior_first = None
+    if book.get("state") == instance.state and book.get("first_at"):
+        prior_first = _parse_iso(book["first_at"])
     entry = {"count": int(count),
              "state": instance.state,
-             "first_at": (first_at or now).isoformat()}
+             "first_at": (first_at or prior_first or now).isoformat()}
     if digest_last_at is not None:
         entry["digest_last_at"] = digest_last_at.isoformat()
     elif book.get("state") == instance.state and book.get("digest_last_at"):
@@ -577,9 +629,47 @@ def record_digest_book(db: AsyncSession, instance: BusinessProcessInstance,
     db.add(instance)
 
 
+def reschedule_note(book: dict, now: datetime) -> str:
+    """v97: the digest line's reschedule evidence. A stuck item riding a
+    digest may carry a receipt the human left on it - a reschedule (the
+    door's next knock was moved to an explicit moment), a snooze loan, or
+    a plain take. The summary says so, past or future tense, with WHO and
+    WHEN - the digest is not just a list of overdue rows, it is the
+    door's ledger of what the team already did about them. Empty string
+    when the item carries no loan (the line stays exactly as v89 drew it)."""
+    ack = book.get("acked") if isinstance(book.get("acked"), dict) else None
+    if not ack:
+        return ""
+    by = str(ack.get("by") or "someone")
+    res_at = _parse_iso(ack.get("reschedule_at"))
+    if res_at is not None:
+        stamp = res_at.strftime("%Y-%m-%d %H:%M UTC")
+        if res_at > now:
+            return f" (rescheduled to {stamp} by {by} - the door re-knocks then)"
+        return f" (rescheduled to {stamp} by {by} - the door re-knocked)"
+    snooze = _parse_iso(ack.get("snooze_until"))
+    if snooze is not None:
+        stamp = snooze.strftime("%Y-%m-%d %H:%M UTC")
+        if snooze > now:
+            return f" (snoozed by {by} until {stamp})"
+        return f" (snoozed by {by} - the snooze ran out, the door re-knocked)"
+    return f" (taken by {by})"
+
+
 def render_digest(*, process_name: str, items: list[dict]) -> str:
-    """The one summary that replaces the N knocks - a line per stuck item."""
-    body = "\n".join(DIGEST_ITEM_TEMPLATE.format(**it) for it in items)
+    """The one summary that replaces the N knocks - a line per stuck item.
+    v97: an item may carry ``reschedule_note`` - the evidence of what the
+    team already did about it (the reschedule/snooze receipt the door
+    holds) - appended to the line; items without one render exactly as
+    v89 drew them."""
+    lines = []
+    for it in items:
+        line = DIGEST_ITEM_TEMPLATE.format(**it)
+        note = it.get("reschedule_note")
+        if note:
+            line = f"{line}{note}"
+        lines.append(line)
+    body = "\n".join(lines)
     try:
         return DIGEST_TEMPLATE.format(count=len(items), process=process_name,
                                       items=body)
