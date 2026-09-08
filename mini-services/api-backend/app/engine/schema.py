@@ -29,7 +29,7 @@ class Position(BaseModel):
 
 
 class NodeSettings(BaseModel):
-    """Per-node resilience knobs (n8n-parity error handling)."""
+    """Per-node resilience knobs (error handling)."""
 
     retry_on_fail: bool = Field(default=False, description="Retry the node when it raises")
     max_retries: int = Field(default=2, ge=1, le=5, description="Extra attempts when retry_on_fail is on")
@@ -74,10 +74,10 @@ class NodeSpec(BaseModel):
     position: Position = Field(default_factory=Position)
     parameters: dict[str, Any] = Field(default_factory=dict)
     settings: NodeSettings = Field(default_factory=NodeSettings)
-    # n8n-style node disable: the node is skipped but its active input is
+    # node disable: the node is skipped but its active input is
     # passed through untouched so downstream nodes keep working.
     disabled: bool = Field(default=False, description="Skip execution, pass input through")
-    # v17 n8n-style pinned output: when honored (manual runs + test step) the
+    # v17 pinned output: when honored (manual runs + test step) the
     # node returns this data WITHOUT executing - mock data for building.
     # Webhook/schedule/error runs always execute for real. None = not pinned.
     pinned_data: Any = Field(

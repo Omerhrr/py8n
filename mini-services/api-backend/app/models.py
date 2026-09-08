@@ -1,7 +1,7 @@
 """SQLAlchemy ORM models: workflows, execution logs, credentials.
 
 Graphs are stored as JSON (JSONB on PostgreSQL via variant) so the visual
-canvas document maps 1:1 to a database row - the same design used by n8n.
+canvas document maps 1:1 to a database row - one graph, one row.
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ class Workflow(Base):
     # The visual graph document: {"nodes": [...], "edges": [...]}
     graph: Mapped[dict] = mapped_column(JSONVariant, default=dict)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)  # enables triggers
-    # n8n-style error workflow: dispatched with a structured payload when an
+    # Error-workflow routing: dispatched with a structured payload when an
     # execution of this workflow ends in an unhandled error (v8).
     error_workflow_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     # Organizational folder (v16) - plain id validated in the API layer (same
@@ -1826,3 +1826,51 @@ class ChainReportSchedule(Base):
                                                      default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class SystemDeployment(Base):
+    """The deployed identity of a system (v102) - the commercial bridge.
+
+    The thesis this table serves: a company should feel "this is OUR
+    operations system", not "we are using a workflow tool". One row per
+    system (unique ``system_id``) carrying the four facts a deployed
+    system needs to present itself:
+
+    * ``domain``       - the custom hostname the system answers on
+      (normalized lowercase, globally unique, reserved names refused);
+      the public identity resolver turns this back into the system.
+    * ``environment``  - staging | production (a label the estate wears,
+      honestly - the sandbox has one runtime, pretending otherwise
+      would be a lie).
+    * ``status``       - offline | live | paused, moved only by the loud
+      verbs (deploy / pause / retire) that write the operations log.
+    * ``branding``     - the login surface's own voice (accent color,
+      tagline, login headline, logo glyph) - what users see before they
+      authenticate.
+
+    The system's USERS and ROLES are NOT stored here: ``system_members``
+    (v62) already owns membership (owner / editor / viewer), and the
+    deployment rides it - "system-specific login" is the platform login
+    resolved against the domain's system, with the member's role in the
+    answer. ``url`` is derived at read time (https:// + domain), never
+    stored, so it can never drift from the domain.
+    """
+
+    __tablename__ = "system_deployments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    system_id: Mapped[str] = mapped_column(
+        ForeignKey("py8n_systems.id", ondelete="CASCADE"),
+        nullable=False, unique=True, index=True)
+    domain: Mapped[str | None] = mapped_column(String(253), nullable=True,
+                                               unique=True, index=True)
+    environment: Mapped[str] = mapped_column(String(20), nullable=False,
+                                             default="staging")
+    status: Mapped[str] = mapped_column(String(20), nullable=False,
+                                        default="offline")
+    branding: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    deployed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True),
+                                                         nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now,
+                                                 onupdate=_now)

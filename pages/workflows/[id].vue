@@ -131,7 +131,7 @@ function pasteSelection() {
     return {
       ...JSON.parse(JSON.stringify(s)),
       id,
-      name: `${s.name || s.type} copy`, // n8n-style suffix; keeps run logs readable
+      name: `${s.name || s.type} copy`, // numbered-copy suffix; keeps run logs readable
       position: { x: (s.position?.x ?? 0) + 48, y: (s.position?.y ?? 0) + 48 },
     }
   })

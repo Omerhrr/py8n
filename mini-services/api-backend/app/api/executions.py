@@ -223,7 +223,7 @@ async def cancel_execution_endpoint(
 
 @router.post("/{execution_id}/rerun", status_code=202)
 async def rerun_execution(execution_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
-    """Re-execute the workflow with the recorded trigger payload (n8n-style retry).
+    """Re-execute the workflow with the recorded trigger payload (a re-run).
 
     Runs against the *current* workflow graph; returns the new execution id.
     """

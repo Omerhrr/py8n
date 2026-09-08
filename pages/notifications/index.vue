@@ -237,7 +237,7 @@ function fmtDate(iso: string | null) {
         <BellRing class="mb-3 h-8 w-8 text-zinc-700" />
         <p class="text-sm font-medium text-zinc-400">No notification rules yet</p>
         <p class="mt-1 max-w-md text-xs text-zinc-600">
-          Create a rule to ping Slack, Discord, n8n or your own endpoint the moment a run fails or finishes.
+          Create a rule to ping Slack, Discord, a webhook or your own endpoint the moment a run fails or finishes.
         </p>
       </div>
 

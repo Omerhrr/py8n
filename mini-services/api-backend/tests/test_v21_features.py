@@ -1,6 +1,6 @@
 """V21 feature tests: Respond to Webhook node.
 
-Covers the n8n respond-early pattern: a webhook run with response_mode=
+Covers the respond-early pattern: a webhook run with response_mode=
 "respond_node" waits until a respond_to_webhook node answers with a custom
 status/body, the flow KEEPS running downstream after answering, JSON and
 plain-text bodies, first-respond-wins semantics, flows that finish without

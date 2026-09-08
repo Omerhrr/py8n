@@ -1,4 +1,4 @@
-"""V17 feature tests: pinned node data (n8n-style mock outputs) + test step.
+"""V17 feature tests: pinned node data (mock outputs) + test step.
 
 Covers: pinned_data persistence through the graph schema (save → GET round
 trip), pin honoring semantics (manual runs + sub-workflows of manual runs +

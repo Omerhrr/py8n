@@ -1,6 +1,6 @@
 """Respond to Webhook - releases the waiting HTTP caller mid-flow.
 
-n8n-parity node (v21). In a webhook-triggered workflow whose Webhook Trigger
+Respond-early node (v21). In a webhook-triggered workflow whose Webhook Trigger
 uses ``response_mode="respond_node"``, this node answers the inbound HTTP
 request with a custom status code + body while the flow continues running
 downstream. Anywhere else (manual runs, schedules, other webhook modes) there
@@ -81,5 +81,5 @@ class RespondToWebhookNode(BaseNode):
 
         await context.respond_channel(status, payload, p.content_type)
         # Pass the incoming payload through so downstream nodes keep running -
-        # answering early does not end the flow (n8n semantics).
+        # answering early does not end the flow.
         return self._single(context.current_input)

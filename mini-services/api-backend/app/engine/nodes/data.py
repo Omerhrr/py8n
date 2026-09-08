@@ -4,7 +4,7 @@ Unpivot, Cast Columns, Handle Nulls, Data Quality and Analyze.
 
 Convention: nodes that work over lists look for an ``items`` array in the
 incoming payload; if absent, the payload itself is treated as a single item.
-This mirrors n8n's item model while staying JSON-friendly.
+The item model stays JSON-friendly end to end.
 
 The v45 nodes use pandas internally but speak the SAME item model at their
 edges: dicts in, dicts out (NaN → null via services.datasets.jsonable_rows),

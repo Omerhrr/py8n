@@ -1049,7 +1049,7 @@ def main() -> None:
     print("v16 folders OK")
 
     # ------------------------------------------------------------- v17 wave
-    # Pinned output data + single-node test step (n8n-style building loop).
+    # Pinned output data + single-node test step (the manual building loop).
     print("== v17 pins: pin -> manual honors -> webhook ignores -> test step ==")
     uniq17 = uuid.uuid4().hex[:8]
     status, health = req("GET", "/health")

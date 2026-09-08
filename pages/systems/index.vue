@@ -5,6 +5,7 @@ import {
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
   Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video, GitBranch,
+  Globe, Undo2, CheckCheck, ExternalLink, Server,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -202,7 +203,7 @@ async function upgrade() {
     const added = (res.added?.workflow || 0) + (res.added?.dataset || 0)
     runtimeNote.value = res.imports_skipped
       ? 'upgrade: everything the solution offers is already bound - nothing changed'
-      : `upgrade: ${added} new component(s) bound${res.same_name_left_untouched?.length ? `, ${res.same_name_left_untouched.length} same-name object(s) left unbound` : ''}`
+      : `upgrade: ${added} new component(s) bound${res.same_name_left_untouched?.length ? `, ${res.same_name_left_untouched.length} same-name object(s) left unbound` : ''} - accept or roll it back below`
     await openDetail(detail.value.id)
   } catch (e: any) {
     runtimeNote.value = ''
@@ -218,6 +219,149 @@ async function loadSystems() {
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load systems'
   }
+}
+
+// ---- v102: the estate health overview - "is my business actually healthy?" ----
+interface HealthRow {
+  id: string; name: string; icon: string; color: string
+  lifecycle: string; status: string
+  success_rate_7d: number | null; runs_7d: number
+  failed_workflows_7d: number; overdue: number; escalations: number
+  deployment: { domain: string; url: string; environment: string; status: string } | null
+}
+interface HealthOverview {
+  systems: HealthRow[]; counts: { running: number; attention: number; hold: number }
+  total: number; generated_at: string
+}
+const healthOverview = ref<HealthOverview | null>(null)
+const healthLoading = ref(false)
+const healthOpen = ref(true)
+
+const healthStatusMeta: Record<string, { dot: string; label: string }> = {
+  running: { dot: 'bg-emerald-400', label: 'Running' },
+  attention: { dot: 'bg-amber-400 animate-pulse', label: 'Attention' },
+  hold: { dot: 'bg-zinc-500', label: 'Hold' },
+}
+
+async function loadHealth() {
+  healthLoading.value = true
+  try {
+    healthOverview.value = await api.get<HealthOverview>('/systems/health/overview')
+  } catch { healthOverview.value = null } finally { healthLoading.value = false }
+}
+
+// ---- v102: the deployed-system identity - domain, environment, branding ----
+interface Deployment {
+  system_id: string; domain: string; url: string; environment: string; status: string
+  branding: { accent?: string; tagline?: string; login_headline?: string; logo?: string }
+  deployed_at: string | null; updated_at: string | null
+}
+const deployment = ref<Deployment | null>(null)
+const deployDomain = ref('')
+const deployEnvironment = ref('staging')
+const deployAccent = ref('')
+const deployTagline = ref('')
+const deployHeadline = ref('')
+const deployLogo = ref('')
+const deployBusy = ref(false)
+const deployNote = ref('')
+
+const deployStatusMeta: Record<string, { chip: string; label: string }> = {
+  offline: { chip: 'bg-zinc-500/15 text-zinc-400', label: 'offline' },
+  live: { chip: 'bg-emerald-500/15 text-emerald-300', label: 'live' },
+  paused: { chip: 'bg-amber-500/15 text-amber-300', label: 'paused' },
+}
+
+function _syncDeployForm(dep: Deployment | null) {
+  deployment.value = dep
+  deployDomain.value = dep?.domain || ''
+  deployEnvironment.value = dep?.environment || 'staging'
+  deployAccent.value = dep?.branding?.accent || ''
+  deployTagline.value = dep?.branding?.tagline || ''
+  deployHeadline.value = dep?.branding?.login_headline || ''
+  deployLogo.value = dep?.branding?.logo || ''
+}
+
+async function loadDeployment(id: string) {
+  try {
+    const res = await api.get<any>(`/systems/${id}/deployment`)
+    _syncDeployForm(res.deployment || null)
+  } catch { _syncDeployForm(null) }
+}
+
+async function saveDeployment() {
+  if (!detail.value) return
+  deployBusy.value = true
+  deployNote.value = ''
+  try {
+    const branding: Record<string, string> = {}
+    if (deployAccent.value.trim()) branding.accent = deployAccent.value.trim()
+    if (deployTagline.value.trim()) branding.tagline = deployTagline.value.trim()
+    if (deployHeadline.value.trim()) branding.login_headline = deployHeadline.value.trim()
+    if (deployLogo.value.trim()) branding.logo = deployLogo.value.trim()
+    const res = await api.put<any>(`/systems/${detail.value.id}/deployment`, {
+      domain: deployDomain.value.trim(),
+      environment: deployEnvironment.value,
+      branding,
+    })
+    _syncDeployForm(res.deployment)
+    deployNote.value = 'deployment identity saved'
+    await loadHealth()
+  } catch (e: any) {
+    deployNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || 'Could not save the deployment'
+  } finally { deployBusy.value = false }
+}
+
+async function deploymentVerb(verb: string) {
+  if (!detail.value) return
+  deployBusy.value = true
+  deployNote.value = ''
+  try {
+    const res = await api.post<any>(`/systems/${detail.value.id}/deployment/${verb}`, {})
+    _syncDeployForm(res.deployment)
+    deployNote.value = verb === 'deploy'
+      ? `live at ${res.deployment.url || '(no domain set)'}`
+      : `deployment is ${res.deployment.status}`
+    await loadHealth()
+  } catch (e: any) {
+    deployNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || `Could not ${verb}`
+  } finally { deployBusy.value = false }
+}
+
+// ---- v102: the update lifecycle - preview -> apply -> accept / rollback ----
+interface UpdatePreview {
+  updatable: boolean; path: string; solution?: string; operator?: string
+  adds?: { workflow: string[]; dataset: string[] }
+  already_bound?: { workflow: number; dataset: number }
+  idempotent?: boolean
+  pending: { operation_id: string; added_refs: Record<string, { id: string; name: string }[]>; created_at: string | null } | null
+  note: string
+}
+const updatePreview = ref<UpdatePreview | null>(null)
+const updateBusy = ref(false)
+
+async function loadUpdatePreview(id: string) {
+  try {
+    updatePreview.value = await api.get<UpdatePreview>(`/systems/${id}/update/preview`)
+  } catch { updatePreview.value = null }
+}
+
+async function ruleOnUpdate(verb: 'accept' | 'rollback') {
+  if (!detail.value) return
+  updateBusy.value = true
+  runtimeNote.value = ''
+  try {
+    const res = await api.post<any>(`/systems/${detail.value.id}/update/${verb}`, {})
+    runtimeNote.value = verb === 'accept'
+      ? 'update accepted - the changes are settled history'
+      : `update rolled back - ${res.unbound?.length ?? 0} binding(s) removed`
+    await openDetail(detail.value.id)
+  } catch (e: any) {
+    runtimeNote.value = ''
+    pageError.value = e?.data?.detail || e?.message || `Could not ${verb} the update`
+  } finally { updateBusy.value = false }
 }
 
 async function loadTemplates() {
@@ -242,6 +386,8 @@ async function openDetail(id: string) {
     const m = await api.get<any>(`/systems/${id}/members`)
     members.value = m.members || []
     await loadRuntime(id)
+    // v102: the deployment identity + the update lifecycle ride the drawer
+    await Promise.all([loadDeployment(id), loadUpdatePreview(id)])
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'Could not load the system'
   } finally {
@@ -518,7 +664,7 @@ function ackAge(title: string, until: string): string {
 }
 
 onMounted(async () => {
-  await Promise.all([loadSystems(), loadTemplates(), loadDeps()])
+  await Promise.all([loadSystems(), loadTemplates(), loadDeps(), loadHealth()])
   loading.value = false
 })
 </script>
@@ -548,6 +694,50 @@ onMounted(async () => {
     <main class="mx-auto max-w-7xl px-4 py-6 sm:px-6">
       <div v-if="pageError" class="mb-4 flex items-start gap-2 rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-300">
         <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" /> {{ pageError }}
+      </div>
+
+      <!-- ============ v102: SYSTEM HEALTH - the estate at a glance ============ -->
+      <div v-if="!detail && healthOverview" class="mb-8 rounded-2xl border border-zinc-800/80 bg-zinc-900/40 p-4">
+        <div class="mb-3 flex flex-wrap items-center gap-2">
+          <Activity class="h-4 w-4 text-emerald-300" />
+          <h2 class="text-xs font-bold uppercase tracking-wide text-zinc-300">System health</h2>
+          <span class="text-[10px] text-zinc-600">derived from what the estate already keeps - never stored, never a lie</span>
+          <span class="ml-auto flex items-center gap-2 text-[10px] text-zinc-500">
+            <span class="rounded-full bg-emerald-500/10 px-2 py-0.5 text-emerald-300">{{ healthOverview.counts.running }} running</span>
+            <span class="rounded-full bg-amber-500/10 px-2 py-0.5 text-amber-300">{{ healthOverview.counts.attention }} attention</span>
+            <span class="rounded-full bg-zinc-500/10 px-2 py-0.5">{{ healthOverview.counts.hold }} hold</span>
+            <button class="rounded-lg border border-zinc-700 p-1 transition hover:bg-zinc-800" title="refresh" @click="loadHealth">
+              <Loader2 v-if="healthLoading" class="h-3 w-3 animate-spin" />
+              <RefreshCw v-else class="h-3 w-3" />
+            </button>
+          </span>
+        </div>
+        <div class="space-y-1">
+          <div v-for="row in healthOverview.systems" :key="row.id"
+            class="flex cursor-pointer flex-wrap items-center gap-x-4 gap-y-1 rounded-xl px-3 py-2 text-xs transition hover:bg-zinc-800/50"
+            @click="openDetail(row.id)">
+            <span class="flex w-36 min-w-0 items-center gap-2">
+              <span class="h-2 w-2 shrink-0 rounded-full" :class="healthStatusMeta[row.status]?.dot || 'bg-zinc-500'" />
+              <span class="truncate font-bold">{{ row.name }}</span>
+            </span>
+            <span class="w-20 shrink-0 font-bold" :class="row.status === 'attention' ? 'text-amber-300' : row.status === 'running' ? 'text-emerald-300' : 'text-zinc-400'">
+              {{ healthStatusMeta[row.status]?.label || row.status }}
+            </span>
+            <span class="w-32 shrink-0 text-zinc-400">
+              <template v-if="row.success_rate_7d !== null">{{ row.success_rate_7d }}% successful</template>
+              <template v-else><span class="text-zinc-600">no runs yet</span></template>
+            </span>
+            <span class="w-24 shrink-0" :class="row.overdue ? 'text-rose-300' : 'text-zinc-500'">{{ row.overdue }} overdue</span>
+            <span class="w-32 shrink-0" :class="row.failed_workflows_7d ? 'text-rose-300' : 'text-zinc-500'">{{ row.failed_workflows_7d }} failed workflow{{ row.failed_workflows_7d === 1 ? '' : 's' }}</span>
+            <span class="w-24 shrink-0" :class="row.escalations ? 'text-amber-300' : 'text-zinc-500'">{{ row.escalations }} escalation{{ row.escalations === 1 ? '' : 's' }}</span>
+            <span v-if="row.deployment" class="ml-auto flex items-center gap-1 text-[10px] text-zinc-500">
+              <Globe class="h-3 w-3" /> {{ row.deployment.domain || '(no domain)' }}
+              <span class="rounded-full px-1.5 py-0.5 text-[9px] font-bold" :class="deployStatusMeta[row.deployment.status]?.chip">{{ row.deployment.status }}</span>
+              <span class="rounded-full bg-zinc-800 px-1.5 py-0.5 text-[9px] font-bold text-zinc-400">{{ row.deployment.environment }}</span>
+            </span>
+          </div>
+          <p v-if="!healthOverview.systems.length" class="px-3 py-2 text-[11px] text-zinc-600">No systems yet - create one and its row appears here.</p>
+        </div>
       </div>
 
       <div v-if="loading" class="grid place-items-center py-16 text-zinc-600">
@@ -803,6 +993,125 @@ onMounted(async () => {
               <div class="rounded-xl bg-zinc-900/60 px-3 py-2">
                 <p class="text-zinc-500">last operation</p>
                 <p class="text-sm font-bold">{{ runtimeState.last_operation_verb || 'none' }} <span v-if="runtimeState.last_operation_at" class="text-[10px] font-normal text-zinc-500">{{ new Date(runtimeState.last_operation_at).toLocaleString() }}</span></p>
+              </div>
+            </div>
+          </div>
+
+          <!-- v102: the deployed identity - this system as something a company calls THEIRS -->
+          <div class="mb-5 rounded-2xl border border-sky-500/25 bg-sky-500/5 p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <Globe class="h-3.5 w-3.5 text-sky-300" />
+              <h3 class="text-xs font-bold text-sky-200">Deployment</h3>
+              <span class="text-[10px] text-zinc-500">the custom domain this system answers on, the environment it wears, the face it shows before login</span>
+              <span v-if="deployment" class="ml-auto flex items-center gap-1.5">
+                <span class="rounded-full px-2 py-0.5 text-[10px] font-bold uppercase" :class="deployStatusMeta[deployment.status]?.chip">{{ deployStatusMeta[deployment.status]?.label || deployment.status }}</span>
+                <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-bold text-zinc-300">{{ deployment.environment }}</span>
+              </span>
+            </div>
+
+            <div v-if="deployment" class="mt-3 flex flex-wrap items-center gap-2 text-[11px]">
+              <span v-if="deployment.url" class="flex items-center gap-1 rounded-xl bg-zinc-900/70 px-3 py-1.5 font-mono text-sky-300">
+                <ExternalLink class="h-3 w-3" /> {{ deployment.url }}
+              </span>
+              <span v-else class="text-zinc-500">no custom domain set - the system answers only inside the estate</span>
+              <span v-if="deployment.deployed_at" class="text-zinc-600">live since {{ new Date(deployment.deployed_at).toLocaleString() }}</span>
+            </div>
+
+            <div v-if="canEdit" class="mt-3 grid gap-2 sm:grid-cols-2">
+              <label class="text-[10px] text-zinc-500">
+                custom domain
+                <input v-model="deployDomain" placeholder="ops.acme.com"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60" />
+              </label>
+              <label class="text-[10px] text-zinc-500">
+                environment
+                <select v-model="deployEnvironment"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60">
+                  <option value="staging">staging</option>
+                  <option value="production">production</option>
+                </select>
+              </label>
+              <label class="text-[10px] text-zinc-500">
+                login headline
+                <input v-model="deployHeadline" placeholder="Acme Operations"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60" />
+              </label>
+              <label class="text-[10px] text-zinc-500">
+                tagline
+                <input v-model="deployTagline" placeholder="The system that runs our revenue"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60" />
+              </label>
+              <label class="text-[10px] text-zinc-500">
+                accent color (hex)
+                <input v-model="deployAccent" placeholder="#38bdf8"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60" />
+              </label>
+              <label class="text-[10px] text-zinc-500">
+                logo glyph
+                <input v-model="deployLogo" placeholder="boxes"
+                  class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-sky-500/60" />
+              </label>
+            </div>
+            <p v-else class="mt-3 text-[10px] text-zinc-500">Only editors can change the deployment identity.</p>
+
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <template v-if="canEdit">
+                <button class="flex items-center gap-1 rounded-xl bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-sky-400 disabled:opacity-50" :disabled="deployBusy" @click="saveDeployment">
+                  <Loader2 v-if="deployBusy" class="h-3 w-3 animate-spin" /> <Server class="h-3 w-3" /> Save identity
+                </button>
+                <button v-if="!deployment || deployment.status === 'offline' || deployment.status === 'paused'"
+                  class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('deploy')">
+                  <Rocket class="h-3 w-3" /> Deploy
+                </button>
+                <button v-if="deployment?.status === 'live'"
+                  class="flex items-center gap-1 rounded-xl border border-amber-500/40 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('pause')">
+                  <Pause class="h-3 w-3" /> Pause surface
+                </button>
+                <button v-if="deployment && deployment.status !== 'offline'"
+                  class="flex items-center gap-1 rounded-xl border border-zinc-700 px-3 py-1.5 text-[11px] font-bold text-zinc-300 transition hover:bg-zinc-800 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('retire')">
+                  <Square class="h-3 w-3" /> Retire
+                </button>
+              </template>
+              <span class="text-[10px] text-zinc-600">who can use this system is the membership list above - owner / editor / viewer ride the deployed surface too</span>
+            </div>
+            <p v-if="deployNote" class="mt-2 rounded-xl bg-zinc-900/70 px-3 py-2 text-[11px] text-sky-300">{{ deployNote }}</p>
+          </div>
+
+          <!-- v102: the update lifecycle - what changes, then accept or roll it back -->
+          <div v-if="updatePreview" class="mb-5 rounded-2xl border border-violet-500/25 bg-violet-500/5 p-4">
+            <div class="flex flex-wrap items-center gap-2">
+              <RefreshCw class="h-3.5 w-3.5 text-violet-300" />
+              <h3 class="text-xs font-bold text-violet-200">Updates</h3>
+              <span class="text-[10px] text-zinc-500">what an upgrade would change, answered before anything moves</span>
+            </div>
+
+            <p class="mt-2 text-[11px] text-zinc-400">{{ updatePreview.note }}</p>
+
+            <div v-if="updatePreview.updatable && updatePreview.adds" class="mt-2 flex flex-wrap gap-1.5">
+              <span v-for="name in updatePreview.adds.workflow" :key="`w-${name}`" class="rounded-full bg-orange-500/10 px-2 py-0.5 text-[10px] font-bold text-orange-300">+ workflow: {{ name }}</span>
+              <span v-for="name in updatePreview.adds.dataset" :key="`d-${name}`" class="rounded-full bg-lime-500/10 px-2 py-0.5 text-[10px] font-bold text-lime-300">+ dataset: {{ name }}</span>
+              <span v-if="updatePreview.idempotent" class="rounded-full bg-zinc-500/10 px-2 py-0.5 text-[10px] font-bold text-zinc-400">nothing new - already up to date</span>
+              <span v-else-if="updatePreview.already_bound && (updatePreview.already_bound.workflow + updatePreview.already_bound.dataset)" class="rounded-full bg-zinc-500/10 px-2 py-0.5 text-[10px] font-bold text-zinc-400">
+                {{ updatePreview.already_bound.workflow + updatePreview.already_bound.dataset }} already bound
+              </span>
+            </div>
+
+            <!-- the pending changeset: applied, waiting for a human's ruling -->
+            <div v-if="updatePreview.pending" class="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+              <p class="text-[11px] font-bold text-amber-200">Upgrade applied {{ updatePreview.pending.created_at ? `on ${new Date(updatePreview.pending.created_at).toLocaleString()}` : '' }} - waiting for your ruling</p>
+              <div class="mt-1 flex flex-wrap gap-1.5">
+                <span v-for="(items, kind) in updatePreview.pending.added_refs" :key="kind">
+                  <span v-for="item in items" :key="item.id" class="rounded-full bg-amber-500/10 px-2 py-0.5 text-[10px] font-bold text-amber-300">+ {{ kind }}: {{ item.name }}</span>
+                </span>
+              </div>
+              <div v-if="canEdit" class="mt-2 flex gap-2">
+                <button class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="updateBusy" @click="ruleOnUpdate('accept')">
+                  <CheckCheck class="h-3 w-3" /> Accept
+                </button>
+                <button class="flex items-center gap-1 rounded-xl border border-rose-500/40 px-3 py-1.5 text-[11px] font-bold text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-50" :disabled="updateBusy" title="unbind exactly what the upgrade bound - the imported objects stay in the estate, unbound">
+                  <Loader2 v-if="updateBusy" class="h-3 w-3 animate-spin" />
+                  <Undo2 v-else class="h-3 w-3" /> Roll back
+                </button>
               </div>
             </div>
           </div>

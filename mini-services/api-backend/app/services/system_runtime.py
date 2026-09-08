@@ -248,6 +248,191 @@ async def install_mark(db: AsyncSession, system: Py8nSystem, *, solution_slug: s
     return {"operation_id": op.id, "event": event}
 
 
+# ---------------------------------------------------------------------------
+# v102: the update lifecycle - preview -> apply -> see changes -> accept/rollback
+# ---------------------------------------------------------------------------
+
+def _origin_of(name: str, origins: list[str]) -> str | None:
+    """The pack origin of a bound name - "faq 2" traces back to "faq"
+    (dataset names are globally unique; the install that came second
+    owns the numbered copy, but the ORIGIN is already provided)."""
+    if name in origins:
+        return name
+    for o in origins:
+        if o and name.startswith(o + " "):
+            return o
+    return None
+
+
+async def pack_reconcile_plan(db: AsyncSession, system: Py8nSystem,
+                              pack: dict) -> dict:
+    """The shared pre-scan behind preview AND upgrade (zero drift): what
+    the pack offers vs what the system already binds. Pure read - the
+    preview endpoint answers from this and so does the upgrade itself,
+    so "what will change" and "what changed" can never disagree."""
+    pack_wf_names = [str(w.get("name") or "").strip() for w in pack.get("workflows", [])]
+    pack_ds_names = [str(d.get("name") or "").strip() for d in pack.get("datasets", [])]
+
+    # resolve the names of what the system already binds
+    from ..models import Dataset as _DS
+    from ..models import Workflow as _WF
+    bound_wf_names: set[str] = set()
+    bound_ds_names: set[str] = set()
+    for kind, model, acc in (("workflow", _WF, bound_wf_names), ("dataset", _DS, bound_ds_names)):
+        ref_ids = [c.ref_id for c in system.components or [] if c.kind == kind]
+        if ref_ids:
+            rows = (await db.execute(select(model).where(model.id.in_(ref_ids)))).scalars().all()
+            acc.update(r.name for r in rows if r is not None)
+
+    wf_missing = [n for n in pack_wf_names if n and n not in bound_wf_names]
+    # dataset names are globally unique - normalize every bound name back
+    # to its pack origin before the missing check (same rule as ever)
+    bound_ds_origins = {_origin_of(n, pack_ds_names) or n for n in bound_ds_names}
+    ds_missing = [n for n in pack_ds_names if n and n not in bound_ds_origins]
+    return {
+        "pack_workflows": pack_wf_names,
+        "pack_datasets": pack_ds_names,
+        "wf_missing": wf_missing,
+        "ds_missing": ds_missing,
+    }
+
+
+async def last_update_operation(db: AsyncSession, system: Py8nSystem) -> SystemOperation | None:
+    """The most recent op of the upgrade trail (upgraded / accepted /
+    rolled back) - the update lifecycle reads the trail, it invents
+    nothing."""
+    return (
+        await db.execute(
+            select(SystemOperation)
+            .where(SystemOperation.system_id == system.id,
+                   SystemOperation.verb.in_(("upgraded", "upgrade_accepted",
+                                             "upgrade_rolled_back")))
+            .order_by(SystemOperation.created_at.desc(), SystemOperation.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def pending_update(db: AsyncSession, system: Py8nSystem) -> dict | None:
+    """The changes an UPGRADE put on the table that no human has ruled on
+    yet: the latest trail op is an ``upgraded`` that actually ADDED
+    bindings. Everything else (idempotent upgrade, accepted, rolled
+    back) is settled history."""
+    op = await last_update_operation(db, system)
+    if op is None or op.verb != "upgraded":
+        return None
+    added_refs = (op.detail or {}).get("added_refs") or {}
+    if not any(added_refs.values()):
+        return None
+    return {
+        "operation_id": op.id,
+        "added_refs": added_refs,
+        "created_at": _iso(op.created_at),
+    }
+
+
+async def preview_update(db: AsyncSession, system: Py8nSystem) -> dict:
+    """"What's going to change if I upgrade?" - answered WITHOUT touching
+    anything. The same reconcile plan the upgrade runs, read-only; the
+    pending changeset (an applied-but-unruled upgrade) rides along so
+    the surface can offer Accept / Rollback in the same breath."""
+    slug = system.source_solution_slug
+    pending = await pending_update(db, system)
+    if not slug:
+        return {
+            "updatable": False, "path": "none", "pending": pending,
+            "note": ("this system was not installed from a solution or operator - "
+                     "it was built by hand, so there is no pack to update from"),
+        }
+    if slug.startswith("operator:"):
+        operator = slug.split(":", 1)[1]
+        return {
+            "updatable": False, "path": "operator_reinstall", "operator": operator,
+            "pending": pending,
+            "note": (f"this system was installed from the OPERATOR {operator!r} - "
+                     "operators upgrade by reinstalling from the operators shelf "
+                     "(a re-install builds a fresh system; components are never "
+                     "swapped under a running one)"),
+        }
+    sol = (await db.execute(select(Solution).where(Solution.slug == slug))).scalar_one_or_none()
+    if sol is None:
+        return {
+            "updatable": False, "path": "solution", "solution": slug,
+            "pending": pending,
+            "note": f"solution {slug!r} no longer exists - there is nothing to update from",
+        }
+    plan = await pack_reconcile_plan(db, system, sol.pack_json or {})
+    wf_missing, ds_missing = plan["wf_missing"], plan["ds_missing"]
+    pack_wf, pack_ds = plan["pack_workflows"], plan["pack_datasets"]
+    adds = {"workflow": wf_missing, "dataset": ds_missing}
+    already = {
+        "workflow": max(0, len([n for n in pack_wf if n]) - len(wf_missing)),
+        "dataset": max(0, len([n for n in pack_ds if n]) - len(ds_missing)),
+    }
+    idempotent = not wf_missing and not ds_missing
+    return {
+        "updatable": True, "path": "solution", "solution": slug,
+        "adds": adds, "already_bound": already, "idempotent": idempotent,
+        "pending": pending,
+        "note": ("everything the solution's pack offers is already bound - "
+                 "re-applying would change nothing" if idempotent else
+                 "re-applying the pack binds the new objects; same-name "
+                 "objects are never rewritten under a running system"),
+    }
+
+
+async def accept_update(db: AsyncSession, system: Py8nSystem, *,
+                        actor: str = "") -> dict:
+    """Rule on a pending upgrade: the changes are accepted and become
+    settled history (the audit trail says WHO accepted)."""
+    pending = await pending_update(db, system)
+    if pending is None:
+        raise SystemRuntimeError(
+            "nothing to accept - there is no applied-but-unruled upgrade here")
+    detail = {"upgrade_operation_id": pending["operation_id"],
+              "accepted": pending["added_refs"]}
+    op = await record_operation(db, system, "upgrade_accepted", actor or "system", detail)
+    event = await _emit_system_event(db, system, "system.update_accepted", {
+        "operation_id": op.id, "upgrade_operation_id": pending["operation_id"],
+    })
+    return {"accepted": True, "upgrade_operation_id": pending["operation_id"],
+            "operation_id": op.id, "event": event}
+
+
+async def rollback_update(db: AsyncSession, system: Py8nSystem, *,
+                          actor: str = "") -> dict:
+    """Undo a pending upgrade: unbind exactly what it bound. The imported
+    objects themselves stay in the estate, unbound (they may hold data;
+    deleting them is the owner's separate, explicit call) - the system
+    returns to the shape it had before the upgrade."""
+    pending = await pending_update(db, system)
+    if pending is None:
+        raise SystemRuntimeError(
+            "nothing to roll back - there is no applied-but-unruled upgrade here")
+    unbound: list[dict] = []
+    existing = {(c.kind, c.ref_id): c for c in system.components or []}
+    for kind, refs in (pending["added_refs"] or {}).items():
+        for item in refs or []:
+            ref_id = item.get("id") if isinstance(item, dict) else item
+            comp = existing.get((kind, ref_id))
+            if comp is not None:
+                await db.delete(comp)
+                unbound.append({"kind": kind, "ref_id": ref_id,
+                                "name": item.get("name") if isinstance(item, dict) else None})
+    await db.flush()
+    detail = {"upgrade_operation_id": pending["operation_id"], "unbound": unbound,
+              "note": ("the imported objects stay in the estate, unbound - "
+                       "retire them separately if nobody wants them")}
+    op = await record_operation(db, system, "upgrade_rolled_back", actor or "system", detail)
+    event = await _emit_system_event(db, system, "system.update_rolled_back", {
+        "operation_id": op.id, "upgrade_operation_id": pending["operation_id"],
+        "unbound": len(unbound),
+    })
+    return {"rolled_back": True, "unbound": unbound,
+            "upgrade_operation_id": pending["operation_id"],
+            "operation_id": op.id, "event": event}
+
+
 async def upgrade_from_solution(db: AsyncSession, system: Py8nSystem, *,
                                 actor: str = "") -> dict:
     """Re-apply the source solution's pack and reconcile the components.
@@ -274,34 +459,13 @@ async def upgrade_from_solution(db: AsyncSession, system: Py8nSystem, *,
         raise SystemRuntimeError(f"solution {slug!r} no longer exists - cannot upgrade")
 
     pack = sol.pack_json or {}
-    pack_wf_names = [str(w.get("name") or "").strip() for w in pack.get("workflows", [])]
-    pack_ds_names = [str(d.get("name") or "").strip() for d in pack.get("datasets", [])]
-
-    # resolve the names of what the system already binds
-    from ..models import Dataset as _DS
-    from ..models import Workflow as _WF
-    bound_wf_names: set[str] = set()
-    bound_ds_names: set[str] = set()
-    for kind, model, acc in (("workflow", _WF, bound_wf_names), ("dataset", _DS, bound_ds_names)):
-        ref_ids = [c.ref_id for c in system.components or [] if c.kind == kind]
-        if ref_ids:
-            rows = (await db.execute(select(model).where(model.id.in_(ref_ids)))).scalars().all()
-            acc.update(r.name for r in rows if r is not None)
-
-    wf_missing = [n for n in pack_wf_names if n and n not in bound_wf_names]
-    # dataset names are globally unique - the install that came second owns
-    # "faq 2", but the ORIGIN the pack offers is already provided. Normalize
-    # every bound name back to its pack origin before the missing check.
-    def _origin_of(name: str, origins: list[str]) -> str | None:
-        if name in origins:
-            return name
-        for o in origins:
-            if o and name.startswith(o + " "):
-                return o
-        return None
-
-    bound_ds_origins = {_origin_of(n, pack_ds_names) or n for n in bound_ds_names}
-    ds_missing = [n for n in pack_ds_names if n and n not in bound_ds_origins]
+    # the SHARED pre-scan (the preview endpoint answers from the very
+    # same plan - "what will change" and "what changed" never disagree)
+    plan = await pack_reconcile_plan(db, system, pack)
+    pack_wf_names = plan["pack_workflows"]
+    pack_ds_names = plan["pack_datasets"]
+    wf_missing = plan["wf_missing"]
+    ds_missing = plan["ds_missing"]
     existing = {(c.kind, c.ref_id) for c in system.components or []}
 
     system.upgraded_at = _now()

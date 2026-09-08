@@ -1,7 +1,7 @@
 """Sticky Note - canvas annotation node (v19).
 
 Rendered as a colored sticky on the canvas and persisted inside the graph
-(like n8n notes), but it is NOT part of the execution vocabulary: it is
+(a canvas annotation), but it is NOT part of the execution vocabulary: it is
 hidden from the node palette / definitions API and, if wired into a flow
 anyway, simply passes its input through untouched.
 """

@@ -276,7 +276,7 @@ async def execute_workflow(
     # ------------------------------------------------------------
     # Error-workflow routing: an unhandled failure can dispatch a
     # dedicated handler workflow with a structured error payload
-    # (n8n "Error workflow"). Guards: never re-route an error-handler
+    # (the error-workflow route). Guards: never re-route an error-handler
     # run (trigger_type == "error") and never bind a workflow to itself.
     # ------------------------------------------------------------
     if result["status"] == "error" and trigger_type != "error":
@@ -315,7 +315,7 @@ async def resume_workflow(execution_id: str, token: str, payload: Any = None) ->
 
     Validates the token, rebuilds a GraphRunner from the persisted state and
     finishes the run in a background task (the execution row is updated in
-    place - same execution id, n8n-style continuation).
+    place - same execution id, resumable continuation).
     """
     import json as _json
 

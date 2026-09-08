@@ -53,10 +53,12 @@ from ..services.py8n_systems import (
     COMPONENT_KINDS,
     KIND_TABLES,
     architecture_layers,
+    health_overview,
     resolve_component,
     system_health,
     system_summary,
 )
+from ..services import system_deployment as deploy_svc
 from ..services.solutions import finalize_pack_dataset_names
 from ..services import system_runtime
 from ..services.operators import chains_for_system  # v93: the chains LIVE on the installed system
@@ -111,6 +113,16 @@ class LifecycleAction(BaseModel):
     something on start: turn every bound workflow's is_active ON (the loud,
     on-the-record door for pack installs that land inactive)."""
     activate_workflows: bool = Field(default=False)
+
+
+class DeploymentPut(BaseModel):
+    """v102: create-or-patch the system's deployment identity. An empty
+    ``domain`` string CLEARS the custom domain (a real move); omit the
+    field to leave it untouched. Branding only patches the keys present."""
+    domain: str | None = Field(default=None, max_length=253,
+                               description="custom hostname; empty string clears it")
+    environment: str | None = Field(default=None, description="staging | production")
+    branding: dict | None = Field(default=None, description="accent | tagline | login_headline | logo")
 
 
 async def _get_system(db: AsyncSession, system_id: str, user, min_role: str = "viewer") -> tuple[Py8nSystem, str]:
@@ -202,6 +214,17 @@ async def dependencies(system_id: str = "", user=Depends(get_optional_user), db:
     model flows between the systems you can read. Derived, never stored."""
     graph = await deps_svc.dependency_graph(db, user, system_id=system_id or None)
     return graph
+
+
+# ------------------------------------------------------------------ v102
+# the estate health overview - "is my business actually healthy?"
+@router.get("/health/overview")
+async def estate_health(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """One row per visible system: the status dot (running / attention /
+    hold), the 7d success rate, overdue instances, failed workflows and
+    open escalations - composed from what the platform already keeps,
+    nothing stored. The deployment identity rides each row."""
+    return await health_overview(db, user)
 
 
 # ------------------------------------------------------------------ core
@@ -431,6 +454,89 @@ async def upgrade(system_id: str, user=Depends(get_optional_user), db: AsyncSess
             db, s, actor=getattr(user, "id", None) or "system")
     except system_runtime.SystemRuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    return result
+
+
+# ------------------------------------------------------------------ v102
+# the deployed-system identity - the commercial bridge
+
+@router.get("/{system_id}/deployment")
+async def get_deployment(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """The system's deployment identity (domain, environment, status,
+    branding) - null when the system was never deployed."""
+    s, _role = await _get_system(db, system_id, user)
+    row = await deploy_svc.get_deployment(db, s.id)
+    return {"deployment": deploy_svc.deployment_out(row)}
+
+
+@router.put("/{system_id}/deployment")
+async def put_deployment(system_id: str, body: DeploymentPut,
+                         user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Create-or-patch the deployment record: the custom domain (empty
+    string clears it), the environment, the branding. Every change lands
+    in the operations log."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        row = await deploy_svc.upsert_deployment(
+            db, s, domain=body.domain, environment=body.environment,
+            branding=body.branding, actor=getattr(user, "id", None) or "system")
+    except deploy_svc.DeploymentError as exc:
+        status = 409 if "already answers" in str(exc) else 400
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return {"deployment": deploy_svc.deployment_out(row)}
+
+
+@router.post("/{system_id}/deployment/{verb}")
+async def deployment_verb(system_id: str, verb: str,
+                          user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Move the deployment status - deploy (offline/paused -> live),
+    pause (live -> paused), retire (-> offline). Loud verbs only: every
+    move writes the operations log and emits on the system's thread."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        row = await deploy_svc.apply_verb(db, s, verb, actor=getattr(user, "id", None) or "system")
+    except deploy_svc.DeploymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    await db.commit()
+    await db.refresh(row)
+    return {"deployment": deploy_svc.deployment_out(row)}
+
+
+# v102: the update lifecycle - preview -> apply -> see changes -> accept/rollback
+
+@router.get("/{system_id}/update/preview")
+async def update_preview(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """"What's going to change if I upgrade this system?" - the shared
+    reconcile plan read-only, plus any applied-but-unruled changeset
+    (pending) the Accept / Rollback verbs rule on."""
+    s, _role = await _get_system(db, system_id, user)
+    return await system_runtime.preview_update(db, s)
+
+
+@router.post("/{system_id}/update/accept")
+async def update_accept(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Accept a pending upgrade - the changes become settled history."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        result = await system_runtime.accept_update(db, s, actor=getattr(user, "id", None) or "system")
+    except system_runtime.SystemRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await db.commit()
+    return result
+
+
+@router.post("/{system_id}/update/rollback")
+async def update_rollback(system_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Roll a pending upgrade back - unbind exactly what it bound; the
+    imported objects stay in the estate, unbound."""
+    s, _role = await _get_system(db, system_id, user, min_role="editor")
+    try:
+        result = await system_runtime.rollback_update(db, s, actor=getattr(user, "id", None) or "system")
+    except system_runtime.SystemRuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     await db.commit()
     return result
 

@@ -1,4 +1,4 @@
-"""Loop Over Items node - per-batch downstream execution (n8n SplitInBatches parity).
+"""Loop Over Items node - per-batch downstream execution.
 
 Design
 ======

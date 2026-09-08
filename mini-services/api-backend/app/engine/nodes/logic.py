@@ -211,7 +211,7 @@ def _json_dumps(value: Any) -> str:  # small helper kept for future nodes
 class StopAndErrorNode(BaseNode):
     """Fails the run deliberately with a custom message (v22).
 
-    n8n's "Stop and Error": turns data-level validation failures into real
+    Stop and Error: turns data-level validation failures into real
     run failures so error workflows fire and the UI shows a red run. The
     message is a Jinja template, so upstream values can be embedded.
     """

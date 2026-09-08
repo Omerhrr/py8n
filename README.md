@@ -1,102 +1,73 @@
-# 🐍 Py8n - a Python-native n8n
+# Py8n - the Python-native business operations platform
 
-**Visual workflow automation, rebuilt on Python.** Drag nodes on a canvas, wire
-them up, and Py8n evaluates the graph with `graphlib.TopologicalSorter`, a
-Jinja2-templated execution context and a Pydantic-validated node registry -
-then streams live progress back to the browser over WebSockets.
+**Build a system, deploy it, and run a part of your business on it.**
+
+Py8n is not a workflow tool with a bigger canvas. The unit the platform
+exists for is the **System**: a named, owned, health-scored operating
+unit that binds the workflows, datasets, apps, dashboards, models and
+business machines that belong together - and can then be DEPLOYED with
+its own domain, its own branding, its own users and its own production
+environment. A company using Py8n should feel "this is our operations
+system", not "we are using an automation tool".
+
+```
+customer.com  →  Py8n  →  System  →  Application  →  Users  →  Business operations
+```
+
+The full arc, in order:
+
+1. **Build** - workflows on a visual canvas (a Pydantic-validated node
+   registry evaluated with `graphlib.TopologicalSorter` and a
+   Jinja2-templated context), datasets with contracts and health, apps
+   and dashboards on top.
+2. **Operate** - business machines (state machines with SLAs, overdue
+   tracking, an escalation door that knocks / digests / accepts
+   acknowledgements), the three pre-wired operators (Revenue, Supply,
+   Care) and their journey chains, all visible live on the installed
+   system.
+3. **Deploy** - a system gets a deployment identity: custom domain,
+   staging/production, a loud status machine (offline → live → paused),
+   the branding its login surface shows, and the users/roles that ride
+   the v62 membership (owner / editor / viewer).
+4. **Watch** - the estate health overview answers "is my business
+   actually healthy?" per system: status dot, success rate, overdue,
+   failed workflows, open escalations.
+5. **Update** - the update lifecycle answers "what's going to change if
+   I upgrade?" BEFORE anything moves, then every applied upgrade waits
+   for a human ruling: accept (settled history) or roll back (unbind
+   exactly what it bound).
+
+## The platform, layer by layer
+
+| Layer | What it gives you |
+|---|---|
+| Workflows | 68 node types, generated config forms, expressions, sandboxed Python, error workflows, pinned test outputs |
+| Datasets | Parquet-backed tables, contracts + revisions, profiling, freshness/volume/quality health scores |
+| Business machines | State machines with SLAs (`due_at`), transition audit logs, overdue-attention feed, ack/snooze/reschedule |
+| Escalations | Per-machine policies (channel + repeat), knock or digest modes, on-call rotation, real email/SMS/Slack delivery |
+| Systems | The operating unit: components, lifecycle gate (start/pause/stop), operations log, events, roles |
+| Operators & marketplace | Pre-wired business operators, marketplace solutions that install as systems, chain views with live counts |
+| Deployments | Custom domains, environments, branding, the public identity door, deployment status on the record |
+| Estate health | Per-system status, success rates, overdue and escalation counters - derived, never stored |
+| Reporting | Scheduled chain-history CSV reports, multi-recipient envelopes, hourly/daily/weekly rhythms |
+| Real-time | WebSocket execution progress, the live event system (`system.*`, `business.*`, `call.*`), SSE model streaming |
+
+## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
-│  Nuxt 3 + Vue Flow + Pinia (canvas UI)                                 │
+│  Nuxt 3 + Vue Flow + Pinia (canvas UI, systems, estate health)         │
 ├────────────────────────────────────────────────────────────────────────┤
 │  FastAPI  (REST + WebSocket + APScheduler + webhook catcher)           │
-│  ├── Py8n engine: GraphSpec → TopologicalSorter → Jinja2 → nodes       │
+│  ├── Engine: GraphSpec → TopologicalSorter → Jinja2 → nodes            │
+│  ├── Business layer: processes · escalations · operators · chains      │
+│  ├── Systems runtime: lifecycle gate · operations · deployments        │
 │  ├── Dispatcher ── inline (sandbox)  or  Celery + Redis (production)   │
 │  └── Event bus   ── in-memory         or  Redis pub/sub                │
 ├────────────────────────────────────────────────────────────────────────┤
 │  SQLAlchemy 2.0  ──  SQLite (dev)  /  PostgreSQL + JSONB (production)  │
 │  Fernet-encrypted credential vault                                     │
 └────────────────────────────────────────────────────────────────────────┘
-```
-
-## Node ecosystem (9 built-ins)
-
-| Node | Category | What it does |
-|---|---|---|
-| `manual_trigger` | Triggers | ▶ Run button; injects a test payload |
-| `webhook_trigger` | Triggers | `POST /api/v1/webhooks/{workflow_id}`; respond immediately or with the last node's output |
-| `schedule_trigger` | Triggers | APScheduler interval or CRON, synced from the canvas |
-| `http_request` | Actions | Any REST call; optional header-auth credential |
-| `if_condition` | Logic | 9 operators → `true`/`false` branches (inactive branch = downstream skipped) |
-| `set_variable` | Logic | Build objects from `{{ expressions }}` |
-| `code` | Logic | Sandboxed Python (`input_data`, `nodes`, `result`) |
-| `delay` | Logic | Pause the branch |
-| `llm_chat` | AI | Free built-in bridge **or** your own OpenAI-compatible credential |
-
-Node configuration forms are **generated from the backend's Pydantic JSON
-schemas** (`GET /api/v1/node-definitions`) - add a node class in Python and it
-appears in the UI palette with a working form, zero frontend changes.
-
-## Expressions
-
-Anywhere in node parameters:
-
-```
-{{ nodes.http_1.output.body.email }}
-Hello {{ nodes.trigger_1.output.payload.name | upper }}!
-{{ nodes.if_1.output.true.condition }}
-```
-
-A string that is exactly one `{{ … }}` keeps its native type (dicts, lists,
-numbers). Unknown names fail loudly with `TemplateResolutionError`.
-
-## Layout
-
-```
-mini-services/
-  api-backend/          FastAPI app (engine, API, scheduler, worker, tests)
-    app/engine/         GraphSpec · TopologicalSorter runner · Jinja2 · nodes
-    app/api/            workflows · executions · webhooks · credentials · ws
-    app/services/       dispatcher (inline↔Celery) · event bus · crypto · scheduler
-    demo/phase1_demo.py standalone milestone script (3-node mock graph)
-    tests/              pytest engine suite
-  llm-bridge/           Bun service - free OpenAI-compatible shim for the sandbox
-pages/                  dashboard + workflow editor (Vue Flow canvas)
-stores/py8n.ts          Pinia store (definitions, execution progress, WS)
-server/routes/api/v1/   Nitro proxy fallback for non-gateway deploys
-docker-compose.yml      postgres + redis + api + worker + frontend + caddy
-```
-
-## Running
-
-### Sandbox / single process (already wired)
-- Frontend: `bun run dev` (Nuxt on :3000)
-- Backend: `bash mini-services/api-backend/start.sh` (FastAPI on :8000)
-- AI bridge: `cd mini-services/llm-bridge && bun run index.ts` (:3010)
-- Container boot runs `.zscripts/dev.sh`, which starts all three automatically.
-
-### Production cluster
-```bash
-docker compose up --build
-# → http://localhost:8025
-```
-PostgreSQL, Redis, FastAPI, Celery workers (×4 concurrency), Nuxt and Caddy in
-one command. `PY8N_EXECUTION_MODE=celery` moves executions off the API process;
-events fan out over Redis pub/sub so any replica can stream WebSocket progress.
-
-## API quick reference
-
-```
-GET    /api/v1/health
-GET    /api/v1/node-definitions          ← Pydantic schemas for the UI
-CRUD   /api/v1/workflows                 ← JSONB graph documents
-POST   /api/v1/workflows/{id}/run        ← manual dispatch (202)
-GET    /api/v1/workflows/{id}/webhook-url
-POST   /api/v1/webhooks/{workflow_id}    ← public trigger
-GET    /api/v1/executions?workflow_id=…
-GET    /api/v1/executions/{id}
-WS     /ws/executions/{execution_id}     ← live node-by-node progress
-CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 ```
 
 ## Engine semantics
@@ -106,27 +77,102 @@ CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 3. Exactly one trigger fires; other triggers are marked skipped.
 4. A node with incoming edges but no *active* input is skipped - an IF's
    inactive branch deactivates exactly its own outgoing edges.
-5. Node failures mark downstream nodes skipped, other branches keep running,
-   and the execution ends with status `error`.
+5. Node failures mark downstream nodes skipped, other branches keep
+   running, and the execution ends with status `error`.
 
-## Auth & multi-user (v37)
+Node configuration forms are generated from the backend's Pydantic JSON
+schemas (`GET /api/v1/node-definitions`) - add a node class in Python
+and it appears in the UI palette with a working form.
 
-Py8n ships in open single-user mode by default (anonymous works everywhere).
-Set `PY8N_REQUIRE_AUTH=true` to force sign-in:
+## Systems and deployments
 
-- `POST /api/v1/auth/register` creates accounts (PBKDF2-SHA256, 240k iters);
-  the FIRST account becomes `admin` and claims every pre-existing resource.
-- `POST /api/v1/auth/login` returns a 7-day HS256 JWT (secret auto-created at
-  `data/.jwt.key`); send it as `Authorization: Bearer <token>`.
-- Owned resources (workflows, datasets, folders, credentials, env vars, apps,
-  dashboards, executions) are scoped per user; other users' rows 404.
-- Machine + published surfaces stay token-free: webhooks, chat, published app
-  and dashboard runtimes, artifact content and `POST /datasets/query`.
+A system is created by hand, instantiated from a role template, or
+installed from a marketplace solution (`as_system=true`). From there:
+
+* the **lifecycle gate** (v81) holds the system's workflows on every
+  reactive path - events, schedule ticks, webhooks - without touching
+  their own `is_active`;
+* the **operations log** records every accepted verb, and every verb
+  emits on the system's event thread (`system.*`);
+* the **deployment identity** (v102) puts the system on a custom domain
+  with an environment and branding; `GET /api/v1/systems/by-domain/
+  {domain}` is the public door that resolves a live domain back to the
+  identity a login surface shows before authentication;
+* the **update lifecycle** (v102) previews an upgrade from the source
+  solution's pack (the same reconcile plan the upgrade runs), and
+  leaves every applied upgrade PENDING until a human accepts it or
+  rolls it back.
+
+## Auth & multi-user
+
+Py8n ships in open single-user mode by default (anonymous works
+everywhere). Set `PY8N_REQUIRE_AUTH=true` to force sign-in:
+
+- `POST /api/v1/auth/register` creates accounts (PBKDF2-SHA256, 240k
+  iters); the FIRST account becomes `admin` and claims every
+  pre-existing resource.
+- `POST /api/v1/auth/login` returns a 7-day HS256 JWT (secret
+  auto-created at `data/.jwt.key`); send it as
+  `Authorization: Bearer <token>`.
+- Owned resources are scoped per user; other users' rows 404. Systems
+  add a second ring: membership (owner / editor / viewer) decides who
+  can read, bind, operate or deploy.
+- Machine + published surfaces stay token-free: webhooks, chat,
+  published app and dashboard runtimes, artifact content, the public
+  domain door and `POST /datasets/query`.
+
+## Running
+
+### Sandbox / single process (already wired)
+- Frontend: `bun run dev` (Nuxt on :3000)
+- Backend: `bash mini-services/api-backend/start.sh` (FastAPI on :8000)
+- AI bridge: `cd mini-services/llm-bridge && bun run index.ts` (:3010)
+- Container boot runs `.zscripts/dev.sh`, which starts all three
+  automatically.
+
+### Production cluster
+```bash
+docker compose up --build
+# → http://localhost:8025
+```
+PostgreSQL, Redis, FastAPI, Celery workers (×4 concurrency), Nuxt and
+Caddy in one command. `PY8N_EXECUTION_MODE=celery` moves executions off
+the API process; events fan out over Redis pub/sub so any replica can
+stream WebSocket progress.
+
+## API quick reference
+
+```
+GET    /api/v1/health
+GET    /api/v1/node-definitions          ← Pydantic schemas for the UI
+CRUD   /api/v1/workflows                 ← JSONB graph documents
+POST   /api/v1/workflows/{id}/run        ← manual dispatch (202)
+GET    /api/v1/executions?workflow_id=…
+WS     /ws/executions/{execution_id}     ← live node-by-node progress
+
+CRUD   /api/v1/systems                   ← the operating units
+POST   /api/v1/systems/{id}/start|pause|resume|stop
+GET    /api/v1/systems/health/overview   ← the estate health rows
+GET/PUT /api/v1/systems/{id}/deployment  ← domain · environment · branding
+POST   /api/v1/systems/{id}/deployment/deploy|pause|retire
+GET    /api/v1/systems/{id}/update/preview
+POST   /api/v1/systems/{id}/update/accept|rollback
+GET    /api/v1/systems/by-domain/{domain} ← the public identity door
+GET    /api/v1/systems/{id}/chains       ← the drawn journey chains
+
+CRUD   /api/v1/processes                 ← business machines + instances
+POST   /api/v1/processes/{id}/advance    ← the state machine moves
+GET    /api/v1/processes/attention       ← what needs a human today
+GET    /api/v1/processes/chains/history.csv ← the per-leg CSV export
+
+CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
+```
 
 ## Tests
 
 ```bash
 cd mini-services/api-backend
-python -m pytest tests/ -q          # engine: ordering, templating, branches, cycles
-python demo/phase1_demo.py          # standalone 3-node milestone demo
+python -m pytest tests/ -q          # 563 tests: engine, systems, machines,
+                                    # escalations, deployments, reporting
+python demo/phase1_demo.py          # standalone milestone demo
 ```

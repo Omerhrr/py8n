@@ -60,7 +60,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Py8n API",
-    description="Python-native visual workflow automation - n8n, but Python.",
+    description=(
+        "Py8n - the Python-native business operations platform. "
+        "Build a system (workflows, datasets, apps, business machines), "
+        "deploy it with its own identity, and run a part of your business "
+        "on it - with health, escalations and marketplace operators built in."
+    ),
     version=settings.version,
     lifespan=lifespan,
 )
@@ -97,6 +102,7 @@ from .api.observability import router as observability_router  # noqa: E402 (v53
 from .api.builder import router as builder_router  # noqa: E402 (v59)
 from .api.solutions import router as solutions_router  # noqa: E402 (v60)
 from .api.systems import router as systems_router  # noqa: E402 (v61)
+from .api.system_identity import router as system_identity_router  # noqa: E402 (v102: the public domain door)
 from .api.model_systems import router as model_systems_router  # noqa: E402 (v63)
 from .api.deployments import router as deployments_router  # noqa: E402 (v67)
 from .api.channels import router as channels_router  # noqa: E402 (v69)
@@ -169,6 +175,7 @@ app.include_router(observability_router, prefix=API, dependencies=ENFORCED)  # v
 app.include_router(builder_router, prefix=API, dependencies=ENFORCED)  # v59
 app.include_router(solutions_router, prefix=API, dependencies=ENFORCED)  # v60
 app.include_router(systems_router, prefix=API, dependencies=ENFORCED)  # v61
+app.include_router(system_identity_router, prefix=API)  # v102: the PUBLIC domain door - auth inside the handler
 app.include_router(model_systems_router, prefix=API, dependencies=ENFORCED)  # v63
 app.include_router(deployments_router, prefix=API, dependencies=ENFORCED)  # v67
 app.include_router(interactions_router, prefix=API, dependencies=ENFORCED)  # v68 interaction layer

@@ -21,6 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ..models import (
     App,
@@ -269,4 +270,180 @@ def system_summary(db_rows: Py8nSystem) -> dict:
         "source_solution_slug": db_rows.source_solution_slug,
         "upgraded_at": db_rows.upgraded_at.isoformat() if db_rows.upgraded_at else None,
         "created_at": db_rows.created_at.isoformat() if db_rows.created_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# v102: the ESTATE health overview - "is my business actually healthy?"
+# ---------------------------------------------------------------------------
+
+async def health_overview(db: AsyncSession, user) -> dict:
+    """The estate-level answer, one row per visible system:
+
+        SYSTEM HEALTH
+        Sales       ● running    98.7% successful   2 overdue   1 failed workflow
+        Finance     ● running    99.4% successful   4 overdue   0 failed
+        Operations  ● attention  3 escalations
+
+    Composed ONLY from what the platform already keeps (derived, never
+    stored): workflow executions (7d) for the success rate and the failed
+    workflows, open instances past their SLA on the bound processes for
+    overdue, the door's unacknowledged episodes for escalations. The
+    status dot is the honest roll-up:
+
+    * ``hold``      - the lifecycle gate is closed (paused / stopped);
+    * ``attention`` - something needs a human (overdue, escalations or
+      a failed workflow in the window);
+    * ``running``   - green across the counters.
+
+    A system with zero runs shows ``null`` success rate - the frontend
+    renders a dash, never a lying 0%.
+    """
+    from .business_processes import _terminal_states
+    from .system_governance import member_role
+
+    from ..models import BusinessProcess, BusinessProcessInstance, SystemDeployment
+
+    rows = (
+        (
+            await db.execute(
+                select(Py8nSystem)
+                .options(selectinload(Py8nSystem.components))
+                .order_by(Py8nSystem.updated_at.desc())
+                .limit(100)
+            )
+        )
+        .scalars()
+        .unique()
+        .all()
+    )
+
+    visible: list[tuple[Py8nSystem, str]] = []
+    for s in rows:
+        role = await member_role(db, s, user)
+        if role is not None:
+            visible.append((s, role))
+
+    now = datetime.now(timezone.utc)
+    d7 = now - timedelta(days=7)
+
+    # one pass over every bound workflow's executions (batched - the
+    # overview is a single page load, not N estate queries)
+    all_wf_ids: list[str] = []
+    per_system: dict[str, dict] = {}
+    for s, role in visible:
+        comps = list(s.components or [])
+        wf_ids = [c.ref_id for c in comps if c.kind == "workflow"]
+        proc_ids = [c.ref_id for c in comps if c.kind == "process"]
+        per_system[s.id] = {
+            "system": s, "role": role, "wf_ids": wf_ids, "proc_ids": proc_ids,
+            "runs": 0, "failures": 0, "failed_wfs": set(),
+        }
+        all_wf_ids.extend(wf_ids)
+
+    if all_wf_ids:
+        exec_rows = (
+            await db.execute(
+                select(ExecutionLog.workflow_id, ExecutionLog.status, ExecutionLog.error)
+                .where(ExecutionLog.workflow_id.in_(set(all_wf_ids)),
+                       ExecutionLog.started_at >= d7)
+            )
+        ).all()
+        for wf_id, status, _error in exec_rows:
+            for sid, info in per_system.items():
+                if wf_id in info["wf_ids"]:
+                    info["runs"] += 1
+                    if status == "error":
+                        info["failures"] += 1
+                        info["failed_wfs"].add(wf_id)
+                    break
+
+    # one pass over the open instances of every bound process
+    all_proc_ids = [p for info in per_system.values() for p in info["proc_ids"]]
+    proc_defs: dict[str, dict] = {}
+    if all_proc_ids:
+        proc_rows = (
+            await db.execute(select(BusinessProcess).where(BusinessProcess.id.in_(set(all_proc_ids))))
+        ).scalars().all()
+        proc_defs = {p.id: (p.definition or {}) for p in proc_rows}
+        inst_rows = (
+            await db.execute(
+                select(BusinessProcessInstance)
+                .where(BusinessProcessInstance.process_id.in_(set(all_proc_ids)),
+                       BusinessProcessInstance.ended_at.is_(None),
+                       BusinessProcessInstance.due_at.is_not(None))
+            )
+        ).scalars().all()
+        for inst in inst_rows:
+            for sid, info in per_system.items():
+                if inst.process_id in info["proc_ids"]:
+                    due = inst.due_at
+                    if due is None:
+                        break
+                    if due.tzinfo is None:
+                        due = due.replace(tzinfo=timezone.utc)
+                    if (now - due).total_seconds() <= 0:
+                        break  # the SLA still holds
+                    definition = proc_defs.get(inst.process_id) or {}
+                    if inst.state in _terminal_states(definition):
+                        break  # a closed entity is not asking for attention
+                    info["overdue"] = info.get("overdue", 0) + 1
+                    book = (inst.context or {}).get("escalations")
+                    if isinstance(book, dict) and int(book.get("count") or 0) > 0 \
+                            and not isinstance(book.get("acked"), dict):
+                        info["escalations"] = info.get("escalations", 0) + 1
+                    break
+
+    # deployment identity rides the row (the estate wears its environments)
+    dep_rows = (
+        (await db.execute(select(SystemDeployment))).scalars().all()
+        if per_system else []
+    )
+    dep_by_system = {d.system_id: d for d in dep_rows}
+
+    out: list[dict] = []
+    for s, role in visible:
+        info = per_system[s.id]
+        lifecycle = s.lifecycle or "running"
+        overdue = info.get("overdue", 0)
+        escalations = info.get("escalations", 0)
+        failures = info["failures"]
+        if lifecycle in ("paused", "stopped"):
+            status = "hold"
+        elif overdue or escalations or failures:
+            status = "attention"
+        else:
+            status = "running"
+        dep = dep_by_system.get(s.id)
+        success_rate = (
+            round((info["runs"] - failures) / info["runs"] * 100, 1)
+            if info["runs"] else None
+        )
+        out.append({
+            **system_summary(s),
+            "my_role": role,
+            "status": status,
+            "success_rate_7d": success_rate,
+            "runs_7d": info["runs"],
+            "failed_workflows_7d": len(info["failed_wfs"]),
+            "overdue": overdue,
+            "escalations": escalations,
+            "deployment": ({
+                "domain": dep.domain or "",
+                "url": f"https://{dep.domain}" if dep.domain else "",
+                "environment": dep.environment,
+                "status": dep.status,
+            } if dep else None),
+        })
+
+    counts = {
+        "running": sum(1 for r in out if r["status"] == "running"),
+        "attention": sum(1 for r in out if r["status"] == "attention"),
+        "hold": sum(1 for r in out if r["status"] == "hold"),
+    }
+    return {
+        "systems": out,
+        "counts": counts,
+        "total": len(out),
+        "generated_at": now.isoformat(),
     }

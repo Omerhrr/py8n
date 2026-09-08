@@ -338,12 +338,12 @@ class GraphRunner:
                     await self._run_loop_node(context, node)
                     continue
                 if node.disabled:
-                    # n8n parity: a disabled node is bypassed - its active input
+                    # parity: a disabled node is bypassed - its active input
                     # passes through untouched and downstream keeps flowing.
                     await self._pass_through_disabled(context, node)
                     continue
                 if node.pinned_data is not None and self.honor_pinned:
-                    # v17 n8n parity: a pinned node returns its pinned output
+                    # v17: a pinned node returns its pinned output
                     # without executing - mock data for building workflows.
                     # Checked BEFORE the wait-node suspend: pinning a Wait node
                     # replaces the pause with the fake output.
@@ -708,7 +708,7 @@ class GraphRunner:
 
         duration_ms = int((time.monotonic() - t0) * 1000)
         if cfg.fallback_enabled:
-            # v38 n8n-style fallback output: the configured value replaces the
+            # v38 fallback output: the configured value replaces the
             # failure on the main handle so the flow keeps running; the error
             # is still recorded (status "error" on the node, run continues).
             await self._record(
@@ -717,7 +717,7 @@ class GraphRunner:
             )
             return
         if cfg.continue_on_fail:
-            # n8n parity: surface the error as data and keep the flow alive.
+            # surface the error as data and keep the flow alive.
             payload = {"error": last_error, "failed_node": node.display_name}
             await self._record(
                 context, node, "error", {"main": payload}, duration_ms, last_error,
