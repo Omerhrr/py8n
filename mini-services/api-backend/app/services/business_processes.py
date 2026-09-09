@@ -1154,7 +1154,14 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
     FROM its current state (``transitions`` - name + to), resolved by
     the SAME ``_allowed_from`` the advance door runs, so the surface can
     put advance actions beside the acks and the buttons can never offer
-    a move the door would refuse."""
+    a move the door would refuse.
+
+    v107: every machine also carries its own VIEW (``instances``) - the
+    open work on ITS board, the stuck rising to the top, capped at 8
+    with ``instances_hidden`` naming what did not fit - so the front
+    door renders per-machine views beneath the attention list: the
+    machine's own people see their department's pending rows without
+    waiting for an SLA breach."""
     now = _aware(now) or _now()
     ids = [p for p in (process_ids or []) if p]
     empty = {"machines": [], "attention": [],
@@ -1174,6 +1181,12 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
         .where(BusinessProcessInstance.process_id.in_(ids))
         .order_by(BusinessProcessInstance.created_at.desc()))).scalars().all()
     counts = {p.id: {"open": 0, "stuck": 0} for p in procs}
+    # v107: the per-machine VIEW - each machine carries the open work on
+    # ITS OWN board (newest first, the stuck rising to the top), capped
+    # so one chatty machine cannot drown the surface.
+    PER_MACHINE_VIEW_CAP = 8
+    mach_rows: dict[str, list[tuple[BusinessProcessInstance, bool, int]]] = {
+        p.id: [] for p in procs}
     picked: list[tuple[BusinessProcessInstance, BusinessProcess, float]] = []
     for r in inst_rows:
         proc = by_id.get(r.process_id)
@@ -1183,6 +1196,7 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
         if r.ended_at is not None:
             continue  # terminal rows sit in the journey, not the work list
         counts[r.process_id]["open"] += 1
+        mach_rows[r.process_id].append((r, stuck, overdue))
         if stuck:
             counts[r.process_id]["stuck"] += 1
             picked.append((r, proc, overdue))
@@ -1228,11 +1242,26 @@ async def system_work_surface(db: AsyncSession, process_ids: list[str], *,
         c = counts[p.id]
         open_total += c["open"]
         stuck_total += c["stuck"]
+        # v107: the machine's own view beneath the attention list - its
+        # open instances on ITS board: the stuck rise to the top (most
+        # overdue first among them), the rest keep the newest-first
+        # order they arrived in; capped, with the honest "and N more"
+        # so a chatty machine is summarized, never hidden.
+        rows = sorted(mach_rows.get(p.id) or [], key=lambda t: 0 if t[1] else 1)
+        shown = rows[:PER_MACHINE_VIEW_CAP]
         machines_out.append({
             "process_id": p.id, "name": p.name,
             "open": c["open"], "stuck": c["stuck"],
             "escalation_summary": escalations_svc.describe_policy(
                 escalations_svc.policy_from_definition(definitions[p.id])),
+            "instances": [{
+                "instance_id": r.id, "ref": r.ref, "title": r.title,
+                "state": r.state,
+                "due_at": r.due_at.isoformat() if r.due_at else None,
+                "overdue_seconds": round(overdue),
+                "stuck": stuck,
+            } for r, stuck, overdue in shown],
+            "instances_hidden": max(0, c["open"] - len(shown)),
         })
     return {"machines": machines_out, "attention": attention_rows,
             "totals": {"machines": len(procs), "open": open_total,

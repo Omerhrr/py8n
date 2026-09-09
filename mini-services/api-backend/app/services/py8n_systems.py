@@ -407,6 +407,13 @@ async def health_overview(db: AsyncSession, user) -> dict:
     )
     dep_by_system = {d.system_id: d for d in dep_rows}
 
+    # v107: the pending-update chip rides the row - which systems hold an
+    # applied-but-unruled upgrade. ONE batched walk over the trail (the
+    # same predicate the Updates panel applies), never N queries.
+    from . import system_runtime
+    pending_by_system = await system_runtime.pending_updates_batch(
+        db, list(per_system.keys()))
+
     out: list[dict] = []
     for s, role in visible:
         info = per_system[s.id]
@@ -430,6 +437,20 @@ async def health_overview(db: AsyncSession, user) -> dict:
             round((info["runs"] - failures) / info["runs"] * 100, 1)
             if info["runs"] else None
         )
+        # v107: the pending-update chip - an applied-but-unruled upgrade
+        # is exactly what the Updates panel's PENDING banner names; the
+        # estate row says so at a glance (added_total counts the bindings
+        # the upgrade put on the table, waiting for Accept / Roll back).
+        pending = pending_by_system.get(s.id)
+        pending_chip = None
+        if pending is not None:
+            added = pending.get("added_refs") or {}
+            pending_chip = {
+                "operation_id": pending.get("operation_id"),
+                "created_at": pending.get("created_at"),
+                "added_total": sum(len(v or []) for v in added.values())
+                if isinstance(added, dict) else 0,
+            }
         out.append({
             **system_summary(s),
             "my_role": role,
@@ -439,6 +460,7 @@ async def health_overview(db: AsyncSession, user) -> dict:
             "failed_workflows_7d": len(info["failed_wfs"]),
             "overdue": overdue,
             "escalations": escalations,
+            "pending_update": pending_chip,
             "deployment": ({
                 "domain": dep.domain or "",
                 "url": f"https://{dep.domain}" if dep.domain else "",

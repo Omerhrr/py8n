@@ -502,4 +502,4 @@ def test_v105_the_front_door_gains_the_work_surface():
 # ---------------------------------------------------------------------------
 
 def test_v105_version_pin():
-    assert settings.version == "1.106.0"
+    assert settings.version == "1.107.0"

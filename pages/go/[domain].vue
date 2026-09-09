@@ -21,6 +21,11 @@
 // surface wears the address's own liveness (the last probe's evidence -
 // answered / no answer / never probed), so the people on a custom domain
 // can see their door is watched AND move the work along in one place.
+// v107: beneath the attention list, every machine wears its own VIEW -
+// the open work on its board (the stuck first, the newest next, capped),
+// so a department sees its pending rows without waiting for an SLA
+// breach - and the liveness strip names the PROBE'S RHYTHM, not just the
+// last answer (auto-probe every 10m, when the next check falls due).
 definePageMeta({ layout: 'plain' })
 
 import {
@@ -58,6 +63,10 @@ interface WorkMachine {
   open: number
   stuck: number
   escalation_summary: string
+  // v107: the machine's own view - its open work, stuck first
+  instances: { instance_id: string, ref: string, title: string | null, state: string,
+    due_at: string | null, overdue_seconds: number, stuck: boolean }[]
+  instances_hidden: number
 }
 interface Work {
   machines: WorkMachine[]
@@ -79,6 +88,8 @@ interface Liveness {
   status: string
   environment: string
   last_ping: { at: string, ok: boolean, ms: number | null, code: number | null, detail: string } | null
+  // v107: the probe's cadence - watched, and watched on a named rhythm
+  ping_rhythm?: { interval_seconds: number, every: string, next_due_at: string | null, scheduled: boolean } | null
 }
 
 const identity = ref<Identity | null>(null)
@@ -103,6 +114,15 @@ const canAct = computed(() => myRole.value === 'owner' || myRole.value === 'edit
 const workError = ref('')
 const workBusy = ref(false)
 const liveness = ref<Liveness | null>(null)
+
+// v107: the per-machine views beneath the attention list - each machine
+// board opens on its own; a machine with stuck work starts OPEN (that is
+// the row its people came here for), the quiet ones stay folded.
+const expandedMachines = ref<Record<string, boolean>>({})
+
+function toggleMachine(processId: string) {
+  expandedMachines.value = { ...expandedMachines.value, [processId]: !expandedMachines.value[processId] }
+}
 
 // v106: the address's own liveness line - evidence, never a stored flag
 const livenessAge = computed(() => {
@@ -173,6 +193,13 @@ async function loadWork(): Promise<boolean> {
     work.value = res.work as Work
     myRole.value = (res.my_role as string) || null
     liveness.value = (res.liveness as Liveness) || null
+    // v107: seed the machine boards - stuck work opens by default; a
+    // machine the user already expanded keeps the user's choice
+    for (const m of work.value?.machines || []) {
+      if (!(m.process_id in expandedMachines.value)) {
+        expandedMachines.value[m.process_id] = m.stuck > 0
+      }
+    }
     state.value = 'work'
     return true
   }
@@ -391,6 +418,8 @@ function backToSignIn() {
             <span v-if="!liveness.last_ping.ok && liveness.last_ping.detail" class="text-zinc-500">· {{ liveness.last_ping.detail }}</span>
           </template>
           <span v-else class="rounded-full bg-zinc-800 px-2 py-0.5 font-bold text-zinc-400">never probed - liveness unknown</span>
+          <!-- v107: the rhythm - the address is watched on a named cadence -->
+          <span v-if="liveness.ping_rhythm" class="text-zinc-500">· auto-probe every {{ liveness.ping_rhythm.every }}<template v-if="liveness.ping_rhythm.scheduled && liveness.ping_rhythm.next_due_at"> · next check {{ new Date(liveness.ping_rhythm.next_due_at).toLocaleTimeString() }}</template></span>
         </div>
 
         <div v-if="workError" class="mb-4 flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-300">
@@ -586,23 +615,60 @@ function backToSignIn() {
           </ul>
         </div>
 
-        <!-- the machines -->
+        <!-- v107: the machines, each wearing its own view beneath the attention list -->
         <div class="mb-4 rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
           <h2 class="mb-3 text-xs font-bold uppercase tracking-wide text-zinc-400">The machines</h2>
-          <ul class="space-y-1.5">
+          <ul class="space-y-2">
             <li
               v-for="m in work.machines"
               :key="m.process_id"
-              class="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2"
+              class="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950/60"
             >
-              <span class="truncate text-sm font-medium text-zinc-200">{{ m.name }}</span>
-              <span class="flex items-center gap-1.5">
-                <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-bold text-zinc-300">{{ m.open }} open</span>
-                <span
-                  class="rounded-full px-2 py-0.5 text-[10px] font-bold"
-                  :class="m.stuck > 0 ? 'bg-amber-500/15 text-amber-400' : 'bg-zinc-800 text-zinc-400'"
-                >{{ m.stuck }} stuck</span>
-              </span>
+              <button
+                class="flex w-full items-center justify-between px-3 py-2 text-left transition hover:bg-zinc-900/60"
+                :title="expandedMachines[m.process_id] ? 'fold the board' : 'open the board'"
+                @click="toggleMachine(m.process_id)"
+              >
+                <span class="flex min-w-0 items-center gap-2">
+                  <span class="truncate text-sm font-medium text-zinc-200">{{ m.name }}</span>
+                  <ChevronDown class="h-3.5 w-3.5 shrink-0 text-zinc-600 transition" :class="expandedMachines[m.process_id] ? 'rotate-180' : ''" />
+                </span>
+                <span class="flex shrink-0 items-center gap-1.5">
+                  <span class="rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] font-bold text-zinc-300">{{ m.open }} open</span>
+                  <span
+                    class="rounded-full px-2 py-0.5 text-[10px] font-bold"
+                    :class="m.stuck > 0 ? 'bg-amber-500/15 text-amber-400' : 'bg-zinc-800 text-zinc-400'"
+                  >{{ m.stuck }} stuck</span>
+                </span>
+              </button>
+
+              <!-- the machine's own board: the work on THIS machine -->
+              <div v-if="expandedMachines[m.process_id]" class="border-t border-zinc-800/80 px-3 py-2">
+                <p v-if="m.instances.length === 0" class="py-1.5 text-[11px] text-zinc-500">
+                  Nothing open on this machine right now - the board is clear.
+                </p>
+                <ul v-else class="space-y-1">
+                  <li
+                    v-for="inst in m.instances"
+                    :key="inst.instance_id"
+                    class="flex flex-wrap items-center justify-between gap-x-2 gap-y-0.5 rounded-lg px-2 py-1.5"
+                    :class="inst.stuck ? 'bg-amber-500/5' : ''"
+                  >
+                    <span class="flex min-w-0 items-center gap-2">
+                      <span class="truncate text-xs font-semibold text-zinc-200">{{ inst.title || inst.ref }}</span>
+                      <span class="font-mono text-[10px] text-zinc-600">{{ inst.ref }}</span>
+                    </span>
+                    <span class="flex shrink-0 items-center gap-1.5 text-[10px]">
+                      <span class="rounded bg-zinc-800 px-1.5 py-0.5 font-medium text-zinc-300">{{ inst.state }}</span>
+                      <span v-if="inst.stuck" class="font-bold text-amber-400">{{ fmtOverdue(inst.overdue_seconds) }} over</span>
+                      <span v-else-if="inst.due_at" class="text-zinc-600">on the clock</span>
+                    </span>
+                  </li>
+                </ul>
+                <p v-if="m.instances_hidden > 0" class="mt-1 px-2 text-[10px] text-zinc-600">
+                  and {{ m.instances_hidden }} more open on this machine - the estate board has them all
+                </p>
+              </div>
             </li>
           </ul>
         </div>

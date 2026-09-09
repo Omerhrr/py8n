@@ -313,12 +313,11 @@ async def last_update_operation(db: AsyncSession, system: Py8nSystem) -> SystemO
     ).scalar_one_or_none()
 
 
-async def pending_update(db: AsyncSession, system: Py8nSystem) -> dict | None:
-    """The changes an UPGRADE put on the table that no human has ruled on
-    yet: the latest trail op is an ``upgraded`` that actually ADDED
-    bindings. Everything else (idempotent upgrade, accepted, rolled
-    back) is settled history."""
-    op = await last_update_operation(db, system)
+def _pending_from_op(op: SystemOperation | None) -> dict | None:
+    """The ONE predicate both the single-system read and the estate's
+    batched scan apply (v107): the latest trail op is an ``upgraded``
+    that actually ADDED bindings - everything else (an idempotent
+    upgrade, accepted, rolled back) is settled history."""
     if op is None or op.verb != "upgraded":
         return None
     added_refs = (op.detail or {}).get("added_refs") or {}
@@ -329,6 +328,45 @@ async def pending_update(db: AsyncSession, system: Py8nSystem) -> dict | None:
         "added_refs": added_refs,
         "created_at": _iso(op.created_at),
     }
+
+
+async def pending_update(db: AsyncSession, system: Py8nSystem) -> dict | None:
+    """The changes an UPGRADE put on the table that no human has ruled on
+    yet: the latest trail op is an ``upgraded`` that actually ADDED
+    bindings. Everything else (idempotent upgrade, accepted, rolled
+    back) is settled history."""
+    return _pending_from_op(await last_update_operation(db, system))
+
+
+async def pending_updates_batch(db: AsyncSession,
+                                system_ids: list[str]) -> dict[str, dict | None]:
+    """v107: the pending-update answer for the WHOLE estate in one query -
+    the estate's health rows wear the chip without N walks over the
+    trail. The predicate is ``_pending_from_op``, the very same one the
+    single-system read applies, so the estate row and the Updates panel
+    can never disagree about what is pending."""
+    ids = [s for s in (system_ids or []) if s]
+    if not ids:
+        return {}
+    rows = (
+        await db.execute(
+            select(SystemOperation)
+            .where(SystemOperation.system_id.in_(ids),
+                   SystemOperation.verb.in_(("upgraded", "upgrade_accepted",
+                                             "upgrade_rolled_back")))
+            .order_by(SystemOperation.created_at.desc(), SystemOperation.id.desc())
+        )
+    ).scalars().all()
+    latest: dict[str, SystemOperation] = {}
+    for op in rows:  # ordered most-recent first - the first seen wins
+        latest.setdefault(op.system_id, op)
+    # the answer is TOTAL: every requested id gets an entry - None when
+    # the system has no unruled upgrade (the honest absence)
+    out: dict[str, dict | None] = {sid: None for sid in ids}
+    for sid, op in latest.items():
+        if sid in out:
+            out[sid] = _pending_from_op(op)
+    return out
 
 
 async def preview_update(db: AsyncSession, system: Py8nSystem) -> dict:

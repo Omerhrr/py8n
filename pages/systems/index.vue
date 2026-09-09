@@ -5,7 +5,7 @@ import {
   Workflow as WorkflowIcon, Database, LayoutGrid, Gauge, Network, FileBarChart,
   Unlink, RefreshCw, Trash2, Sparkles, Users, BrainCircuit, Share2, UserPlus, ShieldCheck,
   Layers, Play, Pause, Square, Rocket, Activity, Phone, Hourglass, Video, GitBranch,
-  Globe, Undo2, CheckCheck, ExternalLink, Server, KeyRound, Copy,
+  Globe, Undo2, CheckCheck, ExternalLink, Server, KeyRound, Copy, Timer,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -227,6 +227,8 @@ interface HealthRow {
   lifecycle: string; status: string
   success_rate_7d: number | null; runs_7d: number
   failed_workflows_7d: number; overdue: number; escalations: number
+  // v107: an applied-but-unruled upgrade wears its chip on the estate row
+  pending_update: { operation_id: string; created_at: string | null; added_total: number } | null
   deployment: { domain: string; url: string; environment: string; status: string
     unreachable?: boolean; last_ping?: { at: string; ok: boolean; ms: number | null } | null } | null
 }
@@ -256,6 +258,8 @@ interface Deployment {
   system_id: string; domain: string; url: string; environment: string; status: string
   branding: { accent?: string; tagline?: string; login_headline?: string; logo?: string }
   last_ping?: { at: string; ok: boolean; ms: number | null; code: number | null; detail: string } | null
+  // v107: the scheduled walk's cadence - the panel names the rhythm, not just the last answer
+  ping_rhythm?: { interval_seconds: number; every: string; next_due_at: string | null; scheduled: boolean } | null
   deployed_at: string | null; updated_at: string | null
 }
 const deployment = ref<Deployment | null>(null)
@@ -840,6 +844,10 @@ onMounted(async () => {
             <span class="w-24 shrink-0" :class="row.overdue ? 'text-rose-300' : 'text-zinc-500'">{{ row.overdue }} overdue</span>
             <span class="w-32 shrink-0" :class="row.failed_workflows_7d ? 'text-rose-300' : 'text-zinc-500'">{{ row.failed_workflows_7d }} failed workflow{{ row.failed_workflows_7d === 1 ? '' : 's' }}</span>
             <span class="w-24 shrink-0" :class="row.escalations ? 'text-amber-300' : 'text-zinc-500'">{{ row.escalations }} escalation{{ row.escalations === 1 ? '' : 's' }}</span>
+            <!-- v107: the pending-update chip - the estate sees which systems hold an unruled upgrade -->
+            <span v-if="row.pending_update" class="w-24 shrink-0">
+              <span class="rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-300" title="an upgrade applied new bindings here that no human has ruled on yet - Accept or Roll back in the system's Updates panel">update pending</span>
+            </span>
             <span v-if="row.deployment" class="ml-auto flex items-center gap-1 text-[10px] text-zinc-500">
               <Globe class="h-3 w-3" /> {{ row.deployment.domain || '(no domain)' }}
               <span class="rounded-full px-1.5 py-0.5 text-[9px] font-bold" :class="deployStatusMeta[row.deployment.status]?.chip">{{ row.deployment.status }}</span>
@@ -1132,6 +1140,13 @@ onMounted(async () => {
                 <Activity class="h-3 w-3" />
                 {{ deployment.last_ping.ok ? `answered HTTP ${deployment.last_ping.code} · ${deployment.last_ping.ms}ms` : 'no answer' }}
                 <span class="text-zinc-600">{{ new Date(deployment.last_ping.at).toLocaleTimeString() }}</span>
+              </span>
+              <!-- v107: the ping rhythm - the domain is watched on a named cadence, the panel says which -->
+              <span v-if="deployment.ping_rhythm" class="flex items-center gap-1 rounded-xl bg-zinc-900/70 px-2.5 py-1.5 text-zinc-400" title="the scheduled walk re-probes every live domain on this cadence (PY8N_DEPLOY_PING_INTERVAL_SECONDS, floor 60s)">
+                <Timer class="h-3 w-3" />
+                auto-probe every {{ deployment.ping_rhythm.every }}
+                <span v-if="deployment.ping_rhythm.scheduled && deployment.ping_rhythm.next_due_at" class="text-zinc-600">· next check {{ new Date(deployment.ping_rhythm.next_due_at).toLocaleTimeString() }}</span>
+                <span v-else class="text-zinc-600">· rides the scheduler when live</span>
               </span>
             </div>
 

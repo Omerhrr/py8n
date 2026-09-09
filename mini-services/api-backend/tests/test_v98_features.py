@@ -414,4 +414,4 @@ def test_v98_side_legs_group():
 # ---------------------------------------------------------------------------
 
 def test_v98_version_pin():
-    assert settings.version == "1.106.0"
+    assert settings.version == "1.107.0"

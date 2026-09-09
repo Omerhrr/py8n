@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from sqlalchemy import select
@@ -165,24 +165,72 @@ def _last_ping_out(row: SystemDeployment) -> dict | None:
     }
 
 
+def _humanize_seconds(seconds: int) -> str:
+    """The rhythm in the words an operator reads: 600 -> '10m'."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    h, m = divmod(s, 3600)
+    if h:
+        return f"{h}h {m // 60}m" if m else f"{h}h"
+    return f"{s // 60}m"
+
+
+def ping_rhythm(row: SystemDeployment) -> dict:
+    """v107: the deployment's PING RHYTHM - the cadence the scheduled
+    walk re-probes this domain on (``PY8N_DEPLOY_PING_INTERVAL_SECONDS``,
+    clamped by the same ``_clamp_interval`` the walk obeys - zero drift),
+    humanized for the panel, and when the NEXT scheduled probe falls due:
+
+    * a LIVE domain - ``last_ping_at + interval`` (due NOW, stamped
+      immediately, when it has never been probed - an unprobed live door
+      is exactly the one the walk wants to hear from first);
+    * an offline / paused door - ``None``: the walk only probes live
+      deployments, so the panel says the rhythm, not a due time.
+
+    One writer, so the Deployment panel, the estate read and the front
+    door's liveness strip all speak the same numbers."""
+    interval = _clamp_interval()
+    next_due: datetime | None = None
+    if (row.status or "offline") == "live" and row.domain:
+        if row.last_ping_at is None:
+            next_due = _now()
+        else:
+            last = row.last_ping_at
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)  # sqlite naive (v38 GOTCHA)
+            next_due = last + timedelta(seconds=interval)
+    return {
+        "interval_seconds": interval,
+        "every": _humanize_seconds(interval),
+        "next_due_at": next_due.isoformat() if next_due is not None else None,
+        "scheduled": next_due is not None,
+    }
+
+
 def liveness(row: SystemDeployment) -> dict:
     """v106: the deployment's liveness, compact - what the front door's
     work surface wears so the people on a custom domain can see their
     own address is being watched: the domain, the status, the
     environment and the last probe's evidence (null when never asked -
-    an honest unknown, never a lying green)."""
+    an honest unknown, never a lying green). v107: the probe's RHYTHM
+    rides along - the door is not only watched, it is watched on a
+    named cadence."""
     return {
         "domain": row.domain or "",
         "status": row.status,
         "environment": row.environment,
         "last_ping": _last_ping_out(row),
+        "ping_rhythm": ping_rhythm(row),
     }
 
 
 def deployment_out(row: SystemDeployment | None) -> dict | None:
     """The read projection - the url DERIVED from the domain, never stored.
     The last probe's evidence rides along (v103) - what the domain
-    answered the last time somebody asked, or null when never asked."""
+    answered the last time somebody asked, or null when never asked.
+    v107: the ping rhythm rides too (the cadence the scheduled walk
+    re-probes on, and when the next probe falls due)."""
     if row is None:
         return None
     last_ping = _last_ping_out(row)
@@ -194,6 +242,7 @@ def deployment_out(row: SystemDeployment | None) -> dict | None:
         "status": row.status,
         "branding": row.branding or {},
         "last_ping": last_ping,
+        "ping_rhythm": ping_rhythm(row),
         "deployed_at": row.deployed_at.isoformat() if row.deployed_at else None,
         "created_at": row.created_at.isoformat() if row.created_at else None,
         "updated_at": row.updated_at.isoformat() if row.updated_at else None,
