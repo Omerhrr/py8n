@@ -1938,3 +1938,77 @@ Stage Summary:
   (upgrade diffs were v102's first cut; the estate row could wear pending
   updates), scheduled pings surfacing their rhythm on the deployment panel,
   or the work surface gaining per-machine views beneath the attention list.
+
+## Task 91 (v107 - pending-update chips on the estate rows, the ping rhythm on the deployment panel, the per-machine views beneath the attention list)
+
+Session opened on a STALE local tree again (v97, 08a8635) while origin/main
+carried v98-v106 (b3a58d8) - the previous sessions' rounds had landed on the
+remote during the tool outages. Resolution: fetched + hard-reset to
+origin/main, verified the v105/v106 commits and the 1.106.0 config, and built
+v107 on the TRUE base (the standing stale-mirror lesson: git fetch FIRST).
+
+THE ESTATE WEARS ITS UNRULED UPGRADES: system_runtime gained
+_pending_from_op (the ONE predicate: the latest trail op is an "upgraded"
+that actually ADDED bindings - everything else is settled history) and
+pending_updates_batch (the whole estate's answer in ONE query - the answer
+is TOTAL, every requested id gets an entry, None when honest absence);
+pending_update now delegates to the same predicate. health_overview rides
+the batch and stamps each row with pending_update {operation_id, created_at,
+added_total} - the estate row and the Updates panel can never disagree.
+
+THE PING RHYTHM ON THE PANEL: system_deployment gained ping_rhythm() - the
+cadence the scheduled walk re-probes on (the SAME _clamp_interval the walk
+obeys - zero drift), humanized (600s -> "10m"), and the next due: a LIVE
+domain is last_ping + interval; a never-probed live door is due NOW (an
+unprobed live door is exactly the one the walk wants to hear from first);
+an offline/paused door is NOT scheduled (the walk skips it - the panel says
+the rhythm, never a lying due time). One writer: deployment_out AND
+liveness() carry it, so the Deployment panel, the estate read and the front
+door's strip speak the same numbers. The panel wears "auto-probe every 10m
+- next check HH:MM" beside the last-ping chip; the strip carries it too.
+
+PER-MACHINE VIEWS BENEATH THE ATTENTION LIST: system_work_surface's
+machines now carry instances - the open work on THAT machine's board (the
+stuck rising to the top most-overdue first, the rest newest-first, capped
+at 8 with instances_hidden naming what did not fit). The front door's
+machines section became per-machine views: each toggles open (a machine
+with stuck work starts OPEN), its rows wear state + overdue chips, the
+honest "and N more" when the cap bites. The attention list itself is
+UNCHANGED - a view is not a second attention list - and the terminal move
+retires the row from the machine view just like from the list.
+
+THE OVERVIEW REWRITTEN: download/py8n-overview.md rebuilt from zero - the
+Python-native business operations platform (the build/operate/deploy/route/
+work/watch/update arc, 26 sections: the business layer, the door, the
+chains, systems + deployments + liveness, the update lifecycle, estate
+observability, the API reference, the version timeline), EVERY framing or
+comparison to the old workflow-tool category REMOVED - we are not the same
+and not a clone (grep proves zero mentions).
+
+TESTS: tests/test_v107_features.py (4 tests - the estate chip incl. the
+quiet-system absence + the accept contrast + the batch/single-predicate
+agreement; the rhythm incl. the clamp 45->60 + the dark door + the
+one-truth next-due arithmetic (last+interval, compared on the stamp) + the
+strip; the per-machine views incl. stuck-first ordering + the no-SLA row
+on machine B + the terminal retirement from BOTH + the honest 8-cap with
+instances_hidden; the pin). FOUND while writing: the batch helper's first
+draft answered only for systems WITH trail ops - the total-map contract
+(Nones included) is what the estate's callers want.
+
+GATES: 585 passed + 7 deliberate skips (581 -> 585) + bun build green
+(1.94 MB) + 3-check live smoke green (scripts/smoke_v107_live.py: the
+boards drew their views and the terminal move retired from BOTH; the real
+ping door probed the domain and the rhythm's next-due moved; the upgraded
+system's row wore the chip and the accept removed it).
+
+Stage Summary:
+- Py8n v1.107.0 pushed (b3a58d8..823f4b3): the estate at a glance now
+  answers "what needs a ruling" (the pending-update chip) and "is the door
+  watched on a rhythm" (the panel's cadence line), and the front door's
+  people see each machine's own board beneath the attention list.
+- The overview doc (download/py8n-overview.md) is a fresh identity-first
+  document - zero old-category framing remains.
+- Next candidates: the operator install/update lifecycle deepening (an
+  upgrade DIFF inside the pending chip's tooltip), the route sheet gaining
+  a regeneration cadence line, or per-machine views on the estate's
+  attention panel.
