@@ -12,8 +12,14 @@ cryptography>=42
 celery>=5.4
 redis>=5.0
 aiosqlite>=0.20        # sandbox/dev default DB driver
-# production database driver (uncomment for PostgreSQL):
-# asyncpg>=0.29
+# Bug fix: this was commented out ("uncomment for PostgreSQL") with no
+# override anywhere that actually uncommented it for the images that need
+# it - api/worker/migrate all run on postgresql+asyncpg:// in
+# docker-compose.yml (production cluster) and NONE of them had the driver
+# installed. `docker compose up --build` failed outright the moment any
+# of them opened a database connection (ModuleNotFoundError: asyncpg),
+# caught when the new `migrate` service ran first and hit it immediately.
+asyncpg>=0.29           # postgres async driver - required for docker-compose (production)
 python-multipart>=0.0.9  # FastAPI UploadFile/Form (dataset + document uploads)
 websockets>=12
 
