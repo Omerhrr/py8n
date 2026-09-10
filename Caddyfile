@@ -63,8 +63,17 @@ import /etc/caddy/tenants/*.caddy
 #     set PY8N_TENANT_HOSTS="ops.acme.com, *.acme.io" and those hostnames
 #     land on the branded front door: /go/{host} resolves the LIVE
 #     deployment's identity before sign-in (v103).
+#
+#     Bug fix: "INERT" wasn't true before this - Caddy's automatic HTTPS
+#     doesn't know the placeholder host is a no-op, so it tried (and
+#     retried forever, every startup) to get a real Let's Encrypt
+#     certificate for a domain that can never have one. The default now
+#     carries an explicit http:// scheme, which is what actually tells
+#     Caddy to skip automatic HTTPS for this block - a real operator's
+#     PY8N_TENANT_HOSTS value (no scheme prefix) is untouched and still
+#     gets full automatic HTTPS as documented.
 # ---------------------------------------------------------------------------
-{$PY8N_TENANT_HOSTS:tenant-routing-disabled.invalid} {
+{$PY8N_TENANT_HOSTS:http://tenant-routing-disabled.invalid} {
         rewrite * /go/{host}
         reverse_proxy localhost:3000 {
                 header_up Host {host}

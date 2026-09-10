@@ -107,7 +107,14 @@ services:
   caddy:
     image: caddy:2-alpine
     ports:
-      - "8025:80"
+      # Bug fix: the Caddyfile's platform block (the one that reverse-proxies
+      # to Nuxt/the API - everything the README's "open http://localhost:8025"
+      # actually means) explicitly listens on container port 81, NOT 80 -
+      # port 80 is where the separate tenant-routing block sits (bound there
+      # by Caddy's default HTTP/HTTPS ports since it declares no port of its
+      # own). Mapping the host port to 80 forwarded to the WRONG block; the
+      # platform was never reachable through this entrypoint at all.
+      - "8025:81"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # v104 tenant routing - EITHER switch works, no setup needed by default:
