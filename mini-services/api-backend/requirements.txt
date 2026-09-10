@@ -2,6 +2,7 @@
 fastapi>=0.115
 uvicorn[standard]>=0.30
 sqlalchemy[asyncio]>=2.0
+alembic>=1.13         # schema migrations (see mini-services/api-backend/migrations/)
 pydantic>=2.7
 pydantic-settings>=2.2
 jinja2>=3.1

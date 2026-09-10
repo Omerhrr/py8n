@@ -26,6 +26,7 @@ import importlib.util
 import uuid
 
 import httpx
+import pytest
 
 from app.main import app
 from app.services import executor as executor_mod
@@ -132,8 +133,12 @@ async def _make_lm(client: httpx.AsyncClient, h: dict, tag: str, name: str, *,
 
 
 def test_v66_torch_backend():
+    # Matches the module's documented contract ("torch tests skip
+    # gracefully when torch is not installed") - this used to hard-fail
+    # instead, which only worked on a machine that happened to have the
+    # ~2GB optional torch wheel pre-installed.
     if not TORCH_HERE:
-        raise AssertionError("torch expected in this environment (optional dep installed)")
+        pytest.skip("torch not installed (optional dependency)")
 
     tag = uuid.uuid4().hex[:8]
 

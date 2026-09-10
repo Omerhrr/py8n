@@ -106,6 +106,7 @@ from .api.system_identity import router as system_identity_router  # noqa: E402 
 from .api.model_systems import router as model_systems_router  # noqa: E402 (v63)
 from .api.deployments import router as deployments_router  # noqa: E402 (v67)
 from .api.channels import router as channels_router  # noqa: E402 (v69)
+from .api.channels import receivers_router as channels_receivers_router  # noqa: E402 (audit fix: public webhook receivers, split from channels_router)
 from .api.voice import router as voice_router  # noqa: E402 (v69)
 from .api.voice import media_router as voice_media_router  # noqa: E402 (v70 media transport)
 from .api.events import router as events_router  # noqa: E402 (v80 event system)
@@ -179,7 +180,8 @@ app.include_router(system_identity_router, prefix=API)  # v102: the PUBLIC domai
 app.include_router(model_systems_router, prefix=API, dependencies=ENFORCED)  # v63
 app.include_router(deployments_router, prefix=API, dependencies=ENFORCED)  # v67
 app.include_router(interactions_router, prefix=API, dependencies=ENFORCED)  # v68 interaction layer
-app.include_router(channels_router, prefix=API)  # v69: endpoint mgmt ENFORCED + public provider receivers
+app.include_router(channels_router, prefix=API, dependencies=ENFORCED)  # v69: endpoint mgmt - actually ENFORCED now (audit fix: this used to be a comment, not a dependency)
+app.include_router(channels_receivers_router, prefix=API)  # public provider webhook receivers - verified by provider credentials, never by a py8n token
 app.include_router(voice_router, prefix=API, dependencies=ENFORCED)  # v69 voice primitives
 app.include_router(voice_media_router, prefix=API)  # v70: provider media streams - token-auth inside the handler (ws.py pattern)
 app.include_router(platform_router, prefix=API, dependencies=ENFORCED)  # v67

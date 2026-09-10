@@ -61,3 +61,4 @@ prompt
 # Python bytecode (regenerated at runtime — never project files)
 __pycache__/
 *.pyc
+mini-services/api-backend/.venv/

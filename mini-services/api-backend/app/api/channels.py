@@ -55,6 +55,14 @@ from ..services.channel_endpoints import ChannelEndpointError
 
 router = APIRouter(prefix="/channels", tags=["channels"])
 
+# Split from `router` (audit fix): provider webhook receivers below are
+# PUBLIC by necessity (providers cannot log in - each verifies its own
+# request instead: HMAC/Ed25519 signature, verify_token, secret header).
+# They must never gain the ENFORCED auth dependency `router` carries;
+# registering them on a separate APIRouter is what makes that a fact
+# about wiring (main.py), not just a comment above their handlers.
+receivers_router = APIRouter(prefix="/channels", tags=["channels"])
+
 
 def _http(exc: ChannelEndpointError, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail=str(exc))
@@ -186,7 +194,7 @@ async def _load_receiver(db: AsyncSession, endpoint_id: str) -> ChannelEndpoint:
     return row
 
 
-@router.get("/whatsapp/{endpoint_id}/webhook")
+@receivers_router.get("/whatsapp/{endpoint_id}/webhook")
 async def whatsapp_verify(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Meta's verification handshake: echo hub.challenge when the token matches."""
     row = await _load_receiver(db, endpoint_id)
@@ -198,7 +206,7 @@ async def whatsapp_verify(endpoint_id: str, request: Request, db: AsyncSession =
     return PlainTextResponse(challenge, status_code=200)
 
 
-@router.post("/whatsapp/{endpoint_id}/webhook")
+@receivers_router.post("/whatsapp/{endpoint_id}/webhook")
 async def whatsapp_webhook(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _load_receiver(db, endpoint_id)
     raw = await request.body()
@@ -209,7 +217,7 @@ async def whatsapp_webhook(endpoint_id: str, request: Request, db: AsyncSession 
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
 
-@router.post("/telegram/{endpoint_id}/webhook")
+@receivers_router.post("/telegram/{endpoint_id}/webhook")
 async def telegram_webhook(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _load_receiver(db, endpoint_id)
     raw = await request.body()
@@ -221,7 +229,7 @@ async def telegram_webhook(endpoint_id: str, request: Request, db: AsyncSession 
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@router.post("/discord/{endpoint_id}/webhook")
+@receivers_router.post("/discord/{endpoint_id}/webhook")
 async def discord_webhook(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _load_receiver(db, endpoint_id)
     raw = await request.body()
@@ -250,7 +258,7 @@ async def discord_webhook(endpoint_id: str, request: Request, db: AsyncSession =
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@router.post("/telnyx/{endpoint_id}/webhook")
+@receivers_router.post("/telnyx/{endpoint_id}/webhook")
 async def telnyx_webhook(endpoint_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Telnyx Call Control events (SIP + PSTN) - RFC 9421 signed, voice-native.
 
@@ -274,7 +282,7 @@ async def telnyx_webhook(endpoint_id: str, request: Request, db: AsyncSession = 
 # v71 receivers: SMS (telnyx_sms + generic_sms) and email (email_inbound)
 # ---------------------------------------------------------------------------
 
-@router.post("/telnyx-sms/{endpoint_id}/webhook")
+@receivers_router.post("/telnyx-sms/{endpoint_id}/webhook")
 async def telnyx_sms_webhook(endpoint_id: str, request: Request,
                              db: AsyncSession = Depends(get_db)):
     """Telnyx Messaging events - the SAME RFC 9421 signatures as the voice
@@ -293,7 +301,7 @@ async def telnyx_sms_webhook(endpoint_id: str, request: Request,
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@router.post("/sms/{endpoint_id}/webhook")
+@receivers_router.post("/sms/{endpoint_id}/webhook")
 async def generic_sms_webhook(endpoint_id: str, request: Request,
                               db: AsyncSession = Depends(get_db)):
     """The any-gateway SMS contract: POST {from, to, text} JSON with an
@@ -310,7 +318,7 @@ async def generic_sms_webhook(endpoint_id: str, request: Request,
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
-@router.post("/email/{endpoint_id}/webhook")
+@receivers_router.post("/email/{endpoint_id}/webhook")
 async def email_webhook(endpoint_id: str, request: Request,
                         db: AsyncSession = Depends(get_db)):
     """Email inbound parse webhooks, both webhook-native shapes:

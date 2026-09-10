@@ -1064,7 +1064,13 @@ def email_parse_mime(raw_mime: str | bytes) -> dict:
     return {
         "from": from_addr, "from_name": from_name,
         "to": str(msg.get("To") or ""),
-        "subject": str(msg.get("Subject") or ""),
+        # RFC 5322 folding whitespace is not semantically significant, but
+        # email.policy.default leaves a stray leading space when a long
+        # header folds right after the colon (reproducible: any Subject
+        # whose value alone exceeds the fold width) - strip so a folded
+        # subject from a real mail server never leaks a leading space into
+        # the conversation transcript.
+        "subject": str(msg.get("Subject") or "").strip(),
         "text": text, "attachment_count": attachment_count,
         "message_id": str(msg.get("Message-ID") or ""),
         "in_reply_to": str(msg.get("In-Reply-To") or ""),

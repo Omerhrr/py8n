@@ -31,13 +31,30 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """Create tables on startup (dev convenience; Alembic in production)."""
+    """Create tables on startup - the safety net BEHIND real migrations.
+
+    Real schema changes now go through Alembic (mini-services/api-backend/
+    migrations/ - ``alembic revision --autogenerate`` then commit the
+    generated file), applied by migrations/bootstrap.py BEFORE this ever
+    runs (see start.sh / Dockerfile / the docker-compose ``migrate``
+    service). By the time init_db() executes, the schema should already be
+    current - create_all() here only fills in for the one case Alembic
+    cannot cover by itself (a bootstrap step that got skipped, e.g. a
+    manual `python -m app.main` outside the documented launchers), and
+    _add_missing_columns() is FROZEN: it stays for every pre-Alembic
+    install's upgrade path, but no new column belongs in it - add a real
+    migration instead.
+    """
     from . import models  # noqa: F401  (register models)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        # Lightweight column migration for pre-existing dev databases
-        # (create_all only adds missing TABLES, not missing COLUMNS).
+        # FROZEN (pre-Alembic legacy): lightweight column migration for
+        # databases from before mini-services/api-backend/migrations/
+        # existed (create_all only adds missing TABLES, not missing
+        # COLUMNS). Every entry below stays for as long as such a database
+        # might still be running this code - do not add new columns here;
+        # use `alembic revision --autogenerate` instead.
         def _add_missing_columns(sync_conn) -> None:
             from sqlalchemy import inspect, text
 

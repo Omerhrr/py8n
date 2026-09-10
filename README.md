@@ -218,6 +218,41 @@ GET    /api/v1/processes/chains/history.csv ← the per-leg CSV export
 CRUD   /api/v1/credentials               ← Fernet-encrypted at rest
 ```
 
+## Database migrations
+
+Schema changes go through Alembic (`mini-services/api-backend/migrations/`),
+not hand-edited SQL and not new branches in `db.py`'s legacy
+`_add_missing_columns` shim (that shim is now frozen - it stays only so a
+pre-Alembic install can catch up, and no new column belongs in it).
+
+```bash
+cd mini-services/api-backend
+# 1. change a model in app/models.py
+# 2. generate a migration from the diff
+alembic revision --autogenerate -m "add foo column to bar"
+# 3. review the generated file in migrations/versions/, then commit it
+# 4. apply it locally
+alembic upgrade head
+```
+
+`migrations/bootstrap.py` is the boot-time entry point - it runs
+automatically before the server starts (`start.sh`, the Dockerfile `CMD`,
+and the `migrate` one-shot service in `docker-compose.yml`), and adopts
+every kind of existing database correctly:
+
+- **fresh database** (no `workflows` table): runs the full migration chain,
+  which lays down the entire schema.
+- **pre-Alembic install** (`workflows` exists, no `alembic_version` table):
+  stamps the database at the baseline revision - the schema already matches
+  it (built over time by `create_all()` + the legacy shim), so nothing is
+  re-run, no rows change.
+- **already-migrated database** (`alembic_version` present): a normal
+  `alembic upgrade head` - applies anything newer, no-ops if current.
+
+`db.py`'s `create_all()` still runs every boot as a safety net behind this
+(e.g. a manual `python -m app.main` outside the documented launchers), but
+by the time it runs the schema should already be current.
+
 ## Tests
 
 ```bash

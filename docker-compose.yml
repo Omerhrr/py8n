@@ -35,6 +35,20 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot migration runner (see migrations/bootstrap.py): applies/stamps
+  # the schema against Postgres, then exits. api and worker both wait for it
+  # to finish successfully so neither races the other to migrate, and
+  # neither ever queries a table a still-pending migration hasn't made yet.
+  migrate:
+    build: ./mini-services/api-backend
+    command: python -m migrations.bootstrap
+    restart: "no"
+    environment:
+      PY8N_DATABASE_URL: postgresql+asyncpg://py8n:py8n_secret@postgres:5432/py8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build: ./mini-services/api-backend
     environment:
@@ -52,12 +66,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   worker:
     build: ./mini-services/api-backend
-    command: /app/.venv/bin/celery -A app.worker worker --loglevel=info --concurrency=4
-    # If no venv is baked into the image, plain celery works:
-    # command: celery -A app.worker worker --loglevel=info --concurrency=4
+    # No venv is baked into the image (the Dockerfile installs straight into
+    # the image's system Python) - plain `celery` is what's actually on PATH.
+    command: celery -A app.worker worker --loglevel=info --concurrency=4
     environment:
       PY8N_DEBUG: "false"
       PY8N_EXECUTION_MODE: celery
@@ -69,6 +85,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
 
   llm-bridge:
     build: ./mini-services/llm-bridge

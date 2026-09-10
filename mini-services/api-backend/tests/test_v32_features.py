@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import io
 import os
+import tempfile
 import uuid
 
 import httpx
@@ -29,7 +30,10 @@ import httpx
 from app.main import app
 
 API = "http://testserver/api/v1"
-FIXTURE_CSV = "/home/z/my-project/scripts/.v32_node_fixture.csv"
+# Portable fixture path (was hardcoded to the original build sandbox's
+# absolute path - broke on every other machine). tempfile.gettempdir()
+# works identically in CI, containers and any contributor's checkout.
+FIXTURE_CSV = os.path.join(tempfile.gettempdir(), ".v32_node_fixture.csv")
 
 
 def _client() -> httpx.AsyncClient:

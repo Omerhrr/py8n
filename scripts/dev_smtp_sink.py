@@ -189,7 +189,11 @@ class SmtpDevSink:
             from email import policy as _policy
 
             msg = _email.message_from_bytes(raw, policy=_policy.default)
-            subject = str(msg.get("Subject") or "")
+            # .strip(): RFC 5322 folding whitespace is not semantically
+            # significant, but email.policy.default leaves a stray leading
+            # space when a long header folds right after the colon - a real
+            # mail receiver normalizes this away, so this dev sink should too.
+            subject = str(msg.get("Subject") or "").strip()
             if msg.is_multipart():
                 for part in msg.walk():
                     if part.get_content_type() == "text/plain":
