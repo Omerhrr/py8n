@@ -34,6 +34,18 @@ export default defineNuxtConfig({
       // The preview gateway forwards arbitrary external hostnames (DNS-rebinding
       // guard would block them). Sandbox/dev only - production builds are unaffected.
       allowedHosts: true,
+      watch: {
+        // Bug fix (found while getting the stack running): chokidar was
+        // watching the WHOLE repo by default, including mini-services/
+        // (the Python backend, its .venv - tens of thousands of files
+        // from packages like moto/boto3 - and the bun llm-bridge
+        // sidecar's own node_modules) and data/ (the sqlite db + files
+        // the backend writes at runtime). None of that is frontend
+        // source; watching it wastes fs watchers for no reason and can
+        // exhaust the OS's inotify limit outright (ENOSPC) on a real
+        // dev machine, killing the dev server on boot.
+        ignored: ['**/mini-services/**', '**/data/**'],
+      },
     },
   },
   nitro: {
