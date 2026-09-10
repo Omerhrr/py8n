@@ -281,3 +281,43 @@ def test_jwt_secret_file_is_0600():
     assert path.exists()
     mode = _stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600, oct(mode)
+
+
+# ------------------------------------------ audit hardening (task #2): pool observability
+def test_sandbox_pool_health_reports_shape():
+    health = sandbox.pool_health()
+    assert set(health) == {"total", "borrowed", "available", "abandoned"}
+    assert health["total"] >= 1
+    assert health["abandoned"] == 0
+
+
+def test_sandbox_timeout_marks_and_recovers_abandonment():
+    """A snippet that outlives its timeout is counted as abandoned; once the
+    orphaned thread actually finishes, pool_health()'s abandoned count drops
+    back down - proving the accounting isn't just incremented and forgotten."""
+    import time as _time
+
+    before = sandbox.pool_health()["abandoned"]
+
+    async def _run():
+        await sandbox.run_bounded(
+            lambda: _time.sleep(0.6),
+            timeout_seconds=0.05,
+            label="audit-abandon-test",
+        )
+
+    with pytest.raises(sandbox.SandboxTimeout):
+        asyncio.run(_run())
+
+    # immediately after the timeout fires, the worker thread is still
+    # sleeping in the background - it should be counted as abandoned
+    mid = sandbox.pool_health()["abandoned"]
+    assert mid == before + 1
+
+    # give the orphaned thread time to actually finish and self-report
+    for _ in range(20):
+        _time.sleep(0.1)
+        if sandbox.pool_health()["abandoned"] <= before:
+            break
+    after = sandbox.pool_health()["abandoned"]
+    assert after == before, f"abandoned count did not recover: before={before} after={after}"

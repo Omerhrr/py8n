@@ -105,6 +105,20 @@ class Settings(BaseSettings):
     # Dataset run_sql: hard cap on returned rows.
     max_sql_rows: int = 10_000
 
+    # Sandbox pool (audit hardening, task #2): the bounded thread pool that
+    # runs untrusted user code (code node, python_transform, AI-agent code
+    # tool - see engine/sandbox.py's module docstring for the full threat
+    # model). A thread cannot be force-killed, so a snippet stuck past its
+    # timeout is ABANDONED - it keeps running and keeps holding its pool
+    # slot forever. sandbox_pool_size bounds concurrent user-code threads
+    # (raise it to widen the blast radius a handful of hung snippets can
+    # never fully exhaust the pool); sandbox_pool_exhaustion_log_threshold
+    # is how many abandoned slots trigger an ERROR-level log (vs the WARNING
+    # every individual timeout already logs) so "the pool is dying" is loud,
+    # not just "one snippet timed out".
+    sandbox_pool_size: int = 4
+    sandbox_pool_exhaustion_log_threshold: int = 2
+
     # ------------------------------------------------------------------
     # v51: dataset storage backend - where dataset parquet blobs live.
     # "local" (default) = data/datasets/ on disk, exactly as before;

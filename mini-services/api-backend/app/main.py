@@ -197,12 +197,21 @@ app.include_router(ws_router)  # /ws/...
 
 @app.get(f"{API}/health")
 async def health():
+    # sandbox_pool (audit hardening, task #2): surfaces the user-code thread
+    # pool's state (total/available/abandoned workers) in the one endpoint
+    # every deployment already polls, so a degrading pool - hung snippets
+    # eating workers a thread can never be killed to reclaim - is visible
+    # in ordinary monitoring instead of only in application logs. See
+    # engine/sandbox.py's module docstring for the full hardening plan.
+    from .engine.sandbox import pool_health
+
     return {
         "status": "ok",
         "app": settings.app_name,
         "version": settings.version,
         "execution_mode": settings.execution_mode,
         "require_auth": settings.require_auth,
+        "sandbox_pool": pool_health(),
     }
 
 
