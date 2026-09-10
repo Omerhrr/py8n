@@ -23,6 +23,17 @@
 
 # ---------------------------------------------------------------------------
 # 1. the platform (unchanged since the XTransformPort contract was set)
+#
+# Bug fix: every target below used to say `localhost` - correct only when
+# Caddy and the services it proxies to share one process/network (the
+# single-container sandbox's .zscripts/dev.sh flow). Under docker-compose,
+# each service is its own container on the default bridge network, where
+# `localhost` inside the caddy container means the caddy container itself
+# - nothing listens there, so every proxied request would refuse to
+# connect. Compose's default network resolves other services by NAME, so
+# the platform frontend is `frontend:3000` and XTransformPort (which the
+# frontend only ever sends as the API's port, see stores/auth.ts /
+# composables/useApi.ts) resolves against the `api` service.
 # ---------------------------------------------------------------------------
 :81 {
         @transform_port_query {
@@ -30,7 +41,7 @@
         }
 
         handle @transform_port_query {
-                reverse_proxy localhost:{query.XTransformPort} {
+                reverse_proxy api:{query.XTransformPort} {
                         header_up Host {host}
                         header_up X-Forwarded-For {remote_host}
                         header_up X-Forwarded-Proto {scheme}
@@ -39,7 +50,7 @@
         }
 
         handle {
-                reverse_proxy localhost:3000 {
+                reverse_proxy frontend:3000 {
                         header_up Host {host}
                         header_up X-Forwarded-For {remote_host}
                         header_up X-Forwarded-Proto {scheme}
@@ -75,7 +86,7 @@ import /etc/caddy/tenants/*.caddy
 # ---------------------------------------------------------------------------
 {$PY8N_TENANT_HOSTS:http://tenant-routing-disabled.invalid} {
         rewrite * /go/{host}
-        reverse_proxy localhost:3000 {
+        reverse_proxy frontend:3000 {
                 header_up Host {host}
                 header_up X-Forwarded-For {remote_host}
                 header_up X-Forwarded-Proto {scheme}
