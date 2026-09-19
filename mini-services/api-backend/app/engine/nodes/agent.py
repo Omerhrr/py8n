@@ -420,13 +420,9 @@ class AgentNode(BaseNode):
     # ------------------------------------------------------------------
     # Main agentic loop
     # ------------------------------------------------------------------
-    async def execute(self, context: ExecutionContext) -> NodeResult:
-        p = self.params  # type: AgentNode.ParamsModel
-        self._context_for_creds = context
-        tools = {t.name: t for t in (p.tools or []) if t.name}
-        if not p.user_message:
-            raise NodeExecutionError("Agent needs a user message")
-
+    @staticmethod
+    def _protocol(tools: dict[str, ToolSpec]) -> str:
+        """The tool-loop wire protocol (v108: shared with the module runtime)."""
         catalogue = {
             "type": "object",
             "properties": {
@@ -434,13 +430,22 @@ class AgentNode(BaseNode):
                 for t in tools.values()
             },
         }
-        protocol = (
+        return (
             "You operate in a tool loop. Reply with EXACTLY one JSON object and nothing else.\n"
             'To call a tool: {"tool": "<name>", "arguments": {...}} - allowed names + argument schemas:\n'
             f"{json.dumps(catalogue, ensure_ascii=False)}\n"
             'After each tool call you receive "TOOL RESULT <name>: <json>".\n'
             'When you can answer without more tools, reply {"answer": "<final answer>"}.'
         )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        p = self.params  # type: AgentNode.ParamsModel
+        self._context_for_creds = context
+        tools = {t.name: t for t in (p.tools or []) if t.name}
+        if not p.user_message:
+            raise NodeExecutionError("Agent needs a user message")
+
+        protocol = self._protocol(tools)
         messages: list[dict] = [
             {"role": "system", "content": f"{p.system_prompt}\n\n{protocol}"},
             {"role": "user", "content": str(p.user_message)},

@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -1922,3 +1922,43 @@ class SystemApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class AgentModule(Base):
+    """A first-class agent module (v108).
+
+    Until now an agent only existed INSIDE a workflow graph (the ai_agent
+    node) and the /agents console was a read-only inventory of those nodes.
+    A module is the agent as its own resource: a system prompt, a provider
+    (sandbox bridge or an OpenAI-compatible credential), a tool kit (the
+    SAME ToolSpec shape the node speaks) and session memory - runnable
+    directly over the API without building a graph first.
+
+    The runtime reuses the node's proven machinery (wire protocol, tool
+    execution, sandbox, read-only dataset SQL); the module only owns the
+    persistent identity and its configuration.
+    """
+
+    __tablename__ = "agent_modules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    system_prompt: Mapped[str] = mapped_column(
+        Text, default="You are a precise operations agent. Use the tools when they help, then answer.",
+        nullable=False)
+    # sandbox_bridge | openai_compatible - same transports the node speaks
+    provider: Mapped[str] = mapped_column(String(30), default="sandbox_bridge", nullable=False)
+    model: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.4, nullable=False)
+    max_iterations: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    # none | buffer - the node's session-memory modes
+    memory: Mapped[str] = mapped_column(String(10), default="none", nullable=False)
+    max_history_turns: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    # list of ToolSpec-shaped dicts (kind/name/description/...)
+    tools: Mapped[list] = mapped_column(JSONVariant, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
