@@ -166,4 +166,11 @@ async def init_db() -> None:
                 if "last_ping_detail" not in dep_cols:
                     sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_detail VARCHAR(200)"))
 
+            # v110: the approval receipt - who decided the slip (fresh
+            # installs get the column from create_all; this is for upgrades)
+            if "harness_approvals" in insp.get_table_names():
+                ha_cols = {c["name"] for c in insp.get_columns("harness_approvals")}
+                if "decided_by" not in ha_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_approvals ADD COLUMN decided_by VARCHAR(36)"))
+
         await conn.run_sync(_add_missing_columns)

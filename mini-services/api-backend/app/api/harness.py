@@ -1,4 +1,5 @@
-"""The harness doors (v109) - the system's own agentic runtime.
+"""The harness doors (v109 runtime, v110 builder) - the system's own
+agentic runtime.
 
 GET  /harness/tools                          the toolchest (sensitivity marked)
 POST /harness/sessions                       open a session (the SAME brain
@@ -254,6 +255,7 @@ async def list_approvals(status: str | None = None,
         "tool": a.tool, "arguments": a.arguments or {}, "status": a.status,
         "created_at": a.created_at.isoformat() if a.created_at else None,
         "decided_at": a.decided_at.isoformat() if a.decided_at else None,
+        "decided_by": a.decided_by,
     } for a in rows]
 
 
@@ -262,7 +264,8 @@ async def approve(approval_id: str, user=Depends(get_optional_user),
                   db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     slip = await _own_approval(db, approval_id, user)
     try:
-        turn = await harness.decide(db, slip, approve=True)
+        turn = await harness.decide(db, slip, approve=True,
+                                    decided_by=user.id if user else None)
     except HarnessError as exc:
         raise _map_error(exc) from exc
     return turn_out(turn, full=True)
@@ -273,7 +276,8 @@ async def reject(approval_id: str, user=Depends(get_optional_user),
                  db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
     slip = await _own_approval(db, approval_id, user)
     try:
-        turn = await harness.decide(db, slip, approve=False)
+        turn = await harness.decide(db, slip, approve=False,
+                                    decided_by=user.id if user else None)
     except HarnessError as exc:
         raise _map_error(exc) from exc
     return turn_out(turn, full=True)

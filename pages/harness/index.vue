@@ -227,7 +227,7 @@ onMounted(loadAll)
           <div>
             <h1 class="text-lg font-bold tracking-tight">The Harness</h1>
             <p class="-mt-0.5 text-[11px] text-zinc-500">
-              the system's own agentic runtime · reads the estate, moves it only on a human's word
+              the system's own agentic runtime · reads the estate, and moves or builds on it only with a human's word
             </p>
           </div>
         </div>
@@ -425,7 +425,7 @@ onMounted(loadAll)
             <div class="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 focus-within:border-amber-500/50">
               <input
                 v-model="draft"
-                placeholder="Ask the harness… (it can answer from the estate, and it will ask before it moves)"
+                placeholder="Ask the harness… (it answers from the estate, drafts machines, and asks before it moves or builds)"
                 class="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-zinc-600"
                 :disabled="sending"
                 @keydown.enter="send"

@@ -2061,3 +2061,6 @@ class HarnessApproval(Base):
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v110: the receipt - WHO decided (user id; NULL = system/expired or an
+    # unauthenticated door on a trust-the-wire install)
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)

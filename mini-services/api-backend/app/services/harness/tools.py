@@ -1,14 +1,18 @@
-"""The harness toolchest (v109) - PY8N ITSELF as the model's tools.
+"""The harness toolchest (v109 reads+moves, v110 builds) - PY8N ITSELF as
+the model's tools.
 
 Every tool is a real service call in this process - the same functions the
 API doors call, owner-scoped the same way. Nothing here shells out, nothing
-here invents a parallel API: the harness reads and moves the estate through
-the exact code paths the product uses, so the two can never drift.
+here invents a parallel API: the harness reads, moves and BUILDS the estate
+through the exact code paths the product uses, so the two can never drift.
 
-Three tools are SENSITIVE - they change the business (start / advance /
-acknowledge). The loop never runs them on the model's word alone: the turn
-pauses and a fail-closed approval slip waits for a human (see interaction
-semantics in services/harness/service.py).
+Five tools are SENSITIVE - they change the business (start / advance /
+acknowledge / build_machine / install_operator). The loop never runs them
+on the model's word alone: the turn pauses and a fail-closed approval slip
+waits for a human (see interaction semantics in services/harness/service.py).
+Sensitive tools may also carry a ``preflight`` - a cheap check that turns a
+malformed call into immediate tool feedback, so a human is never asked to
+decide a call that would not even run.
 """
 
 from __future__ import annotations
@@ -43,6 +47,10 @@ class ToolDef:
     handler: Callable[[AsyncSession, str | None, dict], Awaitable[dict]]
     sensitive: bool = False
     moves: str = ""                 # what a sensitive tool changes (for the slip)
+    # pre-gate check for SENSITIVE tools: return a refusal string to bounce
+    # a malformed call as tool feedback WITHOUT pausing a human (the gate is
+    # for real decisions, not for syntax errors); None = may proceed
+    preflight: Callable[[dict], str | None] | None = None
 
 
 @dataclass
@@ -198,6 +206,117 @@ async def _acknowledge_escalation(db: AsyncSession, owner_id: str | None, args: 
 
 
 # ---------------------------------------------------------------------------
+# builder tools (v110) - the harness as the COMPOSER AND BUILDER
+#
+# The estate is no longer only OPERATED by the harness - it gets BUILT by
+# it. Blueprints are free (draft_machine validates a spec and builds
+# nothing); the builds themselves ride the SAME fail-closed gate as the
+# moves: the slip carries the whole spec, so the human reviews exactly what
+# will exist before it does. Every build call goes through the composer's
+# or the operators' own service - zero parallel build paths.
+# ---------------------------------------------------------------------------
+
+async def _build_menu(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    """What py8n can build: archetypes, component kinds, the operator shelf."""
+    from ...services import ai_composer
+    from ...services.operators import operator_catalog
+    return {
+        "archetypes": ai_composer.archetypes_out(),
+        "kinds": {k: v["builds"] for k, v in ai_composer.COMPOSER_KINDS.items()},
+        "operators": operator_catalog()["operators"],
+        "note": "draft_machine composes a blueprint from a description (or "
+                "validates one you hand-write); build_machine and "
+                "install_operator wait for a human decision",
+    }
+
+
+async def _draft_machine(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    """Blueprint preview: a description becomes a validated spec through the
+    archetypes, or a hand-composed spec is validated as-is. Builds NOTHING."""
+    from ...services import ai_composer
+    spec = args.get("spec")
+    try:
+        if isinstance(spec, dict) and spec:
+            validated = ai_composer.validate_spec(spec)
+            source = "hand-composed"
+        else:
+            description = str(args.get("description", "")).strip()
+            if not description:
+                raise HarnessToolError(
+                    'pass {"description": "..."} (py8n drafts from the '
+                    'archetypes) or {"spec": {...}} (you compose, py8n '
+                    "validates) - then build_machine when it looks right")
+            validated = ai_composer.validate_spec(
+                ai_composer.synthesize_spec(description))
+            source = "archetype"
+    except ai_composer.AIComposerError as exc:
+        raise HarnessToolError(f"the draft does not validate: {exc}") from exc
+    return {
+        "source": source, "mode": validated.get("mode"),
+        "archetype": validated.get("archetype"),
+        "name": validated.get("name"),
+        "blueprint": [{"kind": c.get("kind"), "name": c.get("name")}
+                      for c in validated.get("components", [])],
+        "component_count": len(validated.get("components", [])),
+        "spec": validated,
+        "note": "blueprint only - nothing was built; call build_machine with "
+                "this exact spec when it looks right (the human sees the "
+                "whole spec on the approval slip)",
+    }
+
+
+def _preflight_build_machine(args: dict) -> str | None:
+    """Bounce a spec-less or invalid build BEFORE a human is bothered."""
+    from ...services import ai_composer
+    spec = args.get("spec")
+    if not isinstance(spec, dict) or not spec:
+        return ('pass {"spec": {...}} - draft_machine returns a validated '
+                "blueprint; the human reviews the whole spec on the slip")
+    try:
+        ai_composer.validate_spec(spec)
+    except ai_composer.AIComposerError as exc:
+        return f"the spec does not validate: {exc}"
+    return None
+
+
+async def _build_machine(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    """SENSITIVE - the composer's own build path (datasets, workflows,
+    agents, rooms, queues, the running system). The caller commits; the
+    loop's post-tool commit lands the machine."""
+    from ...services import ai_composer
+    try:
+        return await ai_composer.build_system(db, args.get("spec") or {},
+                                              owner_id=owner_id)
+    except ai_composer.AIComposerError as exc:
+        raise HarnessToolError(f"the build refused: {exc}") from exc
+
+
+def _preflight_install_operator(args: dict) -> str | None:
+    from ...services.operators import OPERATORS_BY_SLUG
+    slug = str(args.get("slug", "")).strip()
+    if not slug:
+        return 'pass {"slug": "..."} - build_menu lists the shelf'
+    if slug not in OPERATORS_BY_SLUG:
+        return (f"unknown operator {slug!r} - the shelf: "
+                f"{', '.join(sorted(OPERATORS_BY_SLUG))}")
+    return None
+
+
+async def _install_operator(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    """SENSITIVE - a shelf operator lands whole: datasets, processes,
+    workflows, agent, dashboard, the system - pre-wired by the operator's
+    own install path."""
+    from ...services.operators import OperatorError, install_operator
+    try:
+        return await install_operator(
+            db, str(args.get("slug", "")).strip(), owner_id=owner_id,
+            brain=str(args.get("brain") or "scaffold"),
+            note=str(args.get("note") or "installed by the harness"))
+    except OperatorError as exc:
+        raise HarnessToolError(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
 # the registry
 # ---------------------------------------------------------------------------
 
@@ -308,6 +427,58 @@ def build_registry() -> dict[str, ToolDef]:
             }, required=["instance_id"]),
             handler=_acknowledge_escalation, sensitive=True,
             moves="silences the escalation door for one entity"),
+        ToolDef(
+            name="build_menu",
+            description="What py8n can BUILD: the composer's archetypes and "
+                        "component kinds, plus the operator shelf (slug, "
+                        "tagline, topology, chains). Read this before "
+                        "drafting or installing.",
+            args=_schema({}),
+            handler=_build_menu),
+        ToolDef(
+            name="draft_machine",
+            description="Compose a machine BLUEPRINT: a description becomes "
+                        "a validated spec via the archetypes, or hand in "
+                        "your own spec for validation. Builds nothing - "
+                        "draft, look, adjust, then build_machine with the "
+                        "exact spec.",
+            args=_schema({
+                "description": {"type": "string",
+                                "description": "what the machine should do"},
+                "spec": {"type": "object",
+                         "description": "or a hand-composed spec to validate"},
+            }),
+            handler=_draft_machine),
+        ToolDef(
+            name="build_machine",
+            description="SENSITIVE - compose a validated spec into REAL "
+                        "primitives: datasets, workflows (installed "
+                        "inactive), voice agents, rooms, queues, and the "
+                        "running system binding them. The approval slip "
+                        "carries the whole spec - the human sees exactly "
+                        "what will exist. Waits for human approval.",
+            args=_schema({"spec": {"type": "object",
+                                   "description": "a validated blueprint "
+                                                  "(draft_machine returns one)"}},
+                         required=["spec"]),
+            handler=_build_machine, sensitive=True,
+            preflight=_preflight_build_machine,
+            moves="builds new datasets, workflows and a running system"),
+        ToolDef(
+            name="install_operator",
+            description="SENSITIVE - install one of the shelf's business "
+                        "operators: its datasets, processes, workflows, "
+                        "agent, dashboard and system land together, "
+                        "pre-wired. Waits for human approval.",
+            args=_schema({
+                "slug": {"type": "string", "description": "from build_menu"},
+                "brain": {"type": "string",
+                          "description": "scaffold (default) or ai_agent"},
+                "note": {"type": "string"},
+            }, required=["slug"]),
+            handler=_install_operator, sensitive=True,
+            preflight=_preflight_install_operator,
+            moves="installs a full business operator onto the estate"),
     ]
     return {t.name: t for t in tools}
 

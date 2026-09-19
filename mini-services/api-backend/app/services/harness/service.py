@@ -190,10 +190,12 @@ async def get_approval(db: AsyncSession, approval_id: str) -> HarnessApproval:
 
 
 async def decide(db: AsyncSession, slip: HarnessApproval, *,
-                 approve: bool) -> HarnessTurn:
+                 approve: bool, decided_by: str | None = None) -> HarnessTurn:
     """The human's answer. Approve runs the tool NOW and resumes the loop;
     reject feeds the refusal to the model. Deciding a non-pending slip is a
-    loud 409 - one decision, one run."""
+    loud 409 - one decision, one run. ``decided_by`` (v110) stamps the
+    receipt: the slip remembers WHO decided, not only that it was decided.
+    """
     await sweep_expired(db, slip.owner_id)
     await db.refresh(slip)
     if slip.status != "pending":
@@ -205,10 +207,12 @@ async def decide(db: AsyncSession, slip: HarnessApproval, *,
 
     slip.status = "approved" if approve else "rejected"
     slip.decided_at = _utcnow()
+    slip.decided_by = decided_by
 
     if not approve:
         harness_loop._frame(turn, {"event": "approval_decided",  # noqa: SLF001
-                                   "approval_id": slip.id, "decision": "rejected"})
+                                   "approval_id": slip.id, "decision": "rejected",
+                                   "decided_by": decided_by})
         result_text = ("DECLINED by the human operator - the move was not "
                        "made. Do not retry it; answer with what you know.")
     else:
@@ -222,7 +226,8 @@ async def decide(db: AsyncSession, slip: HarnessApproval, *,
                             "status": outcome.status, "result": outcome.text}]
         harness_loop._frame(turn, {"event": "approval_decided",  # noqa: SLF001
                                    "approval_id": slip.id, "decision": "approved",
-                                   "tool": slip.tool, "status": outcome.status})
+                                   "tool": slip.tool, "status": outcome.status,
+                                   "decided_by": decided_by})
 
     messages = [*(turn.wire or []),
                 {"role": "user", "content": f"TOOL RESULT {slip.tool}: {result_text}"}]

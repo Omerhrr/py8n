@@ -2046,3 +2046,23 @@ Stage Summary:
 **LIVE**: scripts/smoke_v109_harness.py boots the real server AND a real scripted openai-compatible bridge, seeds a real machine + visitor, then walks the harness over the actual wire: the read loop answering from the estate, THE GATE (the instance provably stayed in 'a' on the model's word alone; the human approved over the API; the machine landed on 'b'), and THE GUARD (third verbatim call blocked, refusal seen by the bridge, turn completed with guard_blocks=1). 4 checks green.
 
 **GATES**: pytest 596 passed + 7 deliberate skips (589 -> 596); `bun run build` green (1.95 MB); audit E2E re-pinned to 1.109.0 and green end to end (13 phases); smoke v109 green (4 checks). 1.109.0.
+
+## Task 94 (v110 - THE BUILDER: the harness stops only operating the estate and BUILDS on it, completing the composer-and-builder vision)
+
+**THE DECISION CONTINUED**: v109 rebuilt the deepseek-harness architecture natively because plugging it in would introduce friction; v110 finishes the original ask ("so it will be the composer and builder") - until now the harness could read everything and move entities, but it could not CREATE anything. The estate is no longer only operated by the harness - it gets built by it, through the SAME fail-closed gate.
+
+**THE TOOLCHEST GROWS 10 -> 14**: four builder tools, every one riding the REAL services the doors call (zero parallel build paths):
+- `build_menu` (read) - what py8n can build: the composer's archetypes, the component kinds, and the operator shelf (slug, tagline, topology, chains) straight from the real catalog.
+- `draft_machine` (read) - the blueprint preview: a description becomes a validated spec through the composer's deterministic archetypes, OR a hand-composed spec is validated as-is (you compose, py8n validates). Builds NOTHING.
+- `build_machine` (SENSITIVE, gated) - the composer's own `build_system` path: datasets, workflows (installed inactive - honest), voice agents, rooms, queues, and the running system binding them. The approval slip carries the WHOLE spec, so the human reviews exactly what will exist before it does.
+- `install_operator` (SENSITIVE, gated) - a shelf operator lands whole through its own install path: datasets, processes, workflows, agent, dashboard, the system - pre-wired.
+
+**THE PREFLIGHT (a new loop discipline)**: a malformed sensitive call never reaches a human. Sensitive ToolDefs may carry a cheap `preflight(args) -> str | None`; a spec-less build or an unknown operator slug bounces as immediate tool feedback (the model self-corrects), while a valid call proceeds to the gate. The gate is for real decisions, not syntax errors.
+
+**THE RECEIPT (v110)**: `harness_approvals.decided_by` - the slip remembers WHO decided, not only that it was decided. `decide()` stamps it, the doors pass the principal, the trace frame carries it, and the approvals list exposes it. Migration: ALTER TABLE for upgrades, create_all for fresh installs.
+
+**TESTS**: tests/test_v110_harness_builder.py (5) - the menu + drafts with the nothing-built proof (snapshot deltas over the shared DB: unclaimed rows are estate-visible by design, so absences are proven by delta), the preflight (spec-less build, invalid spec, unknown slug - all instant feedback, ZERO slips), THE BUILD GATE (draft -> the model relays the EXACT spec off the wire -> asked: nothing exists -> approved: the Leads dataset, the inactive Lead intake workflow and the RUNNING system land, decided_by stamped, twice-decide 409), THE OPERATOR GATE (sales-operator asked: estate still -> rejected: refusal fed back, the estate provably gained nothing), the pin. v109's toolchest pin updated (14 tools, 5 gated).
+
+**LIVE**: scripts/smoke_v110_builder.py boots the real server AND a real scripted openai-compatible bridge and walks the builder over the actual wire: the blueprint (real composer, spec read off the wire, estate provably empty), THE BUILD GATE (paused; estate still empty on the model's word; approved -> the machine lands at decision time), THE OPERATOR GATE (paused; rejected; the refusal crossed the wire; nothing gained). 4 checks green.
+
+**GATES**: pytest 601 passed + 7 deliberate skips (596 -> 601); `bun run build` green (1.95 MB); audit E2E re-pinned to 1.110.0 and green end to end (13 phases); smoke v110 green. 1.110.0.

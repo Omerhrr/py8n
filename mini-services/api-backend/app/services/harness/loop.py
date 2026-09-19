@@ -177,6 +177,26 @@ async def drive(db: AsyncSession, session: HarnessSession, turn: HarnessTurn,
                 await db.commit()
                 continue
 
+            # -- the pre-gate check (v110): a malformed sensitive call is
+            #    tool feedback at once - the human is never asked to decide
+            #    a call that would not even run
+            if tool.preflight is not None:
+                problem = tool.preflight(args)
+                if problem:
+                    turn.tool_calls = [*(turn.tool_calls or []),
+                                       {"tool": tool.name, "arguments": args,
+                                        "status": "error", "result": problem}]
+                    _frame(turn, {"event": "tool_call", "iteration": turn.iterations,
+                                  "tool": tool.name, "status": "error",
+                                  "preflight": True})
+                    _frame(turn, {"event": "tool_result", "tool": tool.name,
+                                  "preview": _preview(problem, MAX_FRAME_PREVIEW)})
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user",
+                                     "content": f"TOOL RESULT {tool.name}: {problem}"})
+                    await db.commit()
+                    continue
+
             # -- the approval gate: sensitive moves wait for a human
             if tool.sensitive:
                 slip = HarnessApproval(
