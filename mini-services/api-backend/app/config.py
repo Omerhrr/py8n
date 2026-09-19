@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="PY8N_", env_file=".env", extra="ignore")
 
     app_name: str = "Py8n"
-    version: str = "1.108.0"
+    version: str = "1.109.0"
     # v54: public base URL for report drilldown links (PNG captions + json refs).
     # Empty = relative-only links (/d/{slug}?c={id}).
     public_url: str = ""
@@ -154,6 +154,19 @@ class Settings(BaseSettings):
     deploy_ping_override: str = ""
     deploy_ping_timeout_seconds: float = 6.0
     deploy_ping_interval_seconds: int = 600
+
+    # ------------------------------------------------------------------
+    # v109: the harness - the system's own agentic runtime. Sessions ride
+    # the SAME brain transports the ai_agent node and the modules speak;
+    # the harness adds the discipline: per-turn iteration budget, a guard
+    # that blocks verbatim repeat calls, a wall-clock turn deadline, and
+    # fail-closed approvals on sensitive tools (silence expires when a
+    # TTL is set - 0 keeps a decision slip alive until a human answers).
+    # ------------------------------------------------------------------
+    harness_max_iterations: int = 10
+    harness_guard_repeat_limit: int = 2
+    harness_turn_timeout_seconds: int = 120
+    harness_approval_ttl_seconds: int = 0
 
 
 @lru_cache

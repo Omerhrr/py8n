@@ -1962,3 +1962,102 @@ class AgentModule(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessSession(Base):
+    """A harness session (v109) - the system's own agentic runtime.
+
+    Where an agent module (v108) speaks the ENGINE's toolchest
+    (workflow / http / knowledge / dataset / code), a harness session
+    speaks PY8N ITSELF: the estate overview, the machines and their
+    instances, the escalation door, the chain map, the data platform -
+    with harness-grade discipline the node loop does not have: guard
+    rails (repeat / budget / wall-clock), fail-closed approvals on
+    every sensitive move, and a persistent turn state machine that can
+    pause for a human decision and resume.
+
+    The brain is the SAME transport the node and the modules speak
+    (sandbox_bridge or an OpenAI-compatible credential) - zero new LLM
+    machinery; the harness owns the discipline, not the wire.
+    """
+
+    __tablename__ = "harness_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    system_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="You are the operations harness. You can read the whole estate "
+                "and you may move the business, but every sensitive move waits "
+                "for a human decision first. Answer with what the tools returned.",
+        nullable=False)
+    # the SAME providers the ai_agent node and the modules speak
+    provider: Mapped[str] = mapped_column(String(30), default="sandbox_bridge", nullable=False)
+    model: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.4, nullable=False)
+    # none | buffer - completed turns are injected as history on the next turn
+    memory: Mapped[str] = mapped_column(String(10), default="buffer", nullable=False)
+    max_history_turns: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessTurn(Base):
+    """One harness turn - the persistent state machine of one request.
+
+    status walks: running -> (waiting_approval ->)* completed
+                                     |-> exhausted (budget) | failed | refused
+    ``wire`` holds the EXACT chat message list at the pause moment, so an
+    approval decision can resume the loop where it stopped - even after a
+    server restart. ``trace`` holds the loop frames (iteration / reply /
+    tool_call / tool_result / guard / approval_requested / answer) for the
+    console and the API transcript.
+    """
+
+    __tablename__ = "harness_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    # running | waiting_approval | completed | exhausted | failed | refused
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False, index=True)
+    reply: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    iterations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    guard_blocks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tool_calls: Mapped[list] = mapped_column(JSONVariant, default=list)
+    trace: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # resume state: the message list at the approval pause
+    wire: Mapped[list] = mapped_column(JSONVariant, default=list)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessApproval(Base):
+    """A fail-closed approval gate (v109).
+
+    When the model calls a SENSITIVE tool (advance / ack / start - the
+    moves that change the estate), the turn pauses and one of these rows
+    is the decision slip. Silence expires (fail-closed: ttl > 0 turns a
+    pending slip into ``expired`` and the turn refuses); only an explicit
+    approve runs the tool - at decision time, so the move happens when the
+    human said yes, not when the model asked.
+    """
+
+    __tablename__ = "harness_approvals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    turn_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    tool: Mapped[str] = mapped_column(String(80), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    # pending | approved | rejected | expired
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
