@@ -26,7 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import settings
-from ...models import HarnessApproval, HarnessSession, HarnessTurn
+from ...models import HarnessApproval, HarnessPatrol, HarnessSession, HarnessTurn
 from . import tools as harness_tools
 from . import loop as harness_loop
 from .guard import TurnGuard
@@ -84,7 +84,14 @@ async def get_session(db: AsyncSession, session_id: str) -> HarnessSession:
 # ---------------------------------------------------------------------------
 
 async def start_turn(db: AsyncSession, session: HarnessSession,
-                     message: str) -> HarnessTurn:
+                     message: str, *, patrol: HarnessPatrol | None = None) -> HarnessTurn:
+    """One message becomes a persistent turn driven by loop.drive until it
+    completes, exhausts, or pauses at the approval gate.
+
+    ``patrol`` (v111) marks the round as SYSTEM-fired: the turn carries
+    the patrol id and a patrol_start frame, so the transcript and the
+    patrol receipt board tell human rounds from autonomous ones. The
+    discipline is identical - same loop, same guard, same gate."""
     if not (message or "").strip():
         raise HarnessError("message must not be empty")
     if session.is_active is False:
@@ -93,7 +100,12 @@ async def start_turn(db: AsyncSession, session: HarnessSession,
 
     registry = harness_tools.build_registry()
     turn = HarnessTurn(session_id=session.id, owner_id=session.owner_id,
-                       user_message=message.strip())
+                       user_message=message.strip(),
+                       patrol_id=patrol.id if patrol is not None else None)
+    if patrol is not None:
+        harness_loop._frame(turn, {"event": "patrol_start",  # noqa: SLF001
+                                   "patrol_id": patrol.id,
+                                   "patrol": patrol.name})
     db.add(turn)
     await db.flush()
 
@@ -112,7 +124,15 @@ async def start_turn(db: AsyncSession, session: HarnessSession,
         {"role": "user", "content": turn.user_message},
     ]
     await db.commit()
-    return await harness_loop.drive(db, session, turn, messages, registry, build_guard())
+    try:
+        return await harness_loop.drive(db, session, turn, messages, registry, build_guard())
+    except Exception as exc:  # noqa: BLE001 - the turn records its own death
+        turn.status = "failed"
+        turn.error = f"drive failed: {type(exc).__name__}: {exc}"
+        harness_loop._frame(turn, {"event": "guard_stop", "kind": "drive",  # noqa: SLF001
+                                   "reason": turn.error})
+        await db.commit()
+        raise HarnessError(turn.error, status_code=502) from exc
 
 
 async def list_turns(db: AsyncSession, session_id: str) -> list[HarnessTurn]:
@@ -238,15 +258,31 @@ async def decide(db: AsyncSession, slip: HarnessApproval, *,
         raise HarnessError("the session behind this turn is gone", status_code=404)
     await db.commit()
     try:
-        return await harness_loop.drive(db, session, turn, messages,
-                                        harness_tools.build_registry(), build_guard())
+        resumed = await harness_loop.drive(db, session, turn, messages,
+                                           harness_tools.build_registry(), build_guard())
+        await _refresh_patrol_receipt(db, resumed)
+        return resumed
     except Exception as exc:  # noqa: BLE001 - the turn records its own death
         turn.status = "failed"
         turn.error = f"resume failed: {type(exc).__name__}: {exc}"
         harness_loop._frame(turn, {"event": "guard_stop", "kind": "resume",
                                    "reason": turn.error})  # noqa: SLF001
         await db.commit()
+        await _refresh_patrol_receipt(db, turn)
         raise HarnessError(turn.error, status_code=502) from exc
+
+
+async def _refresh_patrol_receipt(db: AsyncSession, turn: HarnessTurn) -> None:
+    """v111: when the turn belongs to a patrol, the decision's outcome
+    lands on the patrol's receipt board too - the round ended where the
+    human's answer left it (completed, refused, waiting again)."""
+    if not turn.patrol_id:
+        return
+    patrol = await db.get(HarnessPatrol, turn.patrol_id)
+    if patrol is not None:
+        patrol.last_status = turn.status
+        patrol.last_run_turn_id = turn.id
+        await db.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -258,15 +294,19 @@ async def harness_health(db: AsyncSession) -> dict:
     turns = len((await db.execute(select(HarnessTurn))).scalars().all())
     pending = len((await db.execute(
         select(HarnessApproval).where(HarnessApproval.status == "pending"))).scalars().all())
+    patrols = (await db.execute(select(HarnessPatrol))).scalars().all()
     return {
         "ok": True,
         "sessions": sessions,
         "turns": turns,
         "pending_approvals": pending,
+        "patrols": len(patrols),
+        "active_patrols": len([p for p in patrols if p.is_active]),
         "guard": {
             "max_iterations": int(settings.harness_max_iterations),
             "repeat_limit": int(settings.harness_guard_repeat_limit),
             "turn_timeout_seconds": int(settings.harness_turn_timeout_seconds),
             "approval_ttl_seconds": int(settings.harness_approval_ttl_seconds),
+            "patrol_tick_seconds": int(settings.patrol_tick_seconds),
         },
     }

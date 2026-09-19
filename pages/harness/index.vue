@@ -2,7 +2,8 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   Activity, CheckCircle2, CircleDashed, Clock, Gavel, Loader2,
-  Plus, Send, ShieldAlert, Sparkles, Terminal, Wrench, XCircle, Zap,
+  Pause, Play, Plus, RadioTower, Repeat, Send, ShieldAlert, Sparkles,
+  Terminal, Trash2, Wrench, XCircle, Zap,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -11,6 +12,8 @@ const { api } = useApi()
 // v109 - the harness: the system's own agentic runtime. A session turns one
 // message into a persistent loop that reads the estate, moves it ONLY through
 // fail-closed approvals, and records every frame of the ride.
+// v111 - the patrol: the harness stops waiting to be asked. A mission + a
+// rhythm + a session = the system firing its own rounds, receipts on the board.
 
 interface HarnessSession {
   id: string
@@ -45,6 +48,8 @@ interface TraceFrame {
   answer?: string
   decision?: string
   approval_id?: string
+  patrol?: string
+  patrol_id?: string
 }
 interface TurnFull {
   id: string
@@ -72,11 +77,28 @@ interface ToolDefView {
   sensitive: boolean
   moves: string
 }
+interface Patrol {
+  id: string
+  session_id: string
+  session_name: string | null
+  name: string
+  mission: string
+  interval_seconds: number
+  is_active: boolean
+  run_count: number
+  last_run_at: string | null
+  last_status: string | null
+  last_run_turn_id: string | null
+  last_error: string
+  runs?: TurnSummary[]
+}
 interface Health {
   ok: boolean
   sessions: number
   turns: number
   pending_approvals: number
+  patrols: number
+  active_patrols: number
   guard: Record<string, number>
 }
 
@@ -87,6 +109,7 @@ const STATUS_CLASS: Record<string, string> = {
   exhausted: 'bg-amber-500/10 text-amber-300 border-amber-500/30',
   failed: 'bg-red-500/10 text-red-300 border-red-500/30',
   refused: 'bg-red-500/10 text-red-300 border-red-500/30',
+  held: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/30',
 }
 
 const sessions = ref<HarnessSession[]>([])
@@ -104,6 +127,17 @@ const newName = ref('')
 const newPrompt = ref('')
 const newProvider = ref('sandbox_bridge')
 const error = ref('')
+
+// v111 - the patrol pane
+const pane = ref<'sessions' | 'patrols'>('sessions')
+const patrols = ref<Patrol[]>([])
+const selectedPatrol = ref<Patrol | null>(null)
+const showPatrolCreate = ref(false)
+const newPatrolName = ref('')
+const newPatrolMission = ref('')
+const newPatrolInterval = ref(3600)
+const newPatrolSession = ref('')
+const patrolBusy = ref(false)
 
 const pendingCount = computed(() =>
   approvals.value.filter((a) => a.status === 'pending').length)
@@ -128,6 +162,11 @@ async function loadAll() {
     tools.value = t
     health.value = h
     await loadSessions()
+    patrols.value = await api.get<Patrol[]>('/harness/patrols')
+    if (selectedPatrol.value) {
+      const again = patrols.value.find((p) => p.id === selectedPatrol.value?.id)
+      selectedPatrol.value = again ?? null
+    }
     if (selected.value) await select(selected.value.id, false)
     approvals.value = await api.get<Approval[]>('/harness/approvals')
   } catch (e: any) {
@@ -138,11 +177,121 @@ async function loadAll() {
 }
 
 async function select(id: string, reloadSessions = true) {
+  selectedPatrol.value = null
   if (reloadSessions) await loadSessions(true)
   const found = sessions.value.find((s) => s.id === id)
   selected.value = found ?? null
   if (!found) { turns.value = []; return }
   turns.value = await api.get<TurnFull[]>(`/harness/sessions/${id}/turns`)
+}
+
+// ---------------------------------------------------------------------------
+// v111 - the patrols: the system firing its own rounds
+// ---------------------------------------------------------------------------
+
+function humanize(seconds: number): string {
+  const s = Math.max(5, Number(seconds) || 3600)
+  if (s >= 3600 && s % 3600 === 0) return `every ${s / 3600}h`
+  if (s >= 60 && s % 60 === 0) return `every ${s / 60}m`
+  return `every ${s}s`
+}
+
+async function selectPatrol(id: string) {
+  const p = patrols.value.find((x) => x.id === id)
+  if (!p) return
+  await select(p.session_id, false)
+  selectedPatrol.value = p
+  pane.value = 'patrols'
+}
+
+async function refreshPatrols() {
+  patrols.value = await api.get<Patrol[]>('/harness/patrols')
+  if (selectedPatrol.value) {
+    selectedPatrol.value = patrols.value.find(
+      (p) => p.id === selectedPatrol.value?.id) ?? null
+  }
+}
+
+async function createPatrol() {
+  if (!newPatrolName.value.trim() || !newPatrolMission.value.trim() ||
+      !newPatrolSession.value) return
+  patrolBusy.value = true
+  error.value = ''
+  try {
+    const made = await api.post<Patrol>('/harness/patrols', {
+      session_id: newPatrolSession.value,
+      name: newPatrolName.value.trim(),
+      mission: newPatrolMission.value.trim(),
+      interval_seconds: Math.max(5, Number(newPatrolInterval.value) || 3600),
+    })
+    showPatrolCreate.value = false
+    newPatrolName.value = ''
+    newPatrolMission.value = ''
+    newPatrolInterval.value = 3600
+    await loadAll()
+    await selectPatrol(made.id)
+  } catch (e: any) {
+    error.value = e?.data?.detail || String(e)
+  } finally {
+    patrolBusy.value = false
+  }
+}
+
+async function runPatrolNow() {
+  if (!selectedPatrol.value || patrolBusy.value) return
+  patrolBusy.value = true
+  error.value = ''
+  try {
+    const receipt = await api.post<{ status: string; error: string }>(
+      `/harness/patrols/${selectedPatrol.value.id}/run`)
+    if (receipt.status === 'failed' || receipt.status === 'held') {
+      error.value = receipt.error || `round ${receipt.status}`
+    }
+    await refreshPatrols()
+    health.value = await api.get<Health>('/harness/health')
+    approvals.value = await api.get<Approval[]>('/harness/approvals')
+    if (selected.value) {
+      turns.value = await api.get<TurnFull[]>(
+        `/harness/sessions/${selected.value.id}/turns`)
+    }
+  } catch (e: any) {
+    error.value = e?.data?.detail || String(e)
+  } finally {
+    patrolBusy.value = false
+  }
+}
+
+async function togglePatrol() {
+  if (!selectedPatrol.value || patrolBusy.value) return
+  patrolBusy.value = true
+  error.value = ''
+  try {
+    await api.patch(`/harness/patrols/${selectedPatrol.value.id}`, {
+      is_active: !selectedPatrol.value.is_active,
+    })
+    await refreshPatrols()
+    health.value = await api.get<Health>('/harness/health')
+  } catch (e: any) {
+    error.value = e?.data?.detail || String(e)
+  } finally {
+    patrolBusy.value = false
+  }
+}
+
+async function deletePatrol() {
+  if (!selectedPatrol.value || patrolBusy.value) return
+  patrolBusy.value = true
+  error.value = ''
+  try {
+    await api.delete(`/harness/patrols/${selectedPatrol.value.id}`)
+    selectedPatrol.value = null
+    await refreshPatrols()
+    health.value = await api.get<Health>('/harness/health')
+  } catch (e: any) {
+    error.value = e?.data?.detail || String(e)
+  } finally {
+    patrolBusy.value = false
+  }
 }
 
 async function createSession() {
@@ -184,7 +333,6 @@ async function send() {
     sending.value = false
   }
 }
-
 async function decide(approvalId: string, approve: boolean) {
   deciding.value = approvalId
   error.value = ''
@@ -196,6 +344,7 @@ async function decide(approvalId: string, approve: boolean) {
     }
     approvals.value = await api.get<Approval[]>('/harness/approvals')
     health.value = await api.get<Health>('/harness/health')
+    await refreshPatrols()
   } catch (e: any) {
     error.value = e?.data?.detail || String(e)
   } finally {
@@ -227,7 +376,7 @@ onMounted(loadAll)
           <div>
             <h1 class="text-lg font-bold tracking-tight">The Harness</h1>
             <p class="-mt-0.5 text-[11px] text-zinc-500">
-              the system's own agentic runtime · reads the estate, and moves or builds on it only with a human's word
+              the system's own agentic runtime · reads the estate, moves or builds on it only with a human's word - and patrols it on its own rhythm
             </p>
           </div>
         </div>
@@ -240,7 +389,7 @@ onMounted(loadAll)
             {{ pendingCount }} pending decision{{ pendingCount === 1 ? '' : 's' }}
           </span>
           <span v-if="health" class="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1">
-            {{ health.sessions }} sessions · {{ health.turns }} turns · guard ≤{{ health.guard.max_iterations }} rounds
+            {{ health.sessions }} sessions · {{ health.turns }} turns · {{ health.patrols }} patrol{{ health.patrols === 1 ? '' : 's' }} · guard ≤{{ health.guard.max_iterations }} rounds
           </span>
         </div>
       </div>
@@ -255,8 +404,22 @@ onMounted(loadAll)
 
     <!-- three-pane work surface -->
     <div class="mx-auto flex w-full max-w-[110rem] flex-1 gap-4 overflow-hidden px-4 py-4 sm:px-6">
-      <!-- sessions -->
+      <!-- sessions + patrols -->
       <aside class="hidden w-64 shrink-0 flex-col overflow-y-auto lg:flex">
+        <div class="mb-3 grid grid-cols-2 gap-1 rounded-xl border border-zinc-800 bg-zinc-900/60 p-1">
+          <button
+            class="rounded-lg px-2 py-1.5 text-[11px] font-semibold transition"
+            :class="pane === 'sessions' ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-500 hover:text-zinc-300'"
+            @click="pane = 'sessions'"
+          >Sessions</button>
+          <button
+            class="rounded-lg px-2 py-1.5 text-[11px] font-semibold transition"
+            :class="pane === 'patrols' ? 'bg-amber-500/15 text-amber-300' : 'text-zinc-500 hover:text-zinc-300'"
+            @click="pane = 'patrols'"
+          >Patrols</button>
+        </div>
+
+        <template v-if="pane === 'sessions'">
         <button
           class="mb-3 flex items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 transition hover:bg-amber-500/20"
           @click="showCreate = !showCreate"
@@ -311,6 +474,77 @@ onMounted(loadAll)
         <p v-if="!loading && !sessions.length" class="px-1 text-[11px] leading-relaxed text-zinc-600">
           No sessions yet. Open one, then ask it for the estate - it reads with its tools and asks before it moves.
         </p>
+        </template>
+
+        <template v-else>
+        <button
+          class="mb-3 flex items-center justify-center gap-2 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-300 transition hover:bg-amber-500/20"
+          @click="showPatrolCreate = !showPatrolCreate"
+        >
+          <RadioTower class="h-3.5 w-3.5" /> Enlist patrol
+        </button>
+        <div v-if="showPatrolCreate" class="mb-3 space-y-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+          <input
+            v-model="newPatrolName"
+            placeholder="Patrol name"
+            class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-amber-500/50"
+          />
+          <select
+            v-model="newPatrolSession"
+            class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-amber-500/50"
+          >
+            <option value="" disabled>rides session…</option>
+            <option v-for="s in sessions.filter((x) => x.is_active)" :key="s.id" :value="s.id">
+              {{ s.name }}
+            </option>
+          </select>
+          <textarea
+            v-model="newPatrolMission"
+            rows="3"
+            placeholder="The mission - what to check every round (e.g. 'read the attention feed and summarize anything overdue')"
+            class="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-amber-500/50"
+          />
+          <label class="flex items-center justify-between gap-2 text-[10px] text-zinc-500">
+            rhythm (seconds)
+            <input
+              v-model.number="newPatrolInterval"
+              type="number"
+              min="5"
+              class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-right text-xs outline-none focus:border-amber-500/50"
+            />
+          </label>
+          <button
+            class="w-full rounded-lg bg-amber-500/20 px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/30 disabled:opacity-40"
+            :disabled="patrolBusy || !newPatrolName.trim() || !newPatrolMission.trim() || !newPatrolSession"
+            @click="createPatrol"
+          >Enlist - the system takes the rhythm</button>
+        </div>
+        <button
+          v-for="p in patrols"
+          :key="p.id"
+          class="mb-1.5 rounded-xl border px-3 py-2.5 text-left transition"
+          :class="selectedPatrol?.id === p.id
+            ? 'border-amber-500/40 bg-amber-500/10'
+            : 'border-zinc-800/80 bg-zinc-900/40 hover:border-zinc-700'"
+          @click="selectPatrol(p.id)"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="truncate text-xs font-semibold">{{ p.name }}</span>
+            <span
+              class="shrink-0 rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide"
+              :class="STATUS_CLASS[p.last_status || ''] || 'border-zinc-800 text-zinc-500'"
+            >{{ p.last_status || (p.is_active ? 'armed' : 'off') }}</span>
+          </div>
+          <div class="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-500">
+            <RadioTower class="h-3 w-3" />
+            {{ humanize(p.interval_seconds) }} · {{ p.run_count }} round{{ p.run_count === 1 ? '' : 's' }}
+            <span v-if="!p.is_active" class="text-zinc-600">· paused</span>
+          </div>
+        </button>
+        <p v-if="!loading && !patrols.length" class="px-1 text-[11px] leading-relaxed text-zinc-600">
+          No patrols yet. Enlist one on a session with a mission and a rhythm - the system fires the rounds itself, receipts on the board.
+        </p>
+        </template>
       </aside>
 
       <!-- transcript -->
@@ -320,6 +554,54 @@ onMounted(loadAll)
           <p class="text-xs">Pick a session (or open one) to run the harness.</p>
         </div>
         <template v-else>
+          <!-- v111: the patrol card - the receipt board of the selected patrol -->
+          <div v-if="selectedPatrol" class="border-b border-zinc-800/80 bg-zinc-900/60 px-4 py-3">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2">
+                  <RadioTower class="h-4 w-4 shrink-0 text-amber-300" />
+                  <span class="text-sm font-bold">{{ selectedPatrol.name }}</span>
+                  <span
+                    class="rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide"
+                    :class="STATUS_CLASS[selectedPatrol.last_status || ''] || 'border-zinc-800 text-zinc-500'"
+                  >{{ selectedPatrol.last_status || (selectedPatrol.is_active ? 'armed' : 'off') }}</span>
+                </div>
+                <p class="mt-1 whitespace-pre-wrap text-[11px] leading-relaxed text-zinc-400">{{ selectedPatrol.mission }}</p>
+              </div>
+              <div class="flex shrink-0 items-center gap-2">
+                <button
+                  class="rounded-lg bg-amber-500/20 px-3 py-1.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/30 disabled:opacity-40"
+                  :disabled="patrolBusy"
+                  @click="runPatrolNow"
+                >
+                  <Loader2 v-if="patrolBusy" class="mr-1 inline h-3 w-3 animate-spin" />
+                  <Repeat v-else class="mr-1 inline h-3 w-3" /> Run a round now
+                </button>
+                <button
+                  class="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold disabled:opacity-40"
+                  :class="selectedPatrol.is_active ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'"
+                  :disabled="patrolBusy"
+                  @click="togglePatrol"
+                >
+                  <Pause v-if="selectedPatrol.is_active" class="mr-1 inline h-3 w-3" />
+                  <Play v-else class="mr-1 inline h-3 w-3" />
+                  {{ selectedPatrol.is_active ? 'Pause' : 'Resume' }}
+                </button>
+                <button
+                  class="rounded-lg bg-red-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-red-300 hover:bg-red-500/25 disabled:opacity-40"
+                  :disabled="patrolBusy"
+                  @click="deletePatrol"
+                ><Trash2 class="h-3 w-3" /></button>
+              </div>
+            </div>
+            <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-zinc-500">
+              <span>rides <span class="text-zinc-300">{{ selectedPatrol.session_name || 'session' }}</span></span>
+              <span>{{ humanize(selectedPatrol.interval_seconds) }}</span>
+              <span>{{ selectedPatrol.run_count }} round{{ selectedPatrol.run_count === 1 ? '' : 's' }} fired</span>
+              <span v-if="selectedPatrol.last_run_at">last at {{ new Date(selectedPatrol.last_run_at).toLocaleString() }}</span>
+              <span v-if="selectedPatrol.last_error" class="text-red-300">{{ selectedPatrol.last_error }}</span>
+            </div>
+          </div>
           <div class="flex-1 space-y-4 overflow-y-auto p-4">
             <div
               v-for="turn in turns"
@@ -351,6 +633,9 @@ onMounted(loadAll)
                   </div>
                   <div v-else-if="f.event === 'tool_result'" class="truncate pl-[18px] font-mono text-[10px] text-zinc-500" :title="f.preview">
                     {{ f.preview }}
+                  </div>
+                  <div v-else-if="f.event === 'patrol_start'" class="flex items-center gap-1.5 text-amber-300">
+                    <RadioTower class="h-3 w-3" /> patrol round - fired by the system<span v-if="f.patrol" class="text-zinc-500"> ({{ f.patrol }})</span>
                   </div>
                   <div v-else-if="f.event === 'approval_requested'" class="rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-2">
                     <div class="flex items-center gap-1.5 font-semibold text-violet-300">

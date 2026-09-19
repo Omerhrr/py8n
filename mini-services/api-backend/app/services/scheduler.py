@@ -32,6 +32,7 @@ def start_scheduler() -> AsyncIOScheduler:
         scheduler = AsyncIOScheduler(timezone="UTC")
         scheduler.start()
         _register_escalation_sweep(scheduler)
+        _register_patrol_sweep(scheduler)
         logger.info("APScheduler started")
     return scheduler
 
@@ -58,6 +59,49 @@ def _register_escalation_sweep(sched: AsyncIOScheduler) -> None:
         misfire_grace_time=60,
     )
     logger.info("Registered escalation sweep (every %ss)", seconds)
+
+
+def _register_patrol_sweep(sched: AsyncIOScheduler) -> None:
+    """v111: the patrol's automatic tick - every PY8N_PATROL_TICK_SECONDS
+    (default 60s, 0 disables) the sweep fires every active patrol whose
+    rhythm is due. Each round is a REAL harness turn (same loop, same
+    guard, same fail-closed gate) - the system operating itself on the
+    owner's written mission."""
+    import os
+
+    try:
+        seconds = int(os.environ.get("PY8N_PATROL_TICK_SECONDS") or 60)
+    except (TypeError, ValueError):
+        seconds = 60
+    if seconds <= 0:
+        logger.info("Patrol sweep disabled (PY8N_PATROL_TICK_SECONDS <= 0)")
+        return
+    seconds = max(5, seconds)
+    sched.add_job(
+        _tick_patrols,
+        trigger=IntervalTrigger(seconds=seconds),
+        id="harness:patrols",
+        replace_existing=True,
+        misfire_grace_time=30,
+    )
+    logger.info("Registered harness patrol sweep (every %ss)", seconds)
+
+
+async def _tick_patrols() -> None:
+    """Job callback: fire every due patrol round in its own session - a
+    round's failure is a receipt on the patrol row, never a wedged tick."""
+    from .harness import patrol as patrol_svc
+
+    try:
+        async with AsyncSessionLocal() as session:
+            out = await patrol_svc.run_due(session)
+            await session.commit()
+        for r in out.get("receipts") or []:
+            logger.info("Patrol round: %s -> %s (turn %s)%s",
+                        r.get("name"), r.get("status"), r.get("turn_id"),
+                        f" - {r['error']}" if r.get("error") else "")
+    except Exception:  # noqa: BLE001 - a sweep bug must never wedge the scheduler
+        logger.exception("Patrol sweep failed")
 
 
 async def _tick_escalations() -> None:

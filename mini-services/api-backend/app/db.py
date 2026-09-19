@@ -173,4 +173,11 @@ async def init_db() -> None:
                 if "decided_by" not in ha_cols:
                     sync_conn.execute(text("ALTER TABLE harness_approvals ADD COLUMN decided_by VARCHAR(36)"))
 
+            # v111: the patrol linkage - which patrol fired a turn (fresh
+            # installs get the column from create_all; this is for upgrades)
+            if "harness_turns" in insp.get_table_names():
+                ht_cols = {c["name"] for c in insp.get_columns("harness_turns")}
+                if "patrol_id" not in ht_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_turns ADD COLUMN patrol_id VARCHAR(36)"))
+
         await conn.run_sync(_add_missing_columns)

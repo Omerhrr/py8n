@@ -2034,6 +2034,9 @@ class HarnessTurn(Base):
     # resume state: the message list at the approval pause
     wire: Mapped[list] = mapped_column(JSONVariant, default=list)
     error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # v111: set when the SYSTEM fired this round (a patrol), NULL for a
+    # human-initiated turn - the patrol receipt points here
+    patrol_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
@@ -2064,3 +2067,44 @@ class HarnessApproval(Base):
     # v110: the receipt - WHO decided (user id; NULL = system/expired or an
     # unauthenticated door on a trust-the-wire install)
     decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class HarnessPatrol(Base):
+    """A harness patrol (v111) - the harness scheduling its OWN rounds.
+
+    Until now the harness only ever answered: a human typed, the loop ran.
+    A patrol flips that - the OWNER writes a mission once ("check the
+    attention feed every morning", "walk anything stuck on the front
+    desk"), binds it to a session and a rhythm (interval_seconds), and
+    the SYSTEM fires the rounds itself. Every round is a REAL harness
+    turn through the SAME start_turn path - the same loop, the same
+    guard rails, the same fail-closed gate - so a patrol that wants to
+    move the business still parks a slip for a human. Nothing about the
+    discipline changes when nobody is watching; that is the point.
+
+    The row is the receipt board: run_count, last_run_at, last_status
+    (the turn's terminal state), last_run_turn_id (the full trace one
+    hop away), last_error. The receipt is stamped BEFORE the round runs
+    (the rhythm stays honest even across a crash) and the terminal
+    status lands after.
+    """
+
+    __tablename__ = "harness_patrols"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # the message the patrol sends on every round - the mission
+    mission: Mapped[str] = mapped_column(Text, nullable=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=3600, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # the receipt board
+    run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # completed | exhausted | failed | refused | waiting_approval
+    last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_run_turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
