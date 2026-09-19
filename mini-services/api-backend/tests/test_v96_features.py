@@ -407,4 +407,4 @@ def test_v96_chain_history_depth():
 def test_v96_version_pin():
     from app.config import settings
 
-    assert settings.version == "1.111.0"
+    assert settings.version == "1.112.0"

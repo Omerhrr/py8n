@@ -31,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...models import HarnessPatrol, HarnessSession, HarnessTurn
+from . import dispatch as dispatch_svc
 from .service import HarnessError, start_turn
 
 # the floor for a patrol rhythm - faster than this is not a patrol, it is
@@ -111,10 +112,12 @@ async def run_round(db: AsyncSession, patrol: HarnessPatrol,
         patrol.last_status = "failed"
         patrol.last_error = "the session behind this patrol is gone"
         await db.commit()
+        await dispatch_svc.dispatch_round(db, patrol, error_text=patrol.last_error)
         receipt["status"] = "failed"
         receipt["error"] = patrol.last_error
         return receipt
     if session.is_active is False:
+        # a pause is not a finding - held rounds never dispatch
         patrol.last_status = "held"
         patrol.last_error = "session is inactive - rounds held"
         await db.commit()
@@ -134,6 +137,7 @@ async def run_round(db: AsyncSession, patrol: HarnessPatrol,
         patrol.last_status = "failed"
         patrol.last_error = str(exc)
         await db.commit()
+        await dispatch_svc.dispatch_round(db, patrol, error_text=patrol.last_error)
         receipt["status"] = "failed"
         receipt["error"] = patrol.last_error
         return receipt
@@ -141,6 +145,7 @@ async def run_round(db: AsyncSession, patrol: HarnessPatrol,
         patrol.last_status = "failed"
         patrol.last_error = f"{type(exc).__name__}: {exc}"
         await db.commit()
+        await dispatch_svc.dispatch_round(db, patrol, error_text=patrol.last_error)
         receipt["status"] = "failed"
         receipt["error"] = patrol.last_error
         return receipt
@@ -148,6 +153,10 @@ async def run_round(db: AsyncSession, patrol: HarnessPatrol,
     patrol.last_status = turn.status
     patrol.last_run_turn_id = turn.id
     await db.commit()
+    # v112: the receipt reached a terminal state - the outcome walks out
+    # (a paused round waits for the decision; the decision mails instead)
+    if turn.status in dispatch_svc.TERMINAL:
+        await dispatch_svc.dispatch_round(db, patrol, turn)
     receipt.update({"status": turn.status, "turn_id": turn.id})
     return receipt
 

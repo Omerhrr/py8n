@@ -2106,5 +2106,12 @@ class HarnessPatrol(Base):
     last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
     last_run_turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # v112 - THE DISPATCH: the round's outcome walks OUT of py8n over the
+    # report envelope's own email discipline. Empty recipients = quiet.
+    dispatch_to: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ok | error | skipped (None = never dispatched)
+    last_dispatch_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_dispatch_detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

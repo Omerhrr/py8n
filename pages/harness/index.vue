@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import {
-  Activity, CheckCircle2, CircleDashed, Clock, Gavel, Loader2,
+  Activity, CheckCircle2, CircleDashed, Clock, Gavel, Loader2, Mail,
   Pause, Play, Plus, RadioTower, Repeat, Send, ShieldAlert, Sparkles,
   Terminal, Trash2, Wrench, XCircle, Zap,
 } from 'lucide-vue-next'
@@ -90,6 +90,10 @@ interface Patrol {
   last_status: string | null
   last_run_turn_id: string | null
   last_error: string
+  dispatch_to: string
+  last_dispatch_at: string | null
+  last_dispatch_status: string | null
+  last_dispatch_detail: string
   runs?: TurnSummary[]
 }
 interface Health {
@@ -136,6 +140,7 @@ const showPatrolCreate = ref(false)
 const newPatrolName = ref('')
 const newPatrolMission = ref('')
 const newPatrolInterval = ref(3600)
+const newPatrolDispatch = ref('')
 const newPatrolSession = ref('')
 const patrolBusy = ref(false)
 
@@ -223,13 +228,29 @@ async function createPatrol() {
       name: newPatrolName.value.trim(),
       mission: newPatrolMission.value.trim(),
       interval_seconds: Math.max(5, Number(newPatrolInterval.value) || 3600),
+      dispatch_to: newPatrolDispatch.value.trim(),
     })
     showPatrolCreate.value = false
     newPatrolName.value = ''
     newPatrolMission.value = ''
     newPatrolInterval.value = 3600
+    newPatrolDispatch.value = ''
     await loadAll()
     await selectPatrol(made.id)
+  } catch (e: any) {
+    error.value = e?.data?.detail || String(e)
+  } finally {
+    patrolBusy.value = false
+  }
+}
+
+async function dispatchPatrolNow() {
+  if (!selectedPatrol.value || patrolBusy.value) return
+  patrolBusy.value = true
+  error.value = ''
+  try {
+    await api.post(`/harness/patrols/${selectedPatrol.value.id}/dispatch`)
+    await refreshPatrols()
   } catch (e: any) {
     error.value = e?.data?.detail || String(e)
   } finally {
@@ -513,6 +534,11 @@ onMounted(loadAll)
               class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-right text-xs outline-none focus:border-amber-500/50"
             />
           </label>
+          <input
+            v-model="newPatrolDispatch"
+            placeholder="mail findings to (emails, comma-separated - optional)"
+            class="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs outline-none focus:border-amber-500/50"
+          />
           <button
             class="w-full rounded-lg bg-amber-500/20 px-2.5 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/30 disabled:opacity-40"
             :disabled="patrolBusy || !newPatrolName.trim() || !newPatrolMission.trim() || !newPatrolSession"
@@ -578,6 +604,12 @@ onMounted(loadAll)
                   <Repeat v-else class="mr-1 inline h-3 w-3" /> Run a round now
                 </button>
                 <button
+                  v-if="selectedPatrol.dispatch_to"
+                  class="rounded-lg bg-sky-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-sky-300 hover:bg-sky-500/25 disabled:opacity-40"
+                  :disabled="patrolBusy"
+                  @click="dispatchPatrolNow"
+                ><Mail class="mr-1 inline h-3 w-3" /> Write home</button>
+                <button
                   class="rounded-lg px-2.5 py-1.5 text-[11px] font-semibold disabled:opacity-40"
                   :class="selectedPatrol.is_active ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700' : 'bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30'"
                   :disabled="patrolBusy"
@@ -600,6 +632,21 @@ onMounted(loadAll)
               <span>{{ selectedPatrol.run_count }} round{{ selectedPatrol.run_count === 1 ? '' : 's' }} fired</span>
               <span v-if="selectedPatrol.last_run_at">last at {{ new Date(selectedPatrol.last_run_at).toLocaleString() }}</span>
               <span v-if="selectedPatrol.last_error" class="text-red-300">{{ selectedPatrol.last_error }}</span>
+            </div>
+            <!-- v112: the dispatch receipt - where the findings walk -->
+            <div v-if="selectedPatrol.dispatch_to" class="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[10px]">
+              <span class="text-zinc-500">writes to</span>
+              <span class="text-sky-300">{{ selectedPatrol.dispatch_to }}</span>
+              <span
+                v-if="selectedPatrol.last_dispatch_status"
+                class="rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide"
+                :class="selectedPatrol.last_dispatch_status === 'ok'
+                  ? 'border-emerald-500/40 text-emerald-300'
+                  : selectedPatrol.last_dispatch_status === 'error'
+                    ? 'border-red-500/40 text-red-300'
+                    : 'border-zinc-700 text-zinc-400'"
+              >{{ selectedPatrol.last_dispatch_status }}</span>
+              <span v-if="selectedPatrol.last_dispatch_detail" class="text-zinc-500">{{ selectedPatrol.last_dispatch_detail }}</span>
             </div>
           </div>
           <div class="flex-1 space-y-4 overflow-y-auto p-4">

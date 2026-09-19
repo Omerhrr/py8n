@@ -24,6 +24,7 @@ PATCH /harness/patrols/{id}                  rename / mission / rhythm / active
 DELETE /harness/patrols/{id}
 POST /harness/patrols/{id}/run               fire one round NOW (on demand)
 GET  /harness/patrols/{id}/runs              the rounds the SYSTEM fired
+POST /harness/patrols/{id}/dispatch          send the last round's digest (or a handshake) NOW (v112)
 GET  /harness/health                         harness health + guard config
 """
 
@@ -40,6 +41,7 @@ from ..db import get_db
 from ..models import HarnessPatrol, HarnessSession, HarnessTurn
 from ..services import harness
 from ..services.harness import patrol as patrol_svc
+from ..services.harness import dispatch as dispatch_svc
 from ..services.harness import tools as harness_tools
 from ..services.harness.service import HarnessError
 
@@ -97,6 +99,9 @@ class PatrolCreate(BaseModel):
     mission: str = Field(..., min_length=1, max_length=8000)
     interval_seconds: int = Field(3600, ge=5, le=7 * 24 * 3600)
     is_active: bool = True
+    # v112: comma-separated emails the round's outcome walks to (empty =
+    # quiet) - validated with the report envelope's own address rules
+    dispatch_to: str = Field("", max_length=2000)
 
     @field_validator("name", "mission")
     @classmethod
@@ -107,12 +112,23 @@ class PatrolCreate(BaseModel):
             raise ValueError("must not be blank")
         return v.strip()
 
+    @field_validator("dispatch_to")
+    @classmethod
+    def _recipients(cls, v: str) -> str:
+        if not (v or "").strip():
+            return ""
+        try:
+            return dispatch_svc.validate_recipients(v)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
 
 class PatrolUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=120)
     mission: str | None = Field(None, min_length=1, max_length=8000)
     interval_seconds: int | None = Field(None, ge=5, le=7 * 24 * 3600)
     is_active: bool | None = None
+    dispatch_to: str | None = Field(None, max_length=2000)
 
     @field_validator("name", "mission")
     @classmethod
@@ -120,6 +136,16 @@ class PatrolUpdate(BaseModel):
         if v is not None and not v.strip():
             raise ValueError("must not be blank")
         return v.strip() if v is not None else v
+
+    @field_validator("dispatch_to")
+    @classmethod
+    def _recipients(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return "" if v is not None else None
+        try:
+            return dispatch_svc.validate_recipients(v)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def session_out(s: HarnessSession) -> dict[str, Any]:
@@ -347,6 +373,12 @@ def patrol_out(p: HarnessPatrol, session_name: str | None = None) -> dict[str, A
         "last_status": p.last_status,
         "last_run_turn_id": p.last_run_turn_id,
         "last_error": p.last_error,
+        # v112: the dispatch receipt - where the findings walk and what
+        # happened the last time they tried
+        "dispatch_to": p.dispatch_to or "",
+        "last_dispatch_at": p.last_dispatch_at.isoformat() if p.last_dispatch_at else None,
+        "last_dispatch_status": p.last_dispatch_status,
+        "last_dispatch_detail": p.last_dispatch_detail or "",
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }
@@ -382,7 +414,8 @@ async def create_patrol(body: PatrolCreate, user=Depends(get_optional_user),
     row = await patrol_svc.create_patrol(
         db, owner_id=user.id if user else None, session_id=session.id,
         name=body.name.strip(), mission=body.mission.strip(),
-        interval_seconds=body.interval_seconds, is_active=body.is_active)
+        interval_seconds=body.interval_seconds, is_active=body.is_active,
+        dispatch_to=body.dispatch_to)
     return await _patrol_out(db, row)
 
 
@@ -431,3 +464,29 @@ async def patrol_rounds(patrol_id: str, user=Depends(get_optional_user),
     row = await _own_patrol(db, patrol_id, user)
     return [turn_out(t, full=True)
             for t in await patrol_svc.list_patrol_turns(db, row.id)]
+
+
+@router.post("/patrols/{patrol_id}/dispatch")
+async def dispatch_patrol(patrol_id: str, user=Depends(get_optional_user),
+                          db: AsyncSession = Depends(get_db)) -> dict[str, Any]:
+    """v112: send a dispatch NOW - the patrol's last round digest if one
+    exists, a handshake otherwise. The same path the sweep rides, on
+    demand: the operator wires the recipients and proves the walk works
+    before the first real round."""
+    row = await _own_patrol(db, patrol_id, user)
+    if not (row.dispatch_to or "").strip():
+        raise HTTPException(status_code=400, detail="no dispatch_to configured on this patrol")
+    last_turn = None
+    if row.last_run_turn_id:
+        try:
+            last_turn = await harness.get_turn(db, row.last_run_turn_id)
+        except HarnessError:
+            last_turn = None  # a stale turn id - handshake instead
+    await dispatch_svc.dispatch_round(db, row, last_turn, handshake=last_turn is None)
+    await db.refresh(row)
+    return {
+        "patrol_id": row.id,
+        "last_dispatch_status": row.last_dispatch_status,
+        "last_dispatch_detail": row.last_dispatch_detail,
+        "last_dispatch_at": row.last_dispatch_at.isoformat() if row.last_dispatch_at else None,
+    }

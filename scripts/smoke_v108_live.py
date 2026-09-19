@@ -203,7 +203,7 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.111.0", version
+            assert version == "1.112.0", version
 
             first = module_round_check(c)
             print(f"[1] MODULE ROUND OK - the module answered "

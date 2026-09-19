@@ -29,6 +29,7 @@ from ...config import settings
 from ...models import HarnessApproval, HarnessPatrol, HarnessSession, HarnessTurn
 from . import tools as harness_tools
 from . import loop as harness_loop
+from . import dispatch as dispatch_svc
 from .guard import TurnGuard
 
 
@@ -185,6 +186,15 @@ async def sweep_expired(db: AsyncSession, owner_id: str | None) -> int:
             harness_loop._frame(turn, {  # noqa: SLF001
                 "event": "approval_expired", "approval_id": slip.id,
                 "tool": slip.tool})
+            # v112: the receipt board must not keep saying waiting_approval
+            # after silence refused the round - and the refusal walks out
+            # with the rest (fail-closed outcomes are findings too)
+            if turn.patrol_id:
+                patrol = await db.get(HarnessPatrol, turn.patrol_id)
+                if patrol is not None:
+                    patrol.last_status = turn.status
+                    patrol.last_run_turn_id = turn.id
+                    await dispatch_svc.dispatch_round(db, patrol, turn)
     if slips:
         await db.commit()
     return len(slips)
@@ -275,7 +285,9 @@ async def decide(db: AsyncSession, slip: HarnessApproval, *,
 async def _refresh_patrol_receipt(db: AsyncSession, turn: HarnessTurn) -> None:
     """v111: when the turn belongs to a patrol, the decision's outcome
     lands on the patrol's receipt board too - the round ended where the
-    human's answer left it (completed, refused, waiting again)."""
+    human's answer left it (completed, refused, waiting again).
+    v112: a terminal outcome also walks OUT - the gated round's answer
+    mails home exactly when the decision made it real."""
     if not turn.patrol_id:
         return
     patrol = await db.get(HarnessPatrol, turn.patrol_id)
@@ -283,6 +295,8 @@ async def _refresh_patrol_receipt(db: AsyncSession, turn: HarnessTurn) -> None:
         patrol.last_status = turn.status
         patrol.last_run_turn_id = turn.id
         await db.commit()
+        if turn.status in dispatch_svc.TERMINAL:
+            await dispatch_svc.dispatch_round(db, patrol, turn)
 
 
 # ---------------------------------------------------------------------------
