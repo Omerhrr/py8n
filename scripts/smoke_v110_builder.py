@@ -143,7 +143,7 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.112.0", version
+            assert version == "1.113.0", version
 
             # the harness session (fresh memory each turn - the bridge is the brain)
             r = c.post("/harness/sessions", json={

@@ -429,6 +429,8 @@ def test_v91_catalog_journeys():
                 ("in", "Customer onboarding", "Invoice lifecycle"),
                 ("in", "Delivery pipeline", "Invoice lifecycle"),
                 ("in", "Appointment journey", "Invoice lifecycle"),
+                # v113: the ERP core's shipped orders land here too
+                ("in", "Sales order lifecycle", "Invoice lifecycle"),
             }, fin
 
             ops_op = ops["operations-operator"]["journeys"]
@@ -450,12 +452,13 @@ def test_v91_catalog_journeys():
             assert out_leg["due_in_seconds"] == 5 * 24 * 3600
 
             # every leg shows exactly twice - out on the source's card,
-            # in on the target's card (5 chains, v90's full set)
+            # in on the target's card (v113: 7 journeys - the chains share
+            # legs, so the card count keys off journeys, not chain legs)
             total = sum(len(o["journeys"]) for o in ops.values())
-            assert total == 10, total
+            assert total == 14, total
 
     _sync(_wrap(_go()))
 
 
 def test_v91_version():
-    assert settings.version == "1.112.0"
+    assert settings.version == "1.113.0"

@@ -402,4 +402,4 @@ def test_v106_deployment_liveness_rides_the_surface():
 # ---------------------------------------------------------------------------
 
 def test_v106_version_pin():
-    assert settings.version == "1.112.0"
+    assert settings.version == "1.113.0"

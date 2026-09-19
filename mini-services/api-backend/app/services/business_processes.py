@@ -497,7 +497,12 @@ async def advance_instance(db: AsyncSession, instance_id: str, *, owner_id: str 
         payload={"process_id": p.id, "process_name": p.name,
                  "instance_id": row.id, "ref": row.ref, "title": row.title,
                  "from": current, "to": chosen["to"],
-                 "transition": chosen["name"], "note": (note or "")[:200]},
+                 "transition": chosen["name"], "note": (note or "")[:200],
+                 # v113: the move carries the entity's memory - reactive
+                 # workflows (the ERP's ledger poster, the stock pick
+                 # ledger) read the total / the sku straight off the wire
+                 # instead of guessing from titles
+                 "context": dict(new_ctx)},
         correlation_id=row.id)
     journey = await instance_journey(db, row.id)
     out = instance_out(row, definition=definition, journey=journey)
@@ -1802,6 +1807,9 @@ CHAIN_NAMES: dict[tuple[str, str], str] = {
     ("Lead pipeline", "won"): "Revenue chain",
     ("Purchase lifecycle", "ordered"): "Supply chain",
     ("Appointment journey", "billed"): "Care chain",
+    # v113: the ERP core's walks - the backbone composing the company
+    ("Sales order lifecycle", "shipped"): "Order to Cash chain",
+    ("Inventory replenishment", "reorder_placed"): "Replenishment chain",
 }
 
 
