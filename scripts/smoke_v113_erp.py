@@ -11,8 +11,9 @@ end to end on the real clock.
    lifecycle (same ref, its own five-day SLA); the receivable walks
    match -> approve -> schedule -> pay; the pick landed a real stock
    movement (delta -6) and the books carry REAL journal lines with the
-   order's total riding the event's context - AR debit on shipped,
-   cash credit on paid - posted by the live ledger workflow.
+   order's total riding the event's context - double-entry since v114:
+   AR debit + revenue credit on shipped, cash debit + receivable
+   clearing on paid - posted by the live ledger workflow.
 3. THE REPLENISHMENT WALK: the low SKU (SKU-1003, seeded 'low') is
    reordered; the Purchase lifecycle opens the PO by itself with the
    SKU as its ref; the estate chain map draws BOTH the Order to Cash
@@ -144,7 +145,7 @@ def order_to_cash_check(c: httpx.Client) -> dict:
               and e["payload"]["to"] == "paid")
     assert ev["payload"]["context"]["total"] == "720.00", ev["payload"]
 
-    # the books posted themselves on the live reactive path
+    # the books posted themselves on the live reactive path (double-entry)
     drain(c, 3.0)
     ds = {d["name"]: d["id"] for d in c.get("/datasets").json()}
     gl = c.get(f"/datasets/{ds['GL entries']}/rows").json()["rows"]
@@ -152,10 +153,15 @@ def order_to_cash_check(c: httpx.Client) -> dict:
     ship_line = by_memo["SO-1042 moved to shipped"]
     assert ship_line["account"] == "Accounts receivable", ship_line
     assert ship_line["debit"] == "720.00", ship_line
+    rev_line = by_memo["revenue recognized on SO-1042"]
+    assert rev_line["account"] == "Revenue" and rev_line["credit"] == "720.00", rev_line
     inv_line = by_memo["SO-1042 moved to invoiced"]
-    assert inv_line["debit"] == "720.00", inv_line
+    assert inv_line["debit"] == "" and inv_line["credit"] == "", inv_line
     pay_line = by_memo["payment received on SO-1042"]
-    assert pay_line["account"] == "Cash" and pay_line["credit"] == "720.00", pay_line
+    assert pay_line["account"] == "Cash" and pay_line["debit"] == "720.00", pay_line
+    settled = by_memo["SO-1042 settled"]
+    assert settled["account"] == "Accounts receivable" \
+        and settled["credit"] == "720.00", settled
 
     # the pick landed its movement
     mv = c.get(f"/datasets/{ds['Stock movements']}/rows").json()["rows"]
@@ -241,7 +247,7 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.113.0", version
+            assert version == "1.114.0", version
 
             systems = company_install_check(c)
             print(f"[1] THE COMPANY INSTALLS OK - four operators landed "
@@ -256,9 +262,9 @@ def main() -> int:
                   f"Invoice lifecycle (same ref, its own SLA) and it walked "
                   f"match -> approve -> schedule -> pay; the books posted "
                   f"themselves on the live reactive path ({o2c['gl_lines']} "
-                  f"GL lines: AR debit 720.00 on shipped, cash credit on "
-                  f"paid) and the pick landed its movement "
-                  f"({o2c['movements']} row, delta -6)")
+                  f"GL lines: AR debit + revenue credit on shipped, cash "
+                  f"debit + the clearing on paid) and the pick landed its "
+                  f"movement ({o2c['movements']} row, delta -6)")
 
             repl = replenishment_and_chains_check(c)
             print(f"[3] THE REPLENISHMENT WALK OK - the low SKU reordered "

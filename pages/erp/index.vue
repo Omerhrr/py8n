@@ -52,11 +52,20 @@ const machines = ref<Record<string, ProcessDef>>({})
 const instances = ref<Record<string, Instance[]>>({})
 const tables = ref<Record<string, Row[]>>({})
 const chains = ref<Chain[]>([])
+type TBRow = { account: string; kind: string; debits: number; credits: number; balance: number }
+type TrialBalance = {
+  rows: TBRow[]
+  totals: { debits: number; credits: number; balanced: boolean }
+  income: { revenue: number; expenses: number; net: number }
+  line_count: number
+}
+const trialBalance = ref<TrialBalance | null>(null)
 
 const ORDER_MACHINE = 'Sales order lifecycle'
 const STOCK_MACHINE = 'Inventory replenishment'
 const CLOSE_MACHINE = 'Month-end close'
 const PO_MACHINE = 'Purchase lifecycle'
+const PAYROLL_MACHINE = 'Payroll lifecycle'
 
 const dsIds = ref<Record<string, string>>({})
 
@@ -64,6 +73,7 @@ const hasOrders = computed(() => !!machines.value[ORDER_MACHINE])
 const hasStock = computed(() => !!machines.value[STOCK_MACHINE])
 const hasClose = computed(() => !!machines.value[CLOSE_MACHINE])
 const hasPO = computed(() => !!machines.value[PO_MACHINE])
+const hasPayroll = computed(() => !!machines.value[PAYROLL_MACHINE])
 const installed = computed(() => hasOrders.value || hasStock.value || hasClose.value)
 
 // ---- tabs -----------------------------------------------------------------
@@ -73,6 +83,7 @@ const tabs = computed(() => [
   { key: 'orders', label: 'Order desk', show: hasOrders.value },
   { key: 'stock', label: 'Stock room', show: hasStock.value },
   { key: 'purchasing', label: 'Purchasing' },
+  { key: 'people', label: 'People', show: hasPayroll.value },
   { key: 'ledger', label: 'Ledger' },
   { key: 'close', label: 'Close', show: hasClose.value },
 ].filter(t => t.show !== false))
@@ -94,6 +105,7 @@ const STATE_COLORS: Record<string, string> = {
   reconciling: 'bg-amber-500/15 text-amber-400',
   reviewed: 'bg-violet-500/15 text-violet-400',
   closed: 'bg-emerald-500/15 text-emerald-400',
+  calculated: 'bg-amber-500/15 text-amber-400',
   received: 'bg-zinc-700/60 text-zinc-300',
   matched: 'bg-sky-500/15 text-sky-400',
   approved: 'bg-violet-500/15 text-violet-400',
@@ -121,6 +133,14 @@ const openReceivables = computed(() =>
   (instances.value['Invoice lifecycle'] || []).filter(i => !i.is_terminal))
 const glLines = computed(() => tables.value['GL entries'] || [])
 const stockMoves = computed(() => tables.value['Stock movements'] || [])
+const employees = computed(() => tables.value['Employees'] || [])
+const payrollRuns = computed(() =>
+  (instances.value[PAYROLL_MACHINE] || []).filter(i => !i.is_terminal))
+const monthlyPayroll = computed(() =>
+  employees.value
+    .filter(e => String(e.status || '') === 'active')
+    .reduce((sum, e) => sum + (parseFloat(e.salary) || 0), 0)
+    .toFixed(2))
 
 const onHand = computed(() => {
   // seed stock + the appended deltas - the movements ledger is the truth
@@ -139,8 +159,10 @@ const kpis = computed(() => [
     note: 'SKUs below reorder point' },
   { label: 'Open receivables', value: openReceivables.value.length,
     note: openReceivables.value.length || hasPO.value ? 'Invoice lifecycle' : 'install Finance' },
-  { label: 'GL lines', value: glLines.value.length,
-    note: 'posted by the ledger workflow' },
+  { label: 'Net income', value: trialBalance.value?.income
+      ? trialBalance.value.income.net.toFixed(2) : '-',
+    note: trialBalance.value?.totals?.balanced === false
+      ? 'the books DO NOT balance' : 'revenue - expenses, off the books' },
 ])
 
 // the console's two chains - the walks the ERP starts
@@ -241,13 +263,53 @@ async function openPeriod() {
   }
 }
 
+// ---- run payroll -------------------------------------------------------------
+const showNewRun = ref(false)
+const newRun = ref({ ref: '', period: '', gross: '', headcount: '' })
+const newRunError = ref('')
+
+async function runPayroll() {
+  newRunError.value = ''
+  const p = newRun.value
+  if (!p.ref.trim() || !p.period.trim()) {
+    newRunError.value = 'the run needs a ref and a period'
+    return
+  }
+  try {
+    const dsId = dsIds.value['Payroll runs']
+    if (dsId) {
+      await api.post(`/datasets/${dsId}/rows`, {
+        rows: [{ ref: p.ref.trim(), period: p.period.trim(),
+                 gross: p.gross.trim(), headcount: p.headcount.trim(),
+                 status: 'draft' }],
+      })
+    }
+    const m = machines.value[PAYROLL_MACHINE]
+    if (m) {
+      await api.post(`/processes/${m.id}/instances`, {
+        ref: p.ref.trim(),
+        title: `Payroll ${p.ref.trim()} - ${p.period.trim()}`,
+        context: { ref: p.ref.trim(), period: p.period.trim(),
+                   gross: p.gross.trim(), headcount: p.headcount.trim(),
+                   status: 'draft' },
+      })
+    }
+    showNewRun.value = false
+    newRun.value = { ref: '', period: '', gross: '', headcount: '' }
+    flash.value = `${p.ref.trim()} on the payroll machine - the books see it when it pays`
+    await refresh()
+  } catch (e: any) {
+    newRunError.value = e?.data?.detail || e?.message || 'the run was refused'
+  }
+}
+
 // ---- loading ----------------------------------------------------------------
 async function refresh() {
   error.value = ''
   try {
     const procs = await api.get<{ processes: ProcessDef[] }>('/processes')
     const want = [ORDER_MACHINE, STOCK_MACHINE, CLOSE_MACHINE, PO_MACHINE,
-                  'Invoice lifecycle', 'Delivery pipeline']
+                  PAYROLL_MACHINE, 'Invoice lifecycle', 'Delivery pipeline']
     const found: Record<string, ProcessDef> = {}
     for (const p of procs.processes) {
       if (want.includes(p.name) && !found[p.name]) found[p.name] = p
@@ -256,7 +318,8 @@ async function refresh() {
 
     const dsList = await api.get<{ id: string; name: string }[]>('/datasets')
     const ids: Record<string, string> = {}
-    const wantDs = ['Products', 'Sales orders', 'Stock movements', 'GL entries']
+    const wantDs = ['Products', 'Sales orders', 'Stock movements', 'GL entries',
+                    'Employees', 'Payroll runs']
     for (const d of dsList) {
       if (wantDs.includes(d.name)) ids[d.name] = d.id
     }
@@ -276,6 +339,18 @@ async function refresh() {
       if (i < dsNames.length) tables.value[dsNames[i]] = (res as any).rows || []
       else instances.value[procNames[i - dsNames.length]] = (res as any).instances || []
     })
+
+    // the books speak - the trial balance over the GL entries dataset
+    // (the posters keep the pairs; this proves it and reads the income)
+    const glId = ids['GL entries']
+    if (glId) {
+      try {
+        trialBalance.value = await api.get<TrialBalance>(
+          `/erp/trial-balance?dataset_id=${encodeURIComponent(glId)}`)
+      } catch { trialBalance.value = null }
+    } else {
+      trialBalance.value = null
+    }
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'the console could not reach the books'
   } finally {
@@ -302,8 +377,8 @@ useHead({ title: 'ERP - Py8n' })
           ERP
         </h1>
         <p class="mt-1 text-sm text-zinc-500">
-          The company backbone - the order desk, the stock room and the books,
-          run on py8n's machines, datasets and chains.
+          The company backbone - the order desk, the stock room, the people
+          and the books, run on py8n's machines, datasets and chains.
         </p>
       </div>
       <button
@@ -583,11 +658,131 @@ useHead({ title: 'ERP - Py8n' })
         </template>
       </div>
 
+      <!-- ============ PEOPLE ============ -->
+      <div v-else-if="tab === 'people' && hasPayroll" class="space-y-4">
+        <div class="flex justify-end">
+          <button
+            class="rounded-xl bg-amber-500 px-4 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400"
+            @click="showNewRun = !showNewRun"
+          >{{ showNewRun ? 'Cancel' : 'Run payroll' }}</button>
+        </div>
+        <form
+          v-if="showNewRun"
+          class="grid grid-cols-2 gap-3 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4 lg:grid-cols-5"
+          @submit.prevent="runPayroll"
+        >
+          <input v-model="newRun.ref" placeholder="PR-2026-08" class="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-amber-500" />
+          <input v-model="newRun.period" placeholder="period (2026-08)" class="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-amber-500" />
+          <input v-model="newRun.gross" placeholder="gross" class="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-amber-500" />
+          <input v-model="newRun.headcount" placeholder="headcount" class="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-xs outline-none focus:border-amber-500" />
+          <button class="rounded-lg bg-amber-500 px-3 py-2 text-xs font-semibold text-zinc-950 hover:bg-amber-400">Run</button>
+          <p v-if="newRunError" class="col-span-full text-xs text-rose-400">{{ newRunError }}</p>
+        </form>
+
+        <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div
+            v-for="i in (instances[PAYROLL_MACHINE] || [])"
+            :key="i.id"
+            class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-4"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <p class="truncate text-xs font-medium text-zinc-200">{{ i.title || i.ref }}</p>
+              <span class="rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase" :class="stateClass(i.state)">{{ i.state }}</span>
+            </div>
+            <p class="mt-0.5 text-[10px] text-zinc-500">
+              {{ i.ref }}
+              <template v-if="i.context?.period"> · period {{ i.context.period }}</template>
+              <template v-if="i.context?.gross"> · gross {{ i.context.gross }}</template>
+              <template v-if="i.context?.headcount"> · {{ i.context.headcount }} people</template>
+              <span v-if="i.is_stuck" class="text-rose-400"> · past SLA</span>
+            </p>
+            <div v-if="allowedFrom(machines[PAYROLL_MACHINE], i.state).length" class="mt-3 flex flex-wrap gap-1">
+              <button
+                v-for="t in allowedFrom(machines[PAYROLL_MACHINE], i.state)" :key="t.name"
+                class="rounded-md border border-zinc-700 px-2 py-1 text-[10px] font-medium text-zinc-300 transition hover:border-amber-500 hover:text-amber-400 disabled:opacity-40"
+                :disabled="busy === `${i.id}:${t.name}`"
+                @click="advance(PAYROLL_MACHINE, i, t.name)"
+              >{{ t.name }}</button>
+            </div>
+          </div>
+          <p v-if="!(instances[PAYROLL_MACHINE] || []).length" class="rounded-2xl border border-dashed border-zinc-700 px-4 py-6 text-center text-xs text-zinc-600 md:col-span-2 xl:col-span-4">
+            The payroll calendar is empty - run payroll when the period ends.
+          </p>
+        </div>
+
+        <section class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+          <div class="flex items-baseline justify-between">
+            <h2 class="text-sm font-semibold">Employees</h2>
+            <p class="text-[10px] text-zinc-500">active monthly gross: <span class="tabular-nums text-zinc-300">{{ monthlyPayroll }}</span></p>
+          </div>
+          <table class="mt-3 w-full text-left text-xs">
+            <thead class="text-zinc-500">
+              <tr>
+                <th class="pb-2 font-medium">emp</th><th class="pb-2 font-medium">name</th>
+                <th class="pb-2 font-medium">role</th>
+                <th class="pb-2 font-medium text-right">salary</th><th class="pb-2 font-medium">status</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-800/60">
+              <tr v-for="e in employees" :key="String(e.emp)">
+                <td class="py-1.5 font-mono text-zinc-300">{{ e.emp }}</td>
+                <td class="py-1.5 text-zinc-400">{{ e.name }}</td>
+                <td class="py-1.5 text-zinc-500">{{ e.role }}</td>
+                <td class="py-1.5 text-right tabular-nums text-zinc-300">{{ e.salary }}</td>
+                <td class="py-1.5">
+                  <span class="rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase" :class="String(e.status) === 'active' ? 'bg-emerald-500/15 text-emerald-400' : 'bg-amber-500/15 text-amber-400'">{{ e.status }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
       <!-- ============ LEDGER ============ -->
       <div v-else-if="tab === 'ledger'" class="space-y-4">
+        <section v-if="trialBalance" class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold">Trial balance</h2>
+            <span
+              class="rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase"
+              :class="trialBalance.totals.balanced ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'"
+            >{{ trialBalance.totals.balanced ? 'the books balance' : 'DO NOT balance' }}</span>
+          </div>
+          <p class="mt-0.5 text-xs text-zinc-500">
+            {{ trialBalance.line_count }} journal lines over {{ trialBalance.rows.length }} accounts -
+            revenue {{ trialBalance.income.revenue.toFixed(2) }} · expenses {{ trialBalance.income.expenses.toFixed(2) }} ·
+            net {{ trialBalance.income.net.toFixed(2) }}
+          </p>
+          <table class="mt-3 w-full text-left text-xs">
+            <thead class="text-zinc-500">
+              <tr>
+                <th class="pb-2 font-medium">account</th><th class="pb-2 font-medium">kind</th>
+                <th class="pb-2 font-medium text-right">debits</th><th class="pb-2 font-medium text-right">credits</th>
+                <th class="pb-2 font-medium text-right">balance</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-zinc-800/60">
+              <tr v-for="r in trialBalance.rows" :key="r.account">
+                <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                <td class="py-1.5 text-zinc-600">{{ r.kind }}</td>
+                <td class="py-1.5 text-right tabular-nums text-emerald-400">{{ r.debits ? r.debits.toFixed(2) : '' }}</td>
+                <td class="py-1.5 text-right tabular-nums text-sky-400">{{ r.credits ? r.credits.toFixed(2) : '' }}</td>
+                <td class="py-1.5 text-right tabular-nums" :class="r.balance >= 0 ? 'text-zinc-200' : 'text-rose-400'">{{ r.balance.toFixed(2) }}</td>
+              </tr>
+            </tbody>
+            <tfoot class="border-t border-zinc-800 text-zinc-400">
+              <tr>
+                <td class="pt-2 font-medium" colspan="2">totals</td>
+                <td class="pt-2 text-right tabular-nums text-emerald-400">{{ trialBalance.totals.debits.toFixed(2) }}</td>
+                <td class="pt-2 text-right tabular-nums text-sky-400">{{ trialBalance.totals.credits.toFixed(2) }}</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </section>
         <section class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
           <h2 class="text-sm font-semibold">GL entries</h2>
-          <p class="mt-0.5 text-xs text-zinc-500">One journal line per order move - posted by the Order ledger poster workflow.</p>
+          <p class="mt-0.5 text-xs text-zinc-500">One journal line per move - the posters pair every debit with a credit (orders, stock, payroll).</p>
           <div v-if="!glLines.length" class="mt-3 rounded-xl border border-dashed border-zinc-700 px-4 py-6 text-center text-xs text-zinc-600">
             The books are blank - boot the ERP system (workflows active) and move an order.
           </div>

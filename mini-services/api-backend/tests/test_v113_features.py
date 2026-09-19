@@ -24,15 +24,18 @@ company backbone the departments were missing:
   Replenishment chain with the un-installed tail as an honest pending
   leg naming Delivery pipeline.
 * THE BOOKS POST THEMSELVES: boot the system with activate_workflows
-  and the reactive path is live - every order move lands its journal
-  line on GL entries (AR debit on shipped/invoiced, cash credit on
-  paid, the total from the wire) and every pick lands a stock movement
-  (delta = -qty). The ledger is a workflow, not a report.
+  and the reactive path is live - every order move lands journal lines
+  on GL entries (double-entry since v114: the ship debits receivable
+  AND credits revenue, the payment debits cash AND clears the
+  receivable, other moves land zero-value trail lines, the total from
+  the wire) and every pick lands a stock movement (delta = -qty). The
+  ledger is a workflow, not a report.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +77,13 @@ async def _wrap(coro):
 
 def _sync(coro):
     return asyncio.run(coro)
+
+
+def _base_name(name: str) -> str:
+    """Second-and-later installs of an operator suffix their dataset names
+    ('GL entries 2') - the spec order never moves; strip the suffix so the
+    assertion holds no matter which install of the session ran first."""
+    return re.sub(r"\s\d+$", "", name)
 
 
 async def _mk_user(client: httpx.AsyncClient, tag: str) -> dict:
@@ -136,43 +146,48 @@ def test_v113_erp_installs_the_backbone():
 
             built = await _install(client, h, "erp-operator")
             assert built["system"]["lifecycle"] == "running"
-            assert built["system"]["components"]["dataset"] == 5
-            assert built["system"]["components"]["process"] == 3
-            assert built["system"]["components"]["workflow"] == 5  # 2 reactive + 2 onboarding loops + the clerk's handler
+            assert built["system"]["components"]["dataset"] == 7
+            assert built["system"]["components"]["process"] == 4
+            assert built["system"]["components"]["workflow"] == 7  # 3 reactive + 3 onboarding loops + the clerk's handler
             assert built["system"]["components"]["voice_agent"] == 1
             assert built["system"]["components"]["meeting"] == 1
             assert built["system"]["components"]["queue"] == 1
             assert built["system"]["components"]["dashboard"] == 1
             assert built["campaign"] is None  # collections is Finance's dialer
 
-            ds_names = {d["name"] for d in built["datasets"]}
+            ds_names = {_base_name(d["name"]) for d in built["datasets"]}
             assert {"Products", "Sales orders", "Stock movements", "GL entries",
-                    "ERP policy"} == ds_names
+                    "Employees", "Payroll runs", "ERP policy"} == ds_names
 
             procs = {p["name"]: p for p in built["processes"]}
             assert set(procs) == {"Sales order lifecycle",
-                                  "Inventory replenishment", "Month-end close"}
+                                  "Inventory replenishment", "Month-end close",
+                                  "Payroll lifecycle"}
             # the order desk imports at its own stages (5 seed rows)
             assert procs["Sales order lifecycle"]["seeded_instances"] == 5
             # one tracked entity per SKU, the low ones start at 'low'
             assert procs["Inventory replenishment"]["seeded_instances"] == 5
-            # the close calendar arrives empty on purpose
+            # the close calendar AND the payroll calendar arrive empty on purpose
             assert procs["Month-end close"]["seeded_instances"] == 0
+            assert procs["Payroll lifecycle"]["seeded_instances"] == 0
 
             # every workflow installs INACTIVE - the boot door opens them
             assert all(w["active"] is False for w in built["workflows"])
             wf_names = {w["name"] for w in built["workflows"]}
-            assert {"Order ledger poster", "Stock pick ledger",
+            assert {"Order ledger poster", "Stock pick ledger", "Payroll poster",
                     "Sales order lifecycle onboarding",
-                    "Inventory replenishment onboarding"} <= wf_names
-            # the reactive pair rides the move event; the onboarding
+                    "Inventory replenishment onboarding",
+                    "Payroll lifecycle onboarding"} <= wf_names
+            # the reactive trio rides the move event; the onboarding
             # loops ride dataset versions (the install list shows the
             # raw event_type - empty for dataset triggers)
             reactive = {w["name"]: w["trigger"] for w in built["workflows"]}
             assert reactive["Order ledger poster"] == "business.state_changed"
             assert reactive["Stock pick ledger"] == "business.state_changed"
+            assert reactive["Payroll poster"] == "business.state_changed"
             assert reactive["Sales order lifecycle onboarding"] == ""
             assert reactive["Inventory replenishment onboarding"] == ""
+            assert reactive["Payroll lifecycle onboarding"] == ""
 
             # the seeded instances sit at their own stages
             procs_live = await _procs(client, h)
@@ -409,11 +424,20 @@ def test_v113_the_books_post_themselves():
             assert ship_line["account"] == "Accounts receivable"
             assert ship_line["debit"] == "720.00"  # the total rode the wire
             assert ship_line["credit"] == ""
+            # v114: the ship's OTHER side - revenue recognized
+            rev_line = by_memo["revenue recognized on SO-1042"]
+            assert rev_line["account"] == "Revenue"
+            assert rev_line["debit"] == "" and rev_line["credit"] == "720.00"
+            # invoiced is a document move now - a zero-value trail line
             inv_line = by_memo["SO-1042 moved to invoiced"]
-            assert inv_line["debit"] == "720.00"
+            assert inv_line["debit"] == "" and inv_line["credit"] == ""
+            # paid posts the balanced pair: cash IN, receivable cleared
             pay_line = by_memo["payment received on SO-1042"]
             assert pay_line["account"] == "Cash"
-            assert pay_line["credit"] == "720.00"
+            assert pay_line["debit"] == "720.00" and pay_line["credit"] == ""
+            settled = by_memo["SO-1042 settled"]
+            assert settled["account"] == "Accounts receivable"
+            assert settled["debit"] == "" and settled["credit"] == "720.00"
             # moves of OTHER machines never reach the books
             assert not any("Invoice lifecycle" in (r.get("memo") or "")
                            for r in gl)
@@ -430,4 +454,4 @@ def test_v113_the_books_post_themselves():
 # ---------------------------------------------------------------------------
 
 def test_v113_version_pin():
-    assert settings.version == "1.113.0"
+    assert settings.version == "1.114.0"
