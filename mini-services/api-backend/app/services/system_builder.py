@@ -67,6 +67,8 @@ COMPONENT_LIBRARY: list[dict] = [
      "detail": "Webhook rule on execution_failed, scoped to the pipeline"},
     {"id": "dashboard", "tier": "optional", "label": "Dashboard",
      "detail": "Auto-generated board over the target dataset"},
+    {"id": "app", "tier": "optional", "label": "App",
+     "detail": "Editable form + records app (CRUD, business rules, Excel export) over the target dataset"},
     {"id": "scheduled_report", "tier": "optional", "label": "Scheduled report",
      "detail": "Periodic dataset export as an artifact"},
     {"id": "ai_summary", "tier": "optional", "label": "AI run summary",
@@ -85,6 +87,7 @@ _KEYWORD_COMPONENTS = [
     (("dead letter", "dead-letter", "deadletter", "quarantine", "reject lane", "rejected rows"), ["dead_letter_queue", "schema_contract"]),
     (("alert", "notify", "notification", "slack", "webhook"), ["failure_notification"]),
     (("dashboard", "monitor ", "metrics"), ["dashboard"]),
+    (("app", "form", "crud", "manage records", "data entry", "edit records", "enter data"), ["app"]),
     (("report", "pdf", "excel", "export"), ["scheduled_report"]),
     (("summar", "llm", " gpt", "ai "), ["ai_summary"]),
     (("retry", "transient", "throttl"), ["retry_policy"]),
@@ -136,12 +139,32 @@ def parse_schedule(text: str) -> dict | None:
     return None
 
 
-def _detect_source(text: str) -> dict:
+def _detect_all_sources(text: str) -> list[dict]:
+    """v109: every DISTINCT source kind mentioned, not just the first match.
+
+    A description like "pull inventory from an S3 bucket and pricing from
+    a Google Sheet, join them on sku" used to silently collapse to a
+    single source (whichever _SOURCE_RULES entry matched first) with the
+    second source and the join dropped entirely - no error, no note,
+    just a smaller pipeline than asked for. This returns ALL matching
+    kinds (in _SOURCE_RULES priority order, de-duplicated by kind) so
+    build_system() can wire every one of them in and join them.
+    """
     t = f" {text.lower()} "
+    out: list[dict] = []
+    seen_kinds: set[str] = set()
     for keys, src in _SOURCE_RULES:
-        if any(k in t for k in keys):
-            return {**src, "table": "", "connection": ""}
-    return {"kind": "upload", "backend": "upload", "label": "Manual upload", "table": "", "connection": ""}
+        if any(k in t for k in keys) and src["kind"] not in seen_kinds:
+            seen_kinds.add(src["kind"])
+            out.append({**src, "table": "", "connection": ""})
+    if not out:
+        out = [{"kind": "upload", "backend": "upload", "label": "Manual upload", "table": "", "connection": ""}]
+    return out
+
+
+def _detect_source(text: str) -> dict:
+    """Back-compat single-source accessor - the PRIMARY (first-detected) source."""
+    return _detect_all_sources(text)[0]
 
 
 def _title_from(description: str) -> str:
@@ -151,6 +174,26 @@ def _title_from(description: str) -> str:
     picked = [w for w in words if w.lower() not in stop][:4]
     title = " ".join(picked).strip().title() or "My System"
     return title[:80]
+
+
+def _detect_report_fmt(text: str) -> tuple[str, str | None]:
+    """v114/v115: report_fmt was hardcoded to "csv" no matter what the
+    description asked for - a user who wrote "email a PDF report" (or
+    "xlsx"/"excel"/"json"/"parquet") silently got a CSV with no note.
+    py8n's report engine now supports csv|xlsx|json|parquet|pdf (v115
+    added a real reportlab-rendered PDF), so this maps the requested
+    wording straight to its matching format - no substitution needed.
+    """
+    low = text.lower()
+    if re.search(r"\bpdf\b", low):
+        return "pdf", None
+    if re.search(r"\b(xlsx|excel|spreadsheet)\b", low):
+        return "xlsx", None
+    if re.search(r"\bjson\b", low):
+        return "json", None
+    if re.search(r"\bparquet\b", low):
+        return "parquet", None
+    return "csv", None
 
 
 def synthesize_spec(description: str) -> dict:
@@ -182,7 +225,8 @@ def synthesize_spec(description: str) -> dict:
     # nothing mentioned -> keep it selected anyway (pipelines usually need one)
     schedule = parse_schedule(text) or {"mode": "interval", "interval_seconds": 3600}
 
-    src = _detect_source(text)
+    sources = _detect_all_sources(text)
+    src = sources[0]
     if "hours" in low and "lookback" in low:
         m = re.search(r"(\d+)\s*hours?\s*lookback|lookback\s*(?:of\s*)?(\d+)\s*hours?", low)
         lookback = float(m.group(1) or m.group(2)) if m else 24.0
@@ -191,20 +235,56 @@ def synthesize_spec(description: str) -> dict:
     else:
         lookback = 0.0
 
+    report_fmt, report_fmt_note = _detect_report_fmt(text)
+
     spec = {
         "title": _title_from(text),
         "purpose": text,
         "persona": persona,
         "source": src,
+        "sources": sources,      # v109: every distinct source detected (len 1 = the common case)
+        "join_key": "",          # v109: key column the extra sources join on
         "schedule": schedule,
         "fields": [],            # [{name, dtype}] for the contract
         "dedupe_keys": [],       # identity column(s)
         "lookback_hours": lookback,
         "webhook_url": "",
-        "report_fmt": "csv",
+        "report_fmt": report_fmt,
         "components": [components[c["id"]] for c in COMPONENT_LIBRARY],
         "notes": [],
     }
+    if len(sources) > 1:
+        spec["notes"].append(
+            f"{len(sources)} data sources detected ({', '.join(s['label'] for s in sources)}) - "
+            "they will be pulled in parallel and joined with a Join node before the pipeline continues."
+        )
+    if report_fmt_note and any(c["id"] == "scheduled_report" and c["selected"] for c in spec["components"]):
+        spec["notes"].append(report_fmt_note)
+    # v120: the System Builder ONLY builds PULL sources (schedule_trigger
+    # polling a db/s3/http/sheets/ftp/upload on a cron - see _SOURCE_RULES
+    # and the hardcoded schedule_trigger in build_system()). There is no
+    # webhook_trigger ingestion path anywhere in this file. Worse: "webhook"
+    # is ALSO a keyword for failure_notification ("alert/notify/webhook" ->
+    # failure_notification), so a description like "receive signups over a
+    # webhook" got silently reinterpreted as "send failure alerts to a
+    # webhook" (source fell back to "Manual upload", and the builder asked
+    # "which webhook URL should receive FAILURE ALERTS?" - answering that
+    # does nothing for the actual ask). Detect the ingestion sense
+    # specifically (webhook near receive/incoming/inbound/push/event, not
+    # near alert/notify) and say so honestly instead of building the wrong
+    # thing silently.
+    _webhook_ingest_re = re.compile(r"webhook")
+    _webhook_intent_re = re.compile(r"(receiv|incoming|inbound|push|event)\w*")
+    _webhook_alert_re = re.compile(r"(alert|notify|notification|failure)")
+    if _webhook_ingest_re.search(low) and _webhook_intent_re.search(low) and not _webhook_alert_re.search(low):
+        spec["notes"].append(
+            "This description asks to receive data over a webhook, but the AI System Builder only "
+            "builds PULL sources (a schedule polls a database/S3/HTTP API/sheet/FTP/upload) - it has "
+            "no push/webhook ingestion trigger. The source was set to Manual upload as a fallback; "
+            "build a webhook_trigger workflow via the AI System Composer or manually if you need "
+            "push ingestion, or answer the webhook question below for FAILURE ALERTS only (a "
+            "different thing)."
+        )
     spec["questions"] = _questions_for(spec)
     return spec
 
@@ -212,12 +292,36 @@ def synthesize_spec(description: str) -> dict:
 def _questions_for(spec: dict) -> list[dict]:
     """Clarifying questions for whatever the spec still does not know."""
     questions: list[dict] = []
-    src = spec.get("source") or {}
-    if src.get("kind") in ("db", "s3", "sheets", "ftp", "http"):
+    sources = spec.get("sources") or ([spec["source"]] if spec.get("source") else [])
+    needs_table = [s for s in sources if s.get("kind") in ("db", "s3", "sheets", "ftp", "http")]
+    if len(needs_table) <= 1:
+        # the common case: one asked-for source (or one that needs a table
+        # out of a possibly-larger upload-only list) - keep the plain key
+        # so existing callers/tests answering "table" keep working
+        for src in needs_table:
+            questions.append({
+                "id": "q_table",
+                "question": f"Which {src.get('label', 'source')} table/endpoint should be ingested?",
+                "key": "table",
+                "answered": False,
+            })
+    else:
+        # v109: more than one source detected - ask each one separately,
+        # by INDEX into spec["sources"] (not the needs_table subset) so
+        # apply_answers can write straight back to the right slot
+        for idx, src in enumerate(sources):
+            if src.get("kind") not in ("db", "s3", "sheets", "ftp", "http"):
+                continue
+            questions.append({
+                "id": f"q_table_{idx}",
+                "question": f"Which {src.get('label', 'source')} table/endpoint should be ingested (source {idx + 1} of {len(sources)})?",
+                "key": f"table_{idx}",
+                "answered": False,
+            })
         questions.append({
-            "id": "q_table",
-            "question": f"Which {src.get('label', 'source')} table/endpoint should be ingested?",
-            "key": "table",
+            "id": "q_join_key",
+            "question": "Which column should the sources be joined on (must exist in all of them)?",
+            "key": "join_key",
             "answered": False,
         })
     if not spec.get("fields"):
@@ -273,6 +377,18 @@ def apply_answers(spec: dict, answers: dict) -> dict:
             value = answers[key]
             if key == "table":
                 spec.setdefault("source", {})["table"] = str(value).strip()
+                srcs = spec.get("sources")
+                if srcs:
+                    srcs[0]["table"] = str(value).strip()
+            elif key.startswith("table_"):
+                idx = int(key.split("_", 1)[1])
+                srcs = spec.get("sources") or []
+                if 0 <= idx < len(srcs):
+                    srcs[idx]["table"] = str(value).strip()
+                    if idx == 0:
+                        spec.setdefault("source", {})["table"] = str(value).strip()
+            elif key == "join_key":
+                spec["join_key"] = str(value).strip()
             elif key == "fields":
                 spec["fields"] = _parse_fields(value)
             elif key == "dedupe_keys":
@@ -490,12 +606,60 @@ def _interval_to_cron(seconds: int) -> str:
     return "*/15 * * * *"
 
 
+def _report_cron(purpose: str, fallback_cron: str) -> str:
+    """v110: the scheduled report's OWN cadence, parsed from the description
+    near the word "report" - independent of the pipeline's ingestion
+    schedule.
+
+    Before this fix, "email me a DAILY report" on a pipeline that ingests
+    HOURLY silently built an HOURLY report (cron copied straight from the
+    ingestion schedule, the wording near "report" was never even read).
+    A user who explicitly asked for a different report cadence than their
+    ingestion cadence got the wrong one with no note anywhere. Falls back
+    to the ingestion schedule (the pre-fix, still-reasonable default) when
+    the description does not say anything report-specific.
+    """
+    text = purpose or ""
+    low = text.lower()
+    for m in re.finditer("report", low):
+        start = max(0, m.start() - 40)
+        end = min(len(text), m.end() + 40)
+        parsed = parse_schedule(text[start:end])
+        if parsed:
+            return parsed["cron"] if parsed.get("mode") == "cron" else _interval_to_cron(int(parsed["interval_seconds"]))
+    return fallback_cron
+
+
 def _node(nid: str, ntype: str, params: dict, name: str) -> dict:
     return {"id": nid, "type": ntype, "name": name, "position": {"x": 0, "y": 0}, "parameters": params}
 
 
-def _edge(eid: str, source: str, target: str) -> dict:
-    return {"id": eid, "source": source, "target": target, "sourceHandle": "main", "targetHandle": "main"}
+def _edge(eid: str, source: str, target: str, *, source_handle: str = "main", target_handle: str = "main") -> dict:
+    return {"id": eid, "source": source, "target": target,
+            "sourceHandle": source_handle, "targetHandle": target_handle}
+
+
+def _source_node(nid: str, s: dict) -> dict | None:
+    """v109: one source primitive (db/s3/http/sheets/ftp) for source spec `s`.
+    Returns None for kind='upload' - there is no node, the run payload feeds
+    the pipeline directly (unchanged pre-v109 behaviour)."""
+    kind = s.get("kind") or "upload"
+    if kind == "db":
+        return _node(nid, "db_source", {
+            "backend": s.get("backend") or "sqlite",
+            "connection": s.get("connection") or "",
+            "table": s.get("table") or "",
+            "limit": 5000,
+        }, f"{s.get('label') or 'DB'} source")
+    if kind == "s3":
+        return _node(nid, "s3_source", {"uri": s.get("table") or "s3://bucket/path.csv"}, "S3 source")
+    if kind == "http":
+        return _node(nid, "http_request", {"url": s.get("table") or "https://example.com/api"}, "HTTP source")
+    if kind == "sheets":
+        return _node(nid, "google_sheets_source", {"url": s.get("table") or ""}, "Sheets source")
+    if kind == "ftp":
+        return _node(nid, "ftp_source", {"host": s.get("table") or ""}, "FTP source")
+    return None
 
 
 async def _unique_dataset_name(db, base: str) -> str:
@@ -524,7 +688,9 @@ async def build_system(db, draft) -> dict:
     from sqlalchemy.ext.asyncio import AsyncSession  # noqa: F401
 
     from ..engine.runner import validate_graph_document
+    from .graph_layout import _layout
     from ..models import NotificationRule, ScheduledReport, Workflow
+    from . import apps as app_svc
     from . import contracts as contracts_svc
     from . import dashboards as dash_svc
     from . import datasets as ds_svc
@@ -536,7 +702,8 @@ async def build_system(db, draft) -> dict:
     title = (spec.get("title") or "System").strip()
     built: dict = {"workflow_id": None, "workflow_name": None, "dataset_id": None,
                    "dataset_name": None, "contract_version": None, "on_violation": None,
-                   "dashboard_id": None, "report_id": None, "notification_rule_id": None,
+                   "dashboard_id": None, "app_id": None, "app_slug": None,
+                   "report_id": None, "notification_rule_id": None,
                    "policy": None}
 
     # --- 1) the target dataset ---------------------------------------------
@@ -590,34 +757,40 @@ async def build_system(db, draft) -> dict:
         nodes.append(_node("trigger", "manual_trigger", {}, "Manual"))
     prev = "trigger"
 
-    src = spec.get("source") or {}
-    src_kind = src.get("kind") or "upload"
-    if src_kind == "db":
-        nodes.append(_node("source", "db_source", {
-            "backend": src.get("backend") or "sqlite",
-            "connection": src.get("connection") or "",
-            "table": src.get("table") or "",
-            "limit": 5000,
-        }, f"{src.get('label') or 'DB'} source"))
-        edges.append(_edge("e_trigger", prev, "source"))
-        prev = "source"
-    elif src_kind == "s3":
-        nodes.append(_node("source", "s3_source", {"uri": src.get("table") or "s3://bucket/path.csv"}, "S3 source"))
-        edges.append(_edge("e_trigger", prev, "source"))
-        prev = "source"
-    elif src_kind == "http":
-        nodes.append(_node("source", "http_request", {"url": src.get("table") or "https://example.com/api"}, "HTTP source"))
-        edges.append(_edge("e_trigger", prev, "source"))
-        prev = "source"
-    elif src_kind == "sheets":
-        nodes.append(_node("source", "google_sheets_source", {"url": src.get("table") or ""}, "Sheets source"))
-        edges.append(_edge("e_trigger", prev, "source"))
-        prev = "source"
-    elif src_kind == "ftp":
-        nodes.append(_node("source", "ftp_source", {"host": src.get("table") or ""}, "FTP source"))
-        edges.append(_edge("e_trigger", prev, "source"))
-        prev = "source"
-    # upload kind: the write node consumes the run payload directly
+    # v109: EVERY detected source gets pulled in parallel off the trigger,
+    # then folded together with Join nodes (source_0 + source_1 -> join_1,
+    # join_1 + source_2 -> join_2, ...) before the pipeline continues - a
+    # single source (the common case) is unchanged: one node, id "source",
+    # no join. Previously only sources[0] was ever built; the rest (e.g. a
+    # second "and join it with a Google Sheet" source) were silently
+    # dropped with no error and no note.
+    sources = spec.get("sources") or ([spec["source"]] if spec.get("source") else [{"kind": "upload"}])
+    source_ids: list[str] = []
+    for idx, s in enumerate(sources):
+        nid = "source" if len(sources) == 1 else f"source_{idx}"
+        node = _source_node(nid, s)
+        if node is None:
+            continue  # upload kind: no node, the run payload feeds the pipeline directly
+        nodes.append(node)
+        edges.append(_edge(f"e_trigger_{idx}" if len(sources) > 1 else "e_trigger", prev, nid))
+        source_ids.append(nid)
+
+    if len(source_ids) >= 2:
+        join_key = (spec.get("join_key") or "").strip() or (dedupe_keys[0] if dedupe_keys else "id")
+        acc = source_ids[0]
+        for i in range(1, len(source_ids)):
+            jid = f"join_{i}"
+            joined_label = sources[i].get("label") or "source"
+            nodes.append(_node(jid, "join", {
+                "left_field": join_key, "right_field": join_key, "how": "inner",
+            }, f"Join {joined_label}"))
+            edges.append(_edge(f"e_join_{i}_a", acc, jid, target_handle="main"))
+            edges.append(_edge(f"e_join_{i}_b", source_ids[i], jid, target_handle="secondary"))
+            acc = jid
+        prev = acc
+    elif source_ids:
+        prev = source_ids[0]
+    # else: upload kind, prev stays "trigger" - the write node consumes the run payload directly
 
     # v67 staging layer: raw rows land UNMODIFIED before any shaping - the
     # bronze copy every downstream layer can be replayed from
@@ -659,6 +832,7 @@ async def build_system(db, draft) -> dict:
         }, "AI run summary"))
         edges.append(_edge("e_ai", prev, "summary"))
 
+    _layout(nodes, edges)
     graph = validate_graph_document({"nodes": nodes, "edges": edges}).model_dump()
 
     policy = None
@@ -721,10 +895,47 @@ async def build_system(db, draft) -> dict:
         await db.flush()
         built["dashboard_id"] = board.id
 
+    # --- 4b) the app (editable form + records, CRUD, rules, Excel export) -----
+    # compose_app() auto-generates its layout from ds.schema_json - which the
+    # dataset only ever gets from the SCHEMA CONTRACT block above, and only
+    # when "schema_contract" is also selected. An app picked WITHOUT a
+    # contract (the common case - most descriptions that say "app"/"form"
+    # never say "schema") would otherwise generate_config() against an empty
+    # schema, whose form component then fails validate_config's "needs at
+    # least one field" check - an unhandled 500, not a build note. Stamp
+    # ds.schema_json from the same `fields` the contract block would have
+    # used, independent of whether that component was ticked, so the app
+    # gets real fields either way.
+    if "app" in selected:
+        if fields:
+            if not ds.schema_json:
+                ds.schema_json = [
+                    {"name": f["name"], "dtype": f.get("dtype") or "text", "nullable": True}
+                    for f in fields
+                ]
+                db.add(ds)
+                await db.flush()
+            app_row = await app_svc.compose_app(
+                db, f"{title} app", ds,
+                description=f"Auto-built for the {title} system - manage records with forms, "
+                             f"business rules and Excel export.",
+                owner_id=draft.owner_id,
+                publish=False,
+            )
+            built["app_id"] = app_row.id
+            built["app_slug"] = app_row.slug
+        else:
+            notes.append("App pending: no columns defined yet - answer the fields question, "
+                         "then build an App from the dataset in the Apps builder.")
+
     # --- 5) the scheduled report ----------------------------------------------
     if "scheduled_report" in selected:
         sched = spec.get("schedule") or {}
-        cron = sched.get("cron") or _interval_to_cron(int(sched.get("interval_seconds") or 86_400))
+        pipeline_cron = sched.get("cron") or _interval_to_cron(int(sched.get("interval_seconds") or 86_400))
+        cron = _report_cron(spec.get("purpose") or "", pipeline_cron)
+        if cron != pipeline_cron:
+            notes.append(f"Scheduled report cadence ({cron}) set independently of the "
+                         f"ingestion schedule, per the description.")
         rep = ScheduledReport(
             name=f"{title} report", source_type="dataset", source_id=ds.id,
             fmt=spec.get("report_fmt") or "csv", cron=cron, enabled=True,

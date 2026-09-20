@@ -4,14 +4,15 @@ import {
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
   FileBarChart, BookOpen, Radio, Wand2, Store, Boxes, Trash2, Unlink, BrainCircuit,
-  Globe, Rocket, MessagesSquare, Webhook, Video, Zap, Sparkles as ComposerIcon, GitBranch, Gavel, Factory,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
+import { useTheme } from '~/composables/useTheme'
 
 const route = useRoute()
 const { collapsed, mobileOpen, toggle, closeMobile } = useSidebar()
 const { openPalette } = usePalette()
+const { theme, toggle: toggleTheme } = useTheme()
 const auth = useAuthStore()
 
 onMounted(() => auth.boot())
@@ -37,6 +38,7 @@ const nav = [
   { to: '/composer', label: 'AI Composer', icon: ComposerIcon, match: ['/composer'] },  // v82 the AI system composer - describe -> deploy
   { to: '/agents', label: 'Agents', icon: Bot, match: ['/agents'] },
   { to: '/datasets', label: 'Datasets', icon: Database, match: ['/datasets'] },
+  { to: '/connect-db', label: 'Connect Database', icon: PlugZap, match: ['/connect-db'] },  // v148 the DB-connect wizard
   { to: '/catalog', label: 'Catalog', icon: BookOpen, match: ['/catalog'] },  // v50 data catalog
   { to: '/observability', label: 'Observability', icon: Radio, match: ['/observability'] },  // v53 data observability
   { to: '/builder', label: 'System Builder', icon: Wand2, match: ['/builder'] },  // v59 AI system builder
@@ -201,6 +203,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <LogOut class="h-3.5 w-3.5" />
         </button>
       </div>
+      <!-- v-theme: dark/light toggle -->
+      <button
+        class="mb-2 flex w-full items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 text-xs text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"
+        :class="collapsed && 'lg:justify-center lg:px-0'"
+        :title="theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'"
+        @click="toggleTheme()"
+      >
+        <Sun v-if="theme === 'dark'" class="h-3.5 w-3.5 shrink-0" />
+        <Moon v-else class="h-3.5 w-3.5 shrink-0" />
+        <span class="flex-1 text-left" :class="collapsed && 'lg:hidden'">
+          {{ theme === 'dark' ? 'Light mode' : 'Dark mode' }}
+        </span>
+      </button>
+
       <!-- v14: quick-search trigger (Ctrl/Cmd+K) -->
       <button
         class="mb-2 flex w-full items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 px-2.5 py-2 text-xs text-zinc-400 transition hover:border-zinc-600 hover:text-zinc-200"

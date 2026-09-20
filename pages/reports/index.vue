@@ -79,7 +79,7 @@ const pageError = ref('')
 const pageNotice = ref('')
 
 const FMTS_BY_TYPE: Record<string, string[]> = {
-  dataset: ['csv', 'xlsx', 'json', 'parquet'],
+  dataset: ['csv', 'xlsx', 'json', 'parquet', 'pdf'],
   dashboard: ['json', 'png'],
 }
 
@@ -316,7 +316,7 @@ function nextRun(r: ScheduledReport): string {
         <CalendarClock class="mt-0.5 h-4 w-4 shrink-0 text-cyan-400" />
         <p class="text-xs leading-relaxed text-zinc-400">
           Each report snapshots its source on a crontab (UTC): datasets export as
-          <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">csv / xlsx / json / parquet</code>,
+          <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">csv / xlsx / json / parquet / pdf</code>,
           dashboards as a <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">JSON</code> snapshot
           or a <code class="rounded bg-zinc-800 px-1 font-mono text-[11px] text-cyan-300">PNG</code> image of every rendered
           component. Every run writes a regular Artifact and the row keeps the freshest one - use

@@ -315,14 +315,14 @@ onMounted(async () => {
           </NuxtLink>
           <div v-if="op" class="flex h-9 w-9 items-center justify-center rounded-xl shadow-lg"
             :style="{ background: `linear-gradient(135deg, ${op.color}, ${op.color}55)` }">
-            <component :is="opIcon(op.icon)" class="h-4 w-4 text-zinc-950" />
+            <component :is="opIcon(op.icon)" class="h-4 w-4 text-black" />
           </div>
           <div v-if="op" class="min-w-0 flex-1">
             <h1 class="text-lg font-bold tracking-tight">{{ op.name }}</h1>
             <p class="-mt-0.5 text-[11px] text-zinc-500">{{ op.category }} · business operator - {{ op.tagline }}</p>
           </div>
           <button v-if="op && !installResult"
-            class="flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50"
+            class="flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50"
             :disabled="installing" @click="installOperator">
             <Loader2 v-if="installing" class="h-3.5 w-3.5 animate-spin" />
             <Download v-else class="h-3.5 w-3.5" /> Install operator

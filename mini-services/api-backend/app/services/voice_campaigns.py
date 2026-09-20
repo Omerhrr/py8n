@@ -696,6 +696,12 @@ async def on_call_event(db: AsyncSession, *, call_control_id: str = "",
         if amd["on_machine"] == "hangup":
             target.status = "voicemail"
             target.last_error = ""
+            # v75/v76 gap: a voicemail outcome is a valid retry_on choice,
+            # but nothing booked the next attempt's schedule for it - only
+            # the no_answer/busy/failed branch did. Without this, retry_at
+            # stays unset and the retry pass treats the target as due
+            # IMMEDIATELY, ignoring the configured delays_minutes entirely.
+            schedule_retry(campaign, target)
         # on_machine=continue: the conversation proceeds, target stays answered
     elif event_kind == "greeting_end":
         # v76: the machine's greeting FINISHED (greeting_end AMD mode) -
@@ -710,6 +716,9 @@ async def on_call_event(db: AsyncSession, *, call_control_id: str = "",
         target.meta = meta
         target.status = "voicemail"
         target.last_error = ""
+        # same gap as the voicemail_detected branch above - book the retry
+        # schedule now that the target has landed on a retryable outcome
+        schedule_retry(campaign, target)
         amd_decision = {"on_machine": amd["on_machine"],
                         "hangup": amd["on_machine"] == "hangup"}
         if amd["on_machine"] == "voicemail_drop":

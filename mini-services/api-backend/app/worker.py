@@ -38,6 +38,46 @@ def _sync_database_url() -> str:
     return url.replace("+aiosqlite", "").replace("+asyncpg", "")
 
 
+async def _run_and_cleanup(workflow_id: str, trigger_type: str, trigger_payload: dict,
+                           trigger_node_id: str | None, execution_id: str) -> dict:
+    """Run the workflow, then dispose every per-loop async resource BEFORE
+    this task's asyncio.run() closes its event loop.
+
+    v111: app.db's async SQLAlchemy engine and app.services.events' cached
+    RedisEventBus are both process-wide singletons, built once and reused
+    for the life of the worker process - fine for the API's one long-lived
+    loop, but this task gets a BRAND NEW event loop every single time
+    (asyncio.run() per task). Their pooled connections stay bound to
+    whichever loop was running when first opened, so any task after the
+    first one to touch either resource raised `Future ... attached to a
+    different loop` (seen live on a webhook-triggered run: the manual Run
+    right after a fresh worker boot succeeded because it was the first
+    task on that process; the next task - a different trigger, same
+    worker - hit the stale connections). Disposing/resetting them here,
+    still inside THIS task's loop, means the next task starts clean
+    instead of inheriting a dead connection tied to a closed loop.
+    """
+    from .db import engine as db_engine
+    from .services.events import reset_event_bus
+    from .services.executor import execute_workflow
+
+    try:
+        return await execute_workflow(
+            workflow_id,
+            trigger_type=trigger_type,
+            trigger_payload=trigger_payload,
+            trigger_node_id=trigger_node_id,
+            execution_id=execution_id,
+            log_created=True,  # dispatcher pre-created the running row
+        )
+    finally:
+        try:
+            await db_engine.dispose()
+        except Exception:  # noqa: BLE001 - cleanup must never mask the task's own result
+            pass
+        await reset_event_bus()
+
+
 @celery_app.task(name="py8n.execute_workflow", bind=True, max_retries=1)
 def execute_workflow_task(self, workflow_id: str, trigger_type: str, trigger_payload: dict,
                           trigger_node_id: str | None, execution_id: str) -> dict:
@@ -58,20 +98,24 @@ def execute_workflow_task(self, workflow_id: str, trigger_type: str, trigger_pay
     finally:
         engine.dispose()
 
-    from .executor import execute_workflow
-
-    # Fresh event loop per task - the async engine + aiosqlite/asyncpg live here.
+    # Bug fix: this was `from .executor import execute_workflow` - wrong
+    # path (worker.py lives in app/, but execute_workflow lives in
+    # app/services/executor.py), so it raised ModuleNotFoundError on EVERY
+    # single task, for every workflow, since the stack was first stood up.
+    # Worse, the import sat OUTSIDE the try/except below that is supposed
+    # to finalize a crashed task as 'failed' - so the ImportError killed
+    # the task with NO cleanup at all, leaving the dispatcher's pre-created
+    # 'running' row orphaned forever. That is exactly the "stuck at 0/?
+    # nodes done for hours" symptom seen on /executions for every
+    # scheduled and manually-run workflow. Moving the import INSIDE the
+    # try block (not just fixing the path) means any future import-time
+    # break here still gets caught and finalized instead of silently
+    # orphaning the row again.
     try:
-        result = asyncio.run(
-            execute_workflow(
-                workflow_id,
-                trigger_type=trigger_type,
-                trigger_payload=trigger_payload,
-                trigger_node_id=trigger_node_id,
-                execution_id=execution_id,
-                log_created=True,  # dispatcher pre-created the running row
-            )
-        )
+        # Fresh event loop per task - the async engine + aiosqlite/asyncpg live here.
+        result = asyncio.run(_run_and_cleanup(
+            workflow_id, trigger_type, trigger_payload, trigger_node_id, execution_id,
+        ))
     except Exception as exc:
         # The dispatcher pre-creates the running row; if the task crashes
         # before/inside the async engine, that row must NOT stay 'running'

@@ -185,8 +185,12 @@ async function loadEvents(reset = true) {
 async function refreshAll() {
   refreshing.value = true
   pageError.value = ''
-  await Promise.all([loadOps(), loadLegacy(), loadEvents(true)])
-  refreshing.value = false
+  try {
+    await Promise.all([loadOps(), loadLegacy(), loadEvents(true)])
+  } finally {
+    loading.value = false
+    refreshing.value = false
+  }
 }
 
 function setFilter() {

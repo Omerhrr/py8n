@@ -80,6 +80,9 @@ class RedisEventBus(BaseEventBus):
 
         self._redis = aioredis.from_url(redis_url, decode_responses=True)
 
+    async def aclose(self) -> None:
+        await self._redis.aclose()
+
     async def publish(self, execution_id: str, event: dict) -> None:
         await self._redis.publish(self.CHANNEL_PREFIX + execution_id, json.dumps(event, default=str))
 
@@ -103,6 +106,33 @@ class RedisEventBus(BaseEventBus):
 
 
 _bus: BaseEventBus | None = None
+
+
+async def reset_event_bus() -> None:
+    """v111: drop the cached RedisEventBus so the NEXT get_event_bus() call
+    builds a fresh one on whatever event loop is current.
+
+    _bus is a process-wide singleton, created once and reused for the life
+    of the process (get_event_bus()'s `global _bus` cache). That is fine in
+    the API process (one long-lived event loop), but a Celery worker task
+    runs `asyncio.run(execute_workflow(...))` - a BRAND NEW event loop PER
+    TASK. redis.asyncio's client binds its connections to whichever loop
+    was running when they were first opened; a worker process handles many
+    tasks over its lifetime, so task 2's fresh loop inherited task 1's
+    Redis connections bound to task 1's now-closed loop, raising
+    `Future ... attached to a different loop` deep inside events.py's
+    publish() calls - not a fluke, every second-and-later task on a given
+    worker process hit this. Call this at the end of each Celery task
+    (same event loop that ran the task, before it closes) so the next task
+    starts clean.
+    """
+    global _bus
+    if isinstance(_bus, RedisEventBus):
+        try:
+            await _bus.aclose()
+        except Exception:  # noqa: BLE001 - best-effort cleanup, never masks the task's own result
+            pass
+    _bus = None
 
 
 def get_event_bus() -> BaseEventBus:

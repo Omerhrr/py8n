@@ -41,7 +41,7 @@ from ..models import Dataset, ReportDeliveryEvent, ScheduledReport
 
 logger = logging.getLogger("py8n.reports")
 
-DATASET_FORMATS = ("csv", "xlsx", "json", "parquet")
+DATASET_FORMATS = ("csv", "xlsx", "json", "parquet", "pdf")  # v115: real PDF export
 # v49: dashboards grow "png" - a server-rendered image of every component
 # (services/report_images.py), produced from the SAME compute_config output
 # as the JSON snapshot.

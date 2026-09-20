@@ -61,6 +61,17 @@ services:
       # v37: flip to "true" to force sign-in (first registered account becomes
       # admin and claims all pre-existing resources)
       PY8N_REQUIRE_AUTH: "false"
+    volumes:
+      # Bug fix: api and worker each auto-generate a Fernet/JWT key at
+      # /app/data/*.key the first time nothing is configured (see
+      # services/crypto.py). Without a shared, persistent mount there, EVERY
+      # rebuild silently rotated the key and made every stored credential
+      # permanently undecryptable (list_credentials then 500s for everyone),
+      # and api/worker could each mint a DIFFERENT key from first boot since
+      # they are separate containers - breaking credential-using node
+      # executions even without a rebuild. One named volume shared by both
+      # services fixes both failure modes.
+      - appdata:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +91,8 @@ services:
       PY8N_DATABASE_URL: postgresql+asyncpg://py8n:py8n_secret@postgres:5432/py8n
       PY8N_REDIS_URL: redis://redis:6379/0
       PY8N_LLM_BRIDGE_URL: http://llm-bridge:3010
+    volumes:
+      - appdata:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -101,6 +114,18 @@ services:
     environment:
       NUXT_PUBLIC_GATEWAY_MODE: gateway
       NUXT_PUBLIC_API_PORT: "8000"
+      # Bug fix: server/routes/api/v1/[...path].ts (the Nitro fallback proxy
+      # used when NOT running behind the Caddy gateway) defaults
+      # PY8N_API_ORIGIN to http://127.0.0.1:8000 - correct only when Nitro
+      # and the API share a process/network. Under docker-compose,
+      # 127.0.0.1 inside the frontend container is the frontend container
+      # itself (nothing listens on 8000 there), so any request that reaches
+      # this route 502s. We run in gateway mode so Caddy normally intercepts
+      # every ?XTransformPort= request before it gets here - but a request
+      # that reaches frontend:3000 directly (no query param: a bare /api/v1
+      # URL, a health check, a future SSR call) falls through to this proxy
+      # and needs a real address, same as the Caddyfile's `api:{port}` fix.
+      PY8N_API_ORIGIN: http://api:8000
     depends_on:
       - api
 
@@ -132,3 +157,4 @@ services:
 
 volumes:
   pgdata:
+  appdata:

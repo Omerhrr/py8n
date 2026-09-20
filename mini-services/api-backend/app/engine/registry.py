@@ -32,10 +32,11 @@ from .nodes.data import (
     SwitchNode,
     UnpivotNode,  # v45
 )
-from .nodes.connectors import (  # v50 + v52
+from .nodes.connectors import (  # v50 + v52 + v135
     DbSourceNode,
     FtpSourceNode,
     GoogleSheetsSourceNode,
+    GoogleSheetsWriteNode,
     S3SourceNode,
 )
 from .nodes.datasets import DatasetExportNode, DatasetReadNode, DatasetWriteNode, SqlQueryNode  # v27 + v45 export
@@ -97,6 +98,7 @@ for _cls in (
     DbSourceNode,         # v50: read rows from sqlite/postgres/mysql via SQLAlchemy
     S3SourceNode,         # v50: read csv/xlsx/json/parquet from S3/MinIO
     GoogleSheetsSourceNode,  # v52: read a Google Sheet tab as rows (public/SA)
+    GoogleSheetsWriteNode,   # v135: push items into a Google Sheet tab (SA only)
     FtpSourceNode,        # v52: read a csv/tsv file over FTP/FTPS
     JoinNode,             # v45: pandas-backed inner/left/right/outer/anti join
     PivotNode,            # v45: rows → matrix

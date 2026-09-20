@@ -52,6 +52,7 @@ SECRET_FIELDS: dict[str, set[str]] = {
     "smtp": {"password"},
     "slack": {"webhook_url", "token"},
     "generic": {"token", "webhook_url"},
+    "google_service_account": {"json", "private_key"},  # v143: Sheets sync
 }
 KEEP_MARKER = "__keep__"
 
@@ -76,6 +77,32 @@ def _out(cred: Credential, data: dict) -> CredentialOut:
         masked_hint=mask_hint(data), created_at=cred.created_at,
         rotated_at=cred.rotated_at,
     )
+
+
+def _out_safe(cred: Credential) -> CredentialOut:
+    """v108: like _out, but a decrypt failure (orphaned by a rotated
+    FERNET_KEY - see docker-compose.yml's appdata volume note) degrades to a
+    flagged row instead of raising, so one broken credential can never 500
+    the listing for every other credential in the vault."""
+    try:
+        return _out(cred, decrypt_payload(cred.data_encrypted))
+    except ValueError:
+        return CredentialOut(
+            id=cred.id, name=cred.name, type=cred.type,
+            masked_hint="••••", created_at=cred.created_at,
+            rotated_at=cred.rotated_at, decrypt_error=True,
+        )
+
+
+def _safe_decrypt(cred: Credential) -> dict:
+    """v108: best-effort decrypt for actions that can still make progress
+    without the old payload (delete's audit log, rotate/update overwriting
+    a dead payload outright) - an orphaned key degrades to {} instead of
+    raising, so these actions stay usable as the recovery path."""
+    try:
+        return decrypt_payload(cred.data_encrypted)
+    except ValueError:
+        return {}
 
 
 def _detail(cred: Credential, data: dict) -> CredentialDetail:
@@ -108,7 +135,7 @@ async def create_credential(body: CredentialCreate, user=Depends(get_optional_us
 @router.get("", response_model=list[CredentialOut])
 async def list_credentials(user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     rows = (await db.execute(select(Credential).order_by(Credential.created_at.desc()))).scalars().all()
-    return [_out(c, decrypt_payload(c.data_encrypted)) for c in scope_rows(rows, user)]  # v37
+    return [_out_safe(c) for c in scope_rows(rows, user)]  # v37 · v108 per-row decrypt safety
 
 
 @router.get("/providers")
@@ -131,7 +158,16 @@ async def get_credential(credential_id: str, user=Depends(get_optional_user), db
     if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
     own_or_404(cred.owner_id, user)  # v37
-    return _detail(cred, decrypt_payload(cred.data_encrypted))
+    try:
+        return _detail(cred, decrypt_payload(cred.data_encrypted))
+    except ValueError:
+        # v108: an orphaned encryption key (see docker-compose.yml's appdata
+        # volume note) makes the payload permanently unrecoverable - surface
+        # a clear, actionable error instead of a bare 500.
+        raise HTTPException(
+            status_code=409,
+            detail="This credential can no longer be decrypted (its encryption key was rotated). Delete it and create a new one.",
+        )
 
 
 @router.patch("/{credential_id}", response_model=CredentialOut)
@@ -146,7 +182,9 @@ async def update_credential(
         raise HTTPException(status_code=404, detail="Credential not found")
     own_or_404(cred.owner_id, user)  # v37
 
-    data = decrypt_payload(cred.data_encrypted)
+    # v108: only decrypt when a data merge actually needs the old payload -
+    # a rename-only update must succeed even on an undecryptable credential.
+    data = _safe_decrypt(cred) if body.data is not None else {}
     if body.name is not None:
         name = body.name.strip()
         if not name:
@@ -185,7 +223,10 @@ async def rotate_credential(
 
     if not isinstance(body.secrets, dict) or not body.secrets:
         raise HTTPException(status_code=400, detail="Provide at least one field to rotate")
-    data = decrypt_payload(cred.data_encrypted)
+    # v108: an undecryptable payload degrades to {} rather than 500ing -
+    # rotating is the recovery path that RE-encrypts under the current key,
+    # so this is how a dead credential gets fixed without deleting it.
+    data = _safe_decrypt(cred)
     changed = sorted(k for k in body.secrets if data.get(k) != body.secrets[k])
     data.update(body.secrets)
     cred.data_encrypted = encrypt_payload(data)
@@ -237,7 +278,17 @@ async def test_credential(
         raise HTTPException(status_code=404, detail="Credential not found")
     own_or_404(cred.owner_id, user)  # v37
 
-    data = decrypt_payload(cred.data_encrypted)
+    try:
+        data = decrypt_payload(cred.data_encrypted)
+    except ValueError:
+        # v108: consistent with this endpoint's own contract - failures are
+        # reported as ok=false, never as a 500. Rotate the secret to recover.
+        return CredentialTestResult(
+            ok=False,
+            message="This credential's encryption key was rotated and its payload can no longer be read. Rotate its secret to fix it.",
+            latency_ms=0,
+            probed_at=datetime.now(timezone.utc),
+        )
     try:
         result = await probe_credential(cred.type, data, (body.test_url if body else None) or None)
     except ValueError as exc:
@@ -314,6 +365,6 @@ async def delete_credential(
             status_code=409,
             detail=f"Credential is used by {usage.workflow_count} workflow(s): {names}{more}. Delete with force=true to break the link.",
         )
-    _log_event(db, cred, "deleted", {"fields": sorted(decrypt_payload(cred.data_encrypted).keys())})
+    _log_event(db, cred, "deleted", {"fields": sorted(_safe_decrypt(cred).keys())})
     await db.delete(cred)
     await db.commit()  # explicit: teardown commit runs after the response

@@ -219,7 +219,7 @@ watch(installTarget, (t) => {
               class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-lg"
               :style="{ background: `linear-gradient(135deg, ${tpl.accent || '#f97316'}, ${(tpl.accent || '#f97316')}99)`, boxShadow: `0 8px 20px -6px ${(tpl.accent || '#f97316')}66` }"
             >
-              <component :is="iconFor(tpl.icon)" class="h-5 w-5 text-zinc-950" />
+              <component :is="iconFor(tpl.icon)" class="h-5 w-5 text-black" />
             </span>
             <div class="min-w-0 flex-1">
               <h3 class="truncate font-semibold leading-snug">{{ tpl.name }}</h3>
@@ -290,7 +290,7 @@ watch(installTarget, (t) => {
                 class="flex h-9 w-9 items-center justify-center rounded-xl"
                 :style="{ background: `linear-gradient(135deg, ${installTarget.accent || '#f97316'}, ${(installTarget.accent || '#f97316')}99)` }"
               >
-                <component :is="iconFor(installTarget.icon)" class="h-4.5 w-4.5 text-zinc-950" />
+                <component :is="iconFor(installTarget.icon)" class="h-4.5 w-4.5 text-black" />
               </span>
               <div class="min-w-0 flex-1">
                 <h3 class="truncate font-semibold">Install automation</h3>
@@ -348,7 +348,7 @@ watch(installTarget, (t) => {
                 @click="closeInstall()"
               >Cancel</button>
               <button
-                class="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold text-zinc-950 transition hover:brightness-110 disabled:opacity-50"
+                class="inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-bold text-black transition hover:brightness-110 disabled:opacity-50"
                 :style="{ background: installTarget.accent || '#f97316' }"
                 :disabled="installing || !installName.trim()"
                 @click="confirmInstall()"

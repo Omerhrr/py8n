@@ -325,7 +325,12 @@ async def system_detail(system_id: str, request: Request,
         name = None
         if model is not None:
             row = await db.get(model, c.ref_id)
-            name = getattr(row, "name", None) if row is not None else None
+            # v113 fix: VoiceMeeting ("meeting"/Room components) has no
+            # .name field - it uses .title. Falling back to .name alone
+            # silently showed the raw ref_id in the UI for every bound room.
+            name = None
+            if row is not None:
+                name = getattr(row, "name", None) or getattr(row, "title", None)
         grouped[c.kind].append({
             "component_id": c.id,
             "kind": c.kind,

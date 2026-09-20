@@ -133,6 +133,20 @@ class DatasetWriteNode(BaseNode):
         rows = [r for r in items if isinstance(r, dict)]
         if len(rows) < len(items):
             raise NodeExecutionError(f"Dataset Write needs object items - {len(items) - len(rows)} non-object item(s) dropped would lose data; shape upstream instead")
+        if rows and not any(rows):
+            # Bug fix: every row is an empty dict (e.g. a manual trigger with
+            # no payload feeds this node `[{}]` via _items()'s dict fallback).
+            # pandas turns that into a 0-COLUMN DataFrame, and the underlying
+            # duckdb parquet writer used by append/replace/upsert then raised
+            # a raw "InvalidInputException: Need a DataFrame with at least
+            # one column" straight out of the engine - a confusing internal
+            # error instead of an explanation. Catch it here with the same
+            # friendly-error style as the checks around it.
+            raise NodeExecutionError(
+                "Dataset Write received item(s) with no fields - there's nothing to write. "
+                "Connect a node whose output has actual data (Dataset Read, an HTTP response, "
+                "a Set Fields node, ...) before Dataset Write, or pass a payload on the trigger."
+            )
         if not p.dataset or not p.dataset.strip():
             raise NodeExecutionError("A target dataset name is required")
         if p.mode == "upsert" and not p.key_columns:

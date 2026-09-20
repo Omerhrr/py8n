@@ -829,7 +829,17 @@ class NeuralTrainNode(BaseNode):
         labeler = None
         y = data[p.target]
         if task == "classification":
-            if y.dtype == object or str(y.dtype) in ("bool", "boolean", "string"):
+            # v122: the narrow dtype allowlist here (object/bool/boolean/
+            # string) missed a real case - a text-sentiment pack's string
+            # labels ("positive"/"negative") reached the LATER
+            # `.to_numpy(dtype=np.float64)` conversion unencoded and
+            # crashed with a raw, uncaught "ValueError: could not convert
+            # string to float" instead of training. Use pandas' own
+            # is_numeric_dtype (the idiomatic, exhaustive check - covers
+            # category/extension dtypes the allowlist didn't) to decide
+            # whether encoding is needed, so this can't slip through again
+            # regardless of which non-numeric dtype pandas hands back.
+            if not pd.api.types.is_numeric_dtype(y):
                 labeler = LabelEncoder()
                 y = pd.Series(labeler.fit_transform(y), index=y.index)
             if y.nunique() < 2:
@@ -865,6 +875,14 @@ class NeuralTrainNode(BaseNode):
             else:
                 net = _MLP(layer_sizes, activation="relu", seed=p.seed)
 
+        # v122 safety net: whatever the cause, a non-numeric y reaching this
+        # point must fail with a clear, actionable NodeExecutionError -
+        # never a raw ValueError blaming a label string with no context.
+        if not pd.api.types.is_numeric_dtype(y):
+            raise NodeExecutionError(
+                f"target column {p.target!r} is still non-numeric ({y.dtype}) after classification "
+                "encoding - this is a py8n bug, not a data problem; please report it"
+            )
         y_tr_np = y_tr.to_numpy(dtype=np.float64)
         y_te_np = y_te.to_numpy(dtype=np.float64)
         history = net.fit(

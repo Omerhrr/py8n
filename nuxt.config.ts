@@ -6,6 +6,15 @@ export default defineNuxtConfig({
     head: {
       title: 'Py8n',
       link: [{ rel: 'icon', type: 'image/svg+xml', href: '/logo.svg' }],
+      script: [
+        {
+          // v-theme: set the light/dark class before Vue mounts so there's
+          // no flash of the wrong theme on load - mirrors the logic in
+          // composables/useTheme.ts, which takes over after hydration.
+          innerHTML: `(function(){try{var t=localStorage.getItem('py8n.theme');if(t==='light'){document.documentElement.classList.add('light')}}catch(e){}})();`,
+          type: 'text/javascript',
+        },
+      ],
     },
   },
   devtools: { enabled: false },

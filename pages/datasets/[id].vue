@@ -54,7 +54,7 @@ const loadingProfile = ref(false)
 // v45: dataset export
 const exportOpen = ref(false)
 const exporting = ref<string | null>(null)
-const EXPORT_FORMATS = ['csv', 'xlsx', 'json', 'parquet'] as const
+const EXPORT_FORMATS = ['csv', 'xlsx', 'json', 'parquet', 'pdf'] as const
 async function exportDataset(fmt: string) {
   if (!meta.value) return
   exporting.value = fmt

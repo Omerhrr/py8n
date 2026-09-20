@@ -245,7 +245,7 @@ async def get_profile(dataset_id: str, user=Depends(get_optional_user), db: Asyn
 @router.get("/{dataset_id}/export")
 async def export_dataset(
     dataset_id: str,
-    fmt: str = Query("csv", description="csv|xlsx|json|parquet"),
+    fmt: str = Query("csv", description="csv|xlsx|json|parquet|pdf"),
     user=Depends(get_optional_user),
     db: AsyncSession = Depends(get_db),
 ):

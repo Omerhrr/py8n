@@ -15,6 +15,7 @@ Runtime endpoints (slug-addressable, PUBLISHED apps only)
 ---------------------------------------------------------
 GET    /apps/{slug}/runtime              app + dataset schema + stats + chart data
 GET    /apps/{slug}/records              paginated rows
+GET    /apps/{slug}/export               download records as csv/xlsx/json (v142, scope-safe)
 POST   /apps/{slug}/records              create a record (lands in the dataset parquet)
 PATCH  /apps/{slug}/records/{index}      edit a record
 DELETE /apps/{slug}/records/{index}      delete a record
@@ -27,6 +28,17 @@ governance, editable on live apps without touching the layout
 GET    /apps/{ref}/rules                 rules + the known ops/actions/events
 PUT    /apps/{ref}/rules                 replace all rules (validated)
 POST   /apps/{ref}/rules/test            dry-run a sample record against the rules
+
+Google Sheets sync (v143) - owner-only, push the bound dataset on demand
+------------------------------------------------------------------------------
+GET    /apps/{ref}/sheets-sync           current sync settings
+PUT    /apps/{ref}/sheets-sync           save sheet/tab/credential/write_mode
+POST   /apps/{ref}/sheets-sync/run       push the dataset's full contents now
+
+PWA install (v144) - published apps are installable straight from /run/{slug}
+------------------------------------------------------------------------------
+GET    /apps/{slug}/manifest.webmanifest per-app manifest (name, accent icon)
+GET    /apps/{slug}/icon.svg             accent-colored initial-letter icon
 
 Row-level share grants (v48) - named, per-viewer doors into the runtime:
 ------------------------------------------------------------------------------
@@ -45,10 +57,12 @@ Every mutation commits explicitly (v4 lesson).
 
 from __future__ import annotations
 
+import json
 import secrets
+from xml.sax.saxutils import escape as _xml_escape
 
 import pandas as pd
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,6 +100,44 @@ async def _dataset_for(db: AsyncSession, app_row: App) -> Dataset | None:
     if not app_row.dataset_id:
         return None
     return await db.get(Dataset, app_row.dataset_id)
+
+
+async def _extra_datasets_for(db: AsyncSession, app_row: App) -> dict[str, Dataset]:
+    """v149: multi-dataset apps - dataset_id -> Dataset for every EXTRA
+    (non-primary) dataset the app's config.datasets list references. Empty
+    for every legacy single-dataset app (the overwhelming majority)."""
+    out: dict[str, Dataset] = {}
+    for entry in (app_row.config or {}).get("datasets") or []:
+        ds_id = entry.get("dataset_id")
+        if ds_id and ds_id not in out:
+            ds = await db.get(Dataset, ds_id)
+            if ds is not None:
+                out[ds_id] = ds
+    return out
+
+
+async def _extra_schemas_from_config(db: AsyncSession, config: dict | None) -> dict[str, list[dict]]:
+    """v149: resolve {dataset_id -> schema} for every dataset a POSTED/PATCHed
+    config's ``datasets`` list references, so validate_config can check
+    multi-dataset components against the RIGHT schema instead of the app's
+    primary one."""
+    out: dict[str, list[dict]] = {}
+    for entry in (config or {}).get("datasets") or []:
+        ds_id = entry.get("dataset_id")
+        if ds_id and ds_id not in out:
+            ds = await db.get(Dataset, ds_id)
+            if ds is not None:
+                out[ds_id] = ds.schema_json or []
+    return out
+
+
+async def _dataset_for_page(db: AsyncSession, app_row: App, page: str | None) -> Dataset | None:
+    """v149: resolve the dataset a given page's records/CRUD should hit -
+    the primary dataset when ``page`` is omitted or maps to nothing special."""
+    ds_id = app_svc.dataset_id_for_page(app_row.config, page, app_row.dataset_id)
+    if not ds_id:
+        return None
+    return await db.get(Dataset, ds_id)
 
 
 async def _out_with_dataset(db: AsyncSession, row: App) -> AppOut:
@@ -254,9 +306,18 @@ async def _audit(
         await db.rollback()
 
 
-def _form_comp(row: App) -> dict | None:
-    """First form component, if any (v30 forms + rules key off it)."""
-    for comp in (row.config or {}).get("components", []):
+def _form_comp(row: App, page: str | None = None) -> dict | None:
+    """First form component, if any (v30 forms + rules key off it).
+
+    v149: when ``page`` is given, prefer a form component on THAT page (a
+    multi-dataset app has one form per page); falls back to the first form
+    anywhere so single-dataset/legacy apps are unaffected."""
+    comps = (row.config or {}).get("components", [])
+    if page:
+        for comp in comps:
+            if comp.get("type") == "form" and app_svc.component_page(comp) == page:
+                return comp
+    for comp in comps:
         if comp.get("type") == "form":
             return comp
     return None
@@ -281,6 +342,31 @@ async def _validate_workflow_ref(db: AsyncSession, workflow_id: str | None) -> N
         return
     if await db.get(Workflow, workflow_id) is None:
         raise HTTPException(status_code=404, detail="config.workflow_id: workflow not found")
+
+
+async def _validate_relations(db: AsyncSession, config: dict) -> None:
+    """v141: every form field's ``relation`` (if any) must point at a real
+    dataset whose schema actually has the named column(s) - structural shape
+    is already checked by app_svc.validate_fields; this is the DB-backed
+    existence check, same split as _validate_workflow_ref above."""
+    for comp in (config or {}).get("components", []):
+        if not isinstance(comp, dict) or comp.get("type") != "form":
+            continue
+        for f in comp.get("fields", []):
+            if not isinstance(f, dict):
+                continue
+            rel = f.get("relation")
+            if not rel:
+                continue
+            ds = await db.get(Dataset, rel.get("dataset_id"))
+            if ds is None:
+                raise HTTPException(status_code=400, detail=f"field {f.get('name')!r}: relation dataset not found")
+            names = {c["name"] for c in (ds.schema_json or [])}
+            if rel.get("display_column") not in names:
+                raise HTTPException(status_code=400, detail=f"field {f.get('name')!r}: relation.display_column not in that dataset's schema")
+            vc = rel.get("value_column")
+            if vc and vc not in names:
+                raise HTTPException(status_code=400, detail=f"field {f.get('name')!r}: relation.value_column not in that dataset's schema")
 
 
 def _filters_from_request(request: Request) -> dict[str, list[str]]:
@@ -323,11 +409,13 @@ async def create_app(body: AppCreate, user=Depends(get_optional_user), db: Async
         config = app_svc.generate_config(df, dataset.schema_json or [])
     config = config or {"components": []}
     if dataset is not None:
+        extra_schemas = await _extra_schemas_from_config(db, config)  # v149: multi-dataset apps
         try:
-            app_svc.validate_config(config, dataset.schema_json or [])
+            app_svc.validate_config(config, dataset.schema_json or [], extra_schemas=extra_schemas or None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     await _validate_workflow_ref(db, (config or {}).get("workflow_id"))  # v46
+    await _validate_relations(db, config)  # v141
 
     row = App(
         name=name,
@@ -376,11 +464,15 @@ async def update_app(app_ref: str, body: AppUpdate, user=Depends(get_optional_us
     if body.config is not None:
         if row.status == "published":
             raise HTTPException(status_code=409, detail="Unpublish before editing the config")
+        extra_schemas = await _extra_schemas_from_config(db, body.config)  # v149: multi-dataset apps
         try:
-            app_svc.validate_config(body.config, (dataset.schema_json if dataset else []) or [])
+            app_svc.validate_config(
+                body.config, (dataset.schema_json if dataset else []) or [], extra_schemas=extra_schemas or None
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         await _validate_workflow_ref(db, (body.config or {}).get("workflow_id"))  # v46
+        await _validate_relations(db, body.config)  # v141
         row.config = body.config
 
     db.add(row)
@@ -418,8 +510,9 @@ async def publish_app(app_ref: str, user=Depends(get_optional_user), db: AsyncSe
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset before publishing")
+    extra_schemas = await _extra_schemas_from_config(db, row.config)  # v149: multi-dataset apps
     try:
-        app_svc.validate_config(row.config or {}, dataset.schema_json or [])
+        app_svc.validate_config(row.config or {}, dataset.schema_json or [], extra_schemas=extra_schemas or None)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"Invalid config: {exc}") from exc
     await _validate_workflow_ref(db, (row.config or {}).get("workflow_id"))  # v46
@@ -472,6 +565,15 @@ class GrantUpdate(BaseModel):
     op: str | None = Field(default=None, pattern="^(eq|in|neq)$")
     value: object | None = None
     enabled: bool | None = None
+
+
+class SheetsSyncIn(BaseModel):
+    """Body for PUT /apps/{ref}/sheets-sync (v143)."""
+
+    sheet: str = Field(default="", max_length=500, description="Full Sheets URL or bare spreadsheet ID")
+    tab: str = Field(default="", max_length=200)
+    credential_id: str | None = Field(default=None, description="google_service_account credential id")
+    write_mode: str = Field(default="overwrite", pattern="^(overwrite|append)$")
 
 
 def _grant_out(row: AppShareGrant, slug: str, stats: tuple = (0, None)) -> dict:
@@ -637,6 +739,7 @@ async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "view_runtime")  # v48: token-or-grant resolver
     dataset = await _dataset_for(db, row)
+    extra_datasets = await _extra_datasets_for(db, row)  # v149: multi-dataset apps
     components = (row.config or {}).get("components", [])
     filters = _filters_from_request(request)  # v46: ?filter.COLUMN=value
     payload: dict = {
@@ -651,15 +754,29 @@ async def runtime(slug: str, request: Request, db: AsyncSession = Depends(get_db
         "stats": {},
         "chart": None,
         "components": [],  # v46: every component rendered server-side
+        "pages": app_svc.pages_of(components),  # v134: sidebar/tab navigation
+        # v149: which dataset backs each page - {} for every legacy single-dataset app
+        "page_datasets": {
+            entry.get("page"): {"id": ds_id, "name": extra_datasets[ds_id].name}
+            for entry in ((row.config or {}).get("datasets") or [])
+            if (ds_id := entry.get("dataset_id")) in extra_datasets
+        },
         "filters": filters,
         "scope": scope.echo(),  # v48: row-level grant echo for the UI chip
     }
+    payload["relations"] = {}  # v141: field name -> {value: label}, for the table's cell display
     if dataset is not None:
         df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
         if scope.scoped:  # v48: grant viewers compute over THEIR slice only
             df = grant_svc.apply_scope(df, scope.filter)
-        rendered = app_svc.compute_components(components, df, filters)
+        loaders = {
+            ds_id: ds_svc.read_parquet_df(ds_svc.parquet_path(ds_id))
+            for ds_id in extra_datasets
+        } if extra_datasets else None
+        relation_lookups = await app_svc.compute_relation_lookups(db, components)  # v141
+        rendered = app_svc.compute_components(components, df, filters, relation_lookups, loaders=loaders)
         payload["components"] = rendered
+        payload["relations"] = relation_lookups
         # v29 backward-compatible keys (stats dict + first chart)
         payload["stats"] = {c["id"]: c["value"] for c in rendered if c["type"] in ("stat", "kpi")}
         payload["chart"] = next((c for c in rendered if c["type"] == "chart" and c.get("chart_type") != "scatter"), None)
@@ -694,16 +811,25 @@ async def preview_config(
     dataset = await _dataset_for(db, row)
     if dataset is None:
         raise HTTPException(status_code=409, detail="Bind a dataset first")
+    extra_datasets = await _extra_datasets_for(db, row)  # v149: multi-dataset apps
     components = body.get("components")
     if components is None:
         components = (row.config or {}).get("components", [])
+    extra_schemas = {ds_id: (ds.schema_json or []) for ds_id, ds in extra_datasets.items()}
     try:
-        app_svc.validate_config({"components": components}, dataset.schema_json or [])
+        app_svc.validate_config(
+            {"components": components}, dataset.schema_json or [], extra_schemas=extra_schemas or None
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
-    rendered = app_svc.compute_components(components, df, body.get("filters"))
-    return {"components": rendered}
+    loaders = {
+        ds_id: ds_svc.read_parquet_df(ds_svc.parquet_path(ds_id))
+        for ds_id in extra_datasets
+    } if extra_datasets else None
+    relation_lookups = await app_svc.compute_relation_lookups(db, components)  # v141
+    rendered = app_svc.compute_components(components, df, body.get("filters"), relation_lookups, loaders=loaders)
+    return {"components": rendered, "relations": relation_lookups}
 
 
 # ----------------------------------------------------------------- rules (v30)
@@ -751,23 +877,133 @@ async def test_rules(app_ref: str, body: RulesTestIn, user=Depends(get_optional_
     )
 
 
+# --------------------------------------------------- Google Sheets sync (v143)
+# Owner-only builder action - push the bound dataset into a Google Sheet tab
+# on demand. Settings live in config["sheets_sync"], same pattern as rules:
+# editable without touching the locked layout config of a published app.
+@router.get("/{app_ref}/sheets-sync")
+async def get_sheets_sync(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
+    return {"sheets_sync": app_svc.sheets_sync_config(row.config)}
+
+
+@router.put("/{app_ref}/sheets-sync")
+async def put_sheets_sync(app_ref: str, body: SheetsSyncIn, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    row = await _get_or_404(db, app_ref, user)
+    try:
+        cfg = app_svc.validate_sheets_sync(body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    row.config = {**(row.config or {}), "sheets_sync": cfg}
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return {"ok": True, "sheets_sync": cfg}
+
+
+@router.post("/{app_ref}/sheets-sync/run")
+async def run_sheets_sync_now(app_ref: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """Push the bound dataset's CURRENT full contents into the configured
+    sheet right now. Always the whole dataset - this is an owner/builder
+    action, not a scoped runtime surface (unlike /export)."""
+    row = await _get_or_404(db, app_ref, user)
+    dataset = await _dataset_for(db, row)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="App has no dataset bound")
+    cfg = app_svc.sheets_sync_config(row.config)
+    df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+    try:
+        result = await app_svc.run_sheets_sync(df, cfg, owner_id=row.owner_id)
+    except (ValueError, LookupError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001 - connector helpers raise NodeExecutionError,
+        # and the google-auth libs raise their own types (RefreshError etc.) on a bad
+        # key or an unshared sheet; all of that is a legitimate "sync failed" outcome
+        # for the caller, not a server bug, so it surfaces as 400 rather than 500.
+        raise HTTPException(status_code=400, detail=f"Sheets sync failed: {exc}") from exc
+    return {"ok": True, **result}
+
+
+# ----------------------------------------------------------- PWA install (v144)
+# Every published app is installable straight from /run/{slug} - a per-app
+# manifest (name, accent-colored icon, standalone display) plus the site-wide
+# service worker (public/sw.js) registered by the runtime page. No auth: an
+# icon and a color are not sensitive, and installability must work for
+# anonymous public links too. A share-protected app's token rides on
+# start_url (?t=...) so the installed icon reopens without re-prompting.
+#
+# Icon URLs are absolute gateway paths (?XTransformPort=8000) rather than
+# plain "/api/v1/..." - Caddy in this deployment routes purely on the
+# presence of that query param (see Caddyfile), and a manifest's icon/start
+# URLs are resolved by the BROWSER against the manifest's own URL, so they
+# must carry the gateway param themselves to ever reach the API instead of
+# 404ing against the Nuxt frontend. 8000 matches this compose file's fixed
+# internal API port (NUXT_PUBLIC_API_PORT / PY8N_API_ORIGIN).
+_GATEWAY_API_PORT = 8000
+
+
+@router.get("/{slug}/icon.svg")
+async def app_icon(slug: str, db: AsyncSession = Depends(get_db)):
+    row = await _runtime_or_404(db, slug)
+    accent = ((row.config or {}).get("theme") or {}).get("accent") or "#8b5cf6"
+    initial = _xml_escape((row.name or "A").strip()[:1].upper() or "A")
+    svg = (
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192" width="192" height="192">'
+        f'<rect width="192" height="192" rx="40" fill="{_xml_escape(accent)}"/>'
+        f'<text x="96" y="132" font-family="system-ui, -apple-system, sans-serif" font-size="104" '
+        f'font-weight="700" fill="#ffffff" text-anchor="middle">{initial}</text></svg>'
+    )
+    return Response(content=svg, media_type="image/svg+xml")
+
+
+@router.get("/{slug}/manifest.webmanifest")
+async def app_manifest(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
+    row = await _runtime_or_404(db, slug)
+    accent = ((row.config or {}).get("theme") or {}).get("accent") or "#8b5cf6"
+    token = request.query_params.get("t") or ""
+    start_url = f"/run/{row.slug}" + (f"?t={token}" if token else "")
+    icon_url = f"/api/v1/apps/{row.slug}/icon.svg?XTransformPort={_GATEWAY_API_PORT}"
+    manifest = {
+        "name": row.name,
+        "short_name": (row.name or "App")[:30],
+        "description": row.description or f"{row.name} - built with py8n",
+        "start_url": start_url,
+        "id": f"/run/{row.slug}",
+        "scope": f"/run/{row.slug}",
+        "display": "standalone",
+        "background_color": "#0a0a0f",
+        "theme_color": accent,
+        "icons": [
+            {"src": icon_url, "sizes": "192x192", "type": "image/svg+xml", "purpose": "any"},
+            {"src": icon_url, "sizes": "512x512", "type": "image/svg+xml", "purpose": "maskable"},
+        ],
+    }
+    return Response(content=json.dumps(manifest), media_type="application/manifest+json")
+
+
 # ----------------------------------------------------------------- forms (v30)
 @router.get("/{slug}/form")
 async def form_descriptor(slug: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Standalone form descriptor for the public /f/{slug} page."""
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "view_form")  # v48
-    form = _form_comp(row)
+    page = request.query_params.get("page")  # v149: multi-dataset apps
+    form = _form_comp(row, page)
     if form is None:
         raise HTTPException(status_code=409, detail="App has no form component")
-    dataset = await _dataset_for(db, row)
+    dataset = await _dataset_for_page(db, row, page or app_svc.component_page(form))
+    fields = app_svc.form_fields(form)
+    relation_lookups = await app_svc.compute_relation_lookups(db, [form])  # v141
+    for f in fields:
+        if f.get("relation"):
+            f["relation_options"] = app_svc.relation_options_list(relation_lookups.get(f["name"], {}))
     await _audit(db, row, scope, "view_form")
     return {
         "app": {"name": row.name, "slug": row.slug, "description": row.description or ""},
         "form": {
             "title": form.get("title", "Submit"),
             "submit_label": form.get("submit_label", "Submit"),
-            "fields": app_svc.form_fields(form),
+            "fields": fields,
         },
         "dataset": {"name": dataset.name, "row_count": dataset.row_count} if dataset else None,
         "scope": scope.echo(),  # v48: grant context for the public form page
@@ -779,9 +1015,11 @@ async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncS
     """Anonymous single-form submission - same pipeline as records POST."""
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "submit_form")  # v48
-    if _form_comp(row) is None:
+    page = request.query_params.get("page")  # v149: multi-dataset apps
+    form = _form_comp(row, page)
+    if form is None:
         raise HTTPException(status_code=409, detail="App has no form component")
-    dataset = await _dataset_for(db, row)
+    dataset = await _dataset_for_page(db, row, page or app_svc.component_page(form))
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
     record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
@@ -791,7 +1029,7 @@ async def form_submit(slug: str, body: AppRecordIn, request: Request, db: AsyncS
     try:
         result = await app_svc.append_record(
             dataset, record, dataset.schema_json or [],
-            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+            form=form, rules=(row.config or {}).get("rules", []),
             db=db,  # v44: form submissions land on the dataset version timeline
         )
     except ValueError as exc:
@@ -832,19 +1070,21 @@ async def runtime_records(
     q: str = Query("", description="Search across all columns (case-insensitive)", max_length=200),
     sort_by: str = Query("", description="Column to sort by", max_length=120),
     sort_dir: str = Query("asc", pattern="^(asc|desc)$"),
+    page: str = Query("", description="Page/module name (v149 multi-dataset apps)"),
     db: AsyncSession = Depends(get_db),
 ):
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "list_records")  # v48
-    dataset = await _dataset_for(db, row)
+    dataset = await _dataset_for_page(db, row, page or None)
     if dataset is None:
         await _audit(db, row, scope, "list_records", detail="rows=0")
-        return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": []}
+        return {"rows": [], "row_count": 0, "offset": offset, "limit": limit, "columns": [], "relations": {}}
     df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
-    if scope.scoped:  # v48: grant viewers page through their slice only
+    if scope.scoped and dataset.id == row.dataset_id:  # v48/v149: grants scope the PRIMARY dataset only
         df = grant_svc.apply_scope(df, scope.filter)
     df = app_svc.search_sort_df(df, q, sort_by, sort_dir)  # v46: server-side search+sort
     page = df.iloc[offset : offset + limit]
+    relation_lookups = await app_svc.compute_relation_lookups(db, (row.config or {}).get("components", []))  # v141
     await _audit(db, row, scope, "list_records", detail=f"rows={len(df)}")
     return {
         "rows": ds_svc.jsonable_rows(page),
@@ -854,24 +1094,60 @@ async def runtime_records(
         "limit": limit,
         "columns": [c["name"] for c in (dataset.schema_json or [])],
         "scope": scope.echo(),  # v48
+        "relations": relation_lookups,  # v141: field name -> {value: label}
     }
+
+
+@router.get("/{slug}/export")
+async def export_records(
+    slug: str,
+    request: Request,
+    fmt: str = Query("csv", description="csv|xlsx|json"),
+    page: str = Query("", description="Page/module name (v149 multi-dataset apps)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """v142: download the app's records directly - scope-safe counterpart to
+    /datasets/{id}/export, which always reads the dataset's WHOLE parquet
+    and would leak rows outside a grant viewer's slice. v144: xlsx exports
+    the APP (a Dashboard sheet mirroring the live stat/chart components,
+    plus the styled Data table), not a bare data dump."""
+    row = await _runtime_or_404(db, slug)
+    scope = await _runtime_scope(row, request, db, "export_records")
+    dataset = await _dataset_for_page(db, row, page or None)
+    if dataset is None:
+        raise HTTPException(status_code=409, detail="App has no dataset bound")
+    df = ds_svc.read_parquet_df(ds_svc.parquet_path(dataset.id))
+    if scope.scoped and dataset.id == row.dataset_id:  # v48/v149: grants scope the PRIMARY dataset only
+        df = grant_svc.apply_scope(df, scope.filter)
+    try:
+        data, content_type, ext = app_svc.export_records_bytes(row, df, fmt)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    filename = f"{ds_svc.view_name(row.name)}.{ext}"
+    await _audit(db, row, scope, "export_records", detail=f"fmt={fmt} rows={len(df)}")
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.post("/{slug}/records", status_code=201)
 async def create_record(slug: str, body: AppRecordIn, request: Request, db: AsyncSession = Depends(get_db)):
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "create_record")  # v48
-    dataset = await _dataset_for(db, row)
+    page = request.query_params.get("page")  # v149: multi-dataset apps
+    dataset = await _dataset_for_page(db, row, page)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
-    record, stamp_err = grant_svc.stamp_record(scope.filter, body.record)  # v48: eq grants stamp
+    record, stamp_err = grant_svc.stamp_record(scope.filter, body.record) if dataset.id == row.dataset_id else (body.record, None)  # v48: eq grants stamp (primary dataset only)
     if stamp_err:
         await _audit(db, row, scope, "create_record", outcome="denied", detail=stamp_err)
         raise HTTPException(status_code=403, detail=stamp_err)
     try:
         result = await app_svc.append_record(
             dataset, record, dataset.schema_json or [],
-            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+            form=_form_comp(row, page), rules=(row.config or {}).get("rules", []),
             db=db,  # v44: form submissions land on the dataset version timeline
         )
     except ValueError as exc:
@@ -895,16 +1171,17 @@ async def edit_record(
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "update_record")  # v48
     _records_mutator_gate(row, user)  # audit hardening
-    dataset = await _dataset_for(db, row)
+    page = request.query_params.get("page")  # v149: multi-dataset apps
+    dataset = await _dataset_for_page(db, row, page)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
-    if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+    if scope.scoped and dataset.id == row.dataset_id and not _row_in_scope(dataset, index, scope.filter):  # v48/v149
         await _audit(db, row, scope, "update_record", outcome="denied", detail=f"row {index} out of scope")
         raise HTTPException(status_code=404, detail="Record not found")
     try:
         result = await app_svc.update_record(
             dataset, index, body.record,
-            form=_form_comp(row), rules=(row.config or {}).get("rules", []),
+            form=_form_comp(row, page), rules=(row.config or {}).get("rules", []),
         )
     except IndexError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -928,10 +1205,11 @@ async def remove_record(
     row = await _runtime_or_404(db, slug)
     scope = await _runtime_scope(row, request, db, "delete_record")  # v48
     _records_mutator_gate(row, user)  # audit hardening
-    dataset = await _dataset_for(db, row)
+    page = request.query_params.get("page")  # v149: multi-dataset apps
+    dataset = await _dataset_for_page(db, row, page)
     if dataset is None:
         raise HTTPException(status_code=409, detail="App has no dataset bound")
-    if scope.scoped and not _row_in_scope(dataset, index, scope.filter):  # v48
+    if scope.scoped and dataset.id == row.dataset_id and not _row_in_scope(dataset, index, scope.filter):  # v48/v149
         await _audit(db, row, scope, "delete_record", outcome="denied", detail=f"row {index} out of scope")
         raise HTTPException(status_code=404, detail="Record not found")
     try:

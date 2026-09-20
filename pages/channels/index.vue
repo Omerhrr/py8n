@@ -116,6 +116,18 @@ const selectedQueue = ref<any>(null)
 const queueForm = ref({ name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '', auto_answer_enabled: false, auto_answer_keyword: '1', auto_answer_action: 'callback' })
 const queueEntryForm = ref({ session_id: '' })
 const queueBusy = ref(false)
+
+// v-redesign: the page used to stack all six areas in one long scroll -
+// tabs keep the page focused on one area at a time instead.
+const tab = ref<'endpoints' | 'agents' | 'meetings' | 'campaigns' | 'queues' | 'sessions'>('endpoints')
+const TABS = computed(() => [
+  { id: 'endpoints', label: 'Endpoints', icon: Webhook, color: 'text-violet-400', count: endpoints.value.length },
+  { id: 'agents', label: 'Voice agents', icon: Bot, color: 'text-fuchsia-400', count: agents.value.length },
+  { id: 'meetings', label: 'Meetings', icon: Users, color: 'text-emerald-400', count: meetings.value.length },
+  { id: 'campaigns', label: 'Campaigns', icon: Megaphone, color: 'text-amber-400', count: campaigns.value.length },
+  { id: 'queues', label: 'Queues', icon: Hourglass, color: 'text-cyan-400', count: queues.value.length },
+  { id: 'sessions', label: 'Sessions', icon: Phone, color: 'text-sky-400', count: sessions.value.length },
+])
 // v78: the line/room, measured + the video picture
 const queueAnalytics = ref<any>(null)
 const meetingAnalytics = ref<any>(null)
@@ -141,14 +153,14 @@ async function load() {
   pageError.value = ''
   try {
     const [eps, ads, vss, wfs, ags, dss, se, sm, crs, mts, cmps, qss] = await Promise.all([
-      api('/channels/endpoints'), api('/channels/adapters'),
-      api('/voice/sessions'), api('/workflows?limit=200'), api('/voice/agents'),
-      api('/datasets?limit=200'), api('/voice/speech/engines').catch(() => null),
-      api('/voice/speech/models').catch(() => null),
-      api('/credentials').catch(() => []),
-      api('/voice/meetings').catch(() => ({ meetings: [] })),
-      api('/voice/campaigns').catch(() => ({ campaigns: [] })),
-      api('/voice/queues').catch(() => ({ queues: [] })),
+      api.get('/channels/endpoints'), api.get('/channels/adapters'),
+      api.get('/voice/sessions'), api.get('/workflows?limit=200'), api.get('/voice/agents'),
+      api.get('/datasets?limit=200'), api.get('/voice/speech/engines').catch(() => null),
+      api.get('/voice/speech/models').catch(() => null),
+      api.get('/credentials').catch(() => []),
+      api.get('/voice/meetings').catch(() => ({ meetings: [] })),
+      api.get('/voice/campaigns').catch(() => ({ campaigns: [] })),
+      api.get('/voice/queues').catch(() => ({ queues: [] })),
     ])
     endpoints.value = eps.endpoints || []
     adapters.value = ads.adapters || []
@@ -192,13 +204,10 @@ async function createEndpoint() {
   try {
     const config: Record<string, string> = { [primarySecret.value]: form.value.secret }
     if (form.value.credential && credentialKeys.value[0]) config[credentialKeys.value[0]] = form.value.credential
-    await api('/channels/endpoints', {
-      method: 'POST',
-      body: JSON.stringify({
+    await api.post('/channels/endpoints', {
         name: form.value.name, provider: form.value.provider,
         handler_workflow_id: form.value.handler_workflow_id || null, config,
-      }),
-    })
+      })
     showCreate.value = false
     form.value = { name: '', provider: form.value.provider, handler_workflow_id: '', secret: '', credential: '' }
     await load()
@@ -208,30 +217,27 @@ async function createEndpoint() {
 }
 
 async function toggleEndpoint(ep: Endpoint) {
-  await api(`/channels/endpoints/${ep.id}`, { method: 'PUT', body: JSON.stringify({ enabled: !ep.enabled }) })
+  await api.put(`/channels/endpoints/${ep.id}`, { enabled: !ep.enabled })
   await load()
 }
 
 async function removeEndpoint(ep: Endpoint) {
   if (!confirm(`Remove endpoint "${ep.name}"? Conversations survive.`)) return
-  await api(`/channels/endpoints/${ep.id}`, { method: 'DELETE' })
+  await api.del(`/channels/endpoints/${ep.id}`)
   await load()
 }
 
 async function runPreview(ep: Endpoint) {
-  preview.value = { ep, ...(await api(`/channels/endpoints/${ep.id}/preview-outbound`, {
-    method: 'POST',
-    body: JSON.stringify({ to: previewTo.value || 'chat-id', text: previewText.value || 'Hello from py8n!' }),
-  })) }
+  preview.value = { ep, ...(await api.post(`/channels/endpoints/${ep.id}/preview-outbound`, { to: previewTo.value || 'chat-id', text: previewText.value || 'Hello from py8n!' })) }
 }
 
 async function openSession(s: VoiceSession) {
-  selected.value = await api(`/voice/sessions/${s.id}`)
+  selected.value = await api.get(`/voice/sessions/${s.id}`)
 }
 
 async function applyEvent(s: VoiceSession, kind: string) {
   try {
-    await api(`/voice/sessions/${s.id}/events`, { method: 'POST', body: JSON.stringify({ kind }) })
+    await api.post(`/voice/sessions/${s.id}/events`, { kind })
     await load()
     if (selected.value?.id === s.id) await openSession(s)
   } catch (e: any) { pageError.value = e?.data?.detail || e?.message || 'event refused' }
@@ -239,7 +245,7 @@ async function applyEvent(s: VoiceSession, kind: string) {
 
 async function bargeIn(s: VoiceSession) {
   try {
-    await api(`/voice/sessions/${s.id}/barge-in`, { method: 'POST' })
+    await api.post(`/voice/sessions/${s.id}/barge-in`)
     await load()
     if (selected.value?.id === s.id) await openSession(s)
   } catch (e: any) { pageError.value = e?.data?.detail || e?.message || 'barge-in refused' }
@@ -249,9 +255,7 @@ async function createAgent() {
   if (!agentForm.value.name) return
   agentBusy.value = true
   try {
-    await api('/voice/agents', {
-      method: 'POST',
-      body: JSON.stringify({
+    await api.post('/voice/agents', {
         name: agentForm.value.name, greeting_text: agentForm.value.greeting_text,
         asr_provider: agentForm.value.asr_provider, tts_provider: agentForm.value.tts_provider,
         tts_voice: agentForm.value.tts_voice, language: agentForm.value.language,
@@ -262,8 +266,7 @@ async function createAgent() {
         brain: agentForm.value.handler_workflow_id ? undefined : agentForm.value.brain,
         brain_model: agentForm.value.brain_model || '',
         llm_credential_id: (!agentForm.value.handler_workflow_id && agentForm.value.brain === 'ai_agent' && agentForm.value.llm_credential_id) ? agentForm.value.llm_credential_id : null,
-      }),
-    })
+      })
     showAgentCreate.value = false
     agentForm.value = { name: '', greeting_text: '', asr_provider: agentForm.value.asr_provider,
       tts_provider: agentForm.value.tts_provider, tts_voice: 'alloy', language: 'en-US',
@@ -277,7 +280,7 @@ async function createAgent() {
 
 async function removeAgent(a: VoiceAgent) {
   if (!confirm(`Delete voice agent "${a.name}"? Sessions keep the config they copied.`)) return
-  await api(`/voice/agents/${a.id}`, { method: 'DELETE' })
+  await api.del(`/voice/agents/${a.id}`)
   await load()
 }
 
@@ -285,9 +288,9 @@ async function installModel(slug: string) {
   if (!confirm(`Download + install the "${slug}" model now? The download is real and blocking.`)) return
   installing.value = slug
   try {
-    await api('/voice/speech/models/install', { method: 'POST', body: JSON.stringify({ slug }) })
-    speechModels.value = await api('/voice/speech/models')
-    speechEngines.value = await api('/voice/speech/engines').catch(() => null)
+    await api.post('/voice/speech/models/install', { slug })
+    speechModels.value = await api.get('/voice/speech/models')
+    speechEngines.value = await api.get('/voice/speech/engines').catch(() => null)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'model install failed'
   } finally { installing.value = '' }
@@ -296,7 +299,7 @@ async function installModel(slug: string) {
 async function showAnalytics(a: VoiceAgent) {
   analyticsBusy.value = a.id
   try {
-    agentAnalytics.value = { ...agentAnalytics.value, [a.id]: await api(`/voice/agents/${a.id}/analytics`) }
+    agentAnalytics.value = { ...agentAnalytics.value, [a.id]: await api.get(`/voice/agents/${a.id}/analytics`) }
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'analytics failed'
   } finally { analyticsBusy.value = '' }
@@ -311,16 +314,16 @@ async function runVerify() {
   verifyBusy.value = true
   verifyResult.value = null
   try {
-    verifyResult.value = await api('/voice/speech/verify', { method: 'POST', body: JSON.stringify({}) })
+    verifyResult.value = await api.post('/voice/speech/verify', {})
   } catch (e: any) {
     verifyResult.value = { ok: false, error: e?.data?.detail || e?.message || 'verify failed' }
   } finally { verifyBusy.value = false }
 }
 
 async function loadMeetingDetail(m: any) {
-  selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+  selectedMeeting.value = await api.get(`/voice/meetings/${m.id}`)
   try {
-    meetingChat.value = (await api(`/voice/meetings/${m.id}/chat?limit=50`)).messages || []
+    meetingChat.value = (await api.get(`/voice/meetings/${m.id}/chat?limit=50`)).messages || []
   } catch { meetingChat.value = [] }
 }
 
@@ -329,15 +332,12 @@ async function postChat(m: any) {
   if (!chatForm.value.text.trim()) return
   chatBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/chat`, {
-      method: 'POST',
-      body: JSON.stringify({
+    await api.post(`/voice/meetings/${m.id}/chat`, {
         text: chatForm.value.text,
         participant_id: chatForm.value.participant_id || null,
         author: chatForm.value.author || undefined,
         ask_agent: chatForm.value.ask_agent,
-      }),
-    })
+      })
     chatForm.value = { text: '', participant_id: chatForm.value.participant_id, author: '', ask_agent: false }
     await loadMeetingDetail(m)
   } catch (e: any) {
@@ -349,8 +349,7 @@ async function postChat(m: any) {
 async function raiseHand(m: any, p: any, note = '') {
   meetingBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/hand`, {
-      method: 'POST', body: JSON.stringify({ participant_id: p.id, note }) })
+    await api.post(`/voice/meetings/${m.id}/hand`, { participant_id: p.id, note })
     await loadMeetingDetail(m)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'raise hand failed'
@@ -360,7 +359,7 @@ async function raiseHand(m: any, p: any, note = '') {
 async function lowerHand(m: any, p: any) {
   meetingBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/hand/${p.id}`, { method: 'DELETE' })
+    await api.del(`/voice/meetings/${m.id}/hand/${p.id}`)
     await loadMeetingDetail(m)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'lower hand failed'
@@ -370,7 +369,7 @@ async function lowerHand(m: any, p: any) {
 async function callNextHand(m: any) {
   meetingBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/hand/next`, { method: 'POST' })
+    await api.post(`/voice/meetings/${m.id}/hand/next`)
     await loadMeetingDetail(m)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'call next failed'
@@ -382,9 +381,7 @@ async function callNextHand(m: any) {
 async function createQueue() {
   queueBusy.value = true
   try {
-    const created = await api('/voice/queues', {
-      method: 'POST',
-      body: JSON.stringify({ name: queueForm.value.name,
+    const created = await api.post('/voice/queues', { name: queueForm.value.name,
                               meeting_id: queueForm.value.meeting_id || null,
                               config: {
                                 announce: { enabled: true,
@@ -395,7 +392,7 @@ async function createQueue() {
                                                       keyword: queueForm.value.auto_answer_keyword || '1',
                                                       action: queueForm.value.auto_answer_action || 'callback' } },
                                 callback: { enabled: queueForm.value.cb_enabled,
-                                            endpoint_id: queueForm.value.cb_endpoint_id || '' } } }) })
+                                            endpoint_id: queueForm.value.cb_endpoint_id || '' } } })
     queueForm.value = { name: '', meeting_id: '', announce_interval: 60, sms_enabled: false, sms_channel_id: '', cb_enabled: false, cb_endpoint_id: '', auto_answer_enabled: false, auto_answer_keyword: '1', auto_answer_action: 'callback' }
     await load()
     await openQueue(created)
@@ -409,8 +406,7 @@ async function createQueue() {
 async function announceQueue(q: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/announce`, {
-      method: 'POST', body: JSON.stringify({ force: true }) })
+    const res = await api.post(`/voice/queues/${q.id}/announce`, { force: true })
     const hit = (res.announced || []).find((a: any) => a.announced)
     const skip = (res.announced || [])[0]
     note.value = hit ? `announced #${hit.position} of ${hit.depth} (${hit.delivery?.path})`
@@ -425,8 +421,7 @@ async function announceQueue(q: any) {
 async function textQueueWaiters(q: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/sms-update`, {
-      method: 'POST', body: JSON.stringify({ event: 'position' }) })
+    const res = await api.post(`/voice/queues/${q.id}/sms-update`, { event: 'position' })
     const first = (res.sent || [])[0]
     note.value = first ? `texted #${first.position}: ${first.delivery} - ${first.detail || first.text}`
       : 'nobody waiting to text'
@@ -437,7 +432,7 @@ async function textQueueWaiters(q: any) {
 }
 
 async function openQueue(q: any) {
-  selectedQueue.value = await api(`/voice/queues/${q.id}`)
+  selectedQueue.value = await api.get(`/voice/queues/${q.id}`)
   queueAnalytics.value = null
 }
 
@@ -446,8 +441,7 @@ async function openQueue(q: any) {
 async function requestCallback(q: any, entry: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/callbacks`, {
-      method: 'POST', body: JSON.stringify({ entry_id: entry.id }) })
+    const res = await api.post(`/voice/queues/${q.id}/callbacks`, { entry_id: entry.id })
     note.value = res.note || 'callback requested - the hold ended'
     await load()
     await openQueue(q)
@@ -460,8 +454,7 @@ async function requestCallback(q: any, entry: any) {
 async function dialCallbacks(q: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/callbacks/dial`, {
-      method: 'POST', body: JSON.stringify({}) })
+    const res = await api.post(`/voice/queues/${q.id}/callbacks/dial`, {})
     note.value = res.start_note || res.note || 'callback dial pass ran'
     await load()
     await openQueue(q)
@@ -473,7 +466,7 @@ async function dialCallbacks(q: any) {
 // v78: the line, measured - derived at read time, nothing stored
 async function loadQueueAnalytics(q: any) {
   try {
-    queueAnalytics.value = await api(`/voice/queues/${q.id}/analytics`)
+    queueAnalytics.value = await api.get(`/voice/queues/${q.id}/analytics`)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'queue analytics failed'
   }
@@ -482,7 +475,7 @@ async function loadQueueAnalytics(q: any) {
 // v78: the room, measured
 async function loadMeetingAnalytics(m: any) {
   try {
-    meetingAnalytics.value = await api(`/voice/meetings/${m.id}/analytics`)
+    meetingAnalytics.value = await api.get(`/voice/meetings/${m.id}/analytics`)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'meeting analytics failed'
   }
@@ -494,10 +487,9 @@ async function publishTrack(m: any, p: any, kind: string) {
   meetingBusy.value = true
   try {
     const track_id = `ui-${kind}-${p.id.slice(0, 6)}-${Date.now().toString(36)}`
-    const res = await api(`/voice/meetings/${m.id}/video/publish`, {
-      method: 'POST', body: JSON.stringify({ participant_id: p.id, track_id, kind }) })
+    const res = await api.post(`/voice/meetings/${m.id}/video/publish`, { participant_id: p.id, track_id, kind })
     note.value = `${kind} track published - ${res.push?.delivered ?? 0} live socket(s) told`
-    selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+    selectedMeeting.value = await api.get(`/voice/meetings/${m.id}`)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'track publish failed'
   } finally { meetingBusy.value = false }
@@ -506,10 +498,9 @@ async function publishTrack(m: any, p: any, kind: string) {
 async function unpublishTrack(m: any, p: any, t: any) {
   meetingBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/video/unpublish`, {
-      method: 'POST', body: JSON.stringify({ participant_id: p.id, track_id: t.track_id }) })
+    await api.post(`/voice/meetings/${m.id}/video/unpublish`, { participant_id: p.id, track_id: t.track_id })
     note.value = `track ${t.track_id} unpublished`
-    selectedMeeting.value = await api(`/voice/meetings/${m.id}`)
+    selectedMeeting.value = await api.get(`/voice/meetings/${m.id}`)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'track unpublish failed'
   } finally { meetingBusy.value = false }
@@ -519,8 +510,7 @@ async function enqueueSession(q: any) {
   if (!queueEntryForm.value.session_id) return
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/entries`, {
-      method: 'POST', body: JSON.stringify({ session_id: queueEntryForm.value.session_id }) })
+    const res = await api.post(`/voice/queues/${q.id}/entries`, { session_id: queueEntryForm.value.session_id })
     queueEntryForm.value = { session_id: '' }
     selectedQueue.value = res
   } catch (e: any) {
@@ -531,7 +521,7 @@ async function enqueueSession(q: any) {
 async function seatQueueNext(q: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/next`, { method: 'POST', body: JSON.stringify({}) })
+    const res = await api.post(`/voice/queues/${q.id}/next`, {})
     note.value = res.note || 'seated'
     await load()
     await openQueue(res)
@@ -543,7 +533,7 @@ async function seatQueueNext(q: any) {
 async function queueLeave(q: any, entry: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/entries/${entry.id}/leave`, { method: 'POST' })
+    const res = await api.post(`/voice/queues/${q.id}/entries/${entry.id}/leave`)
     selectedQueue.value = res
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'leave failed'
@@ -553,8 +543,7 @@ async function queueLeave(q: any, entry: any) {
 async function toggleQueueState(q: any) {
   queueBusy.value = true
   try {
-    const res = await api(`/voice/queues/${q.id}/state`, {
-      method: 'POST', body: JSON.stringify({ state: q.state === 'open' ? 'closed' : 'open' }) })
+    const res = await api.post(`/voice/queues/${q.id}/state`, { state: q.state === 'open' ? 'closed' : 'open' })
     selectedQueue.value = res
     await load()
   } catch (e: any) {
@@ -565,10 +554,7 @@ async function toggleQueueState(q: any) {
 async function createMeeting() {
   meetingBusy.value = true
   try {
-    const created = await api('/voice/meetings', {
-      method: 'POST',
-      body: JSON.stringify({ title: meetingForm.value.title, agent_id: meetingForm.value.agent_id || null }),
-    })
+    const created = await api.post('/voice/meetings', { title: meetingForm.value.title, agent_id: meetingForm.value.agent_id || null })
     meetingForm.value = { title: '', agent_id: '' }
     await load()
     await loadMeetingDetail(created)
@@ -581,13 +567,10 @@ async function joinMeeting(m: any) {
   if (!joinForm.value.label) return
   meetingBusy.value = true
   try {
-    const res = await api(`/voice/meetings/${m.id}/join`, {
-      method: 'POST',
-      body: JSON.stringify({
+    const res = await api.post(`/voice/meetings/${m.id}/join`, {
         label: joinForm.value.label, channel: joinForm.value.channel,
         address: joinForm.value.address || '',
-      }),
-    })
+      })
     joinForm.value = { label: '', channel: joinForm.value.channel, address: '' }
     await load()
     await loadMeetingDetail(res.meeting)
@@ -598,13 +581,13 @@ async function joinMeeting(m: any) {
 
 async function endMeeting(m: any) {
   if (!confirm('End the meeting? Every live leg hangs up.')) return
-  await api(`/voice/meetings/${m.id}/end`, { method: 'POST' })
+  await api.post(`/voice/meetings/${m.id}/end`)
   await load()
   await loadMeetingDetail(m)
 }
 
 async function loadCampaignDetail(c: any) {
-  selectedCampaign.value = await api(`/voice/campaigns/${c.id}`)
+  selectedCampaign.value = await api.get(`/voice/campaigns/${c.id}`)
 }
 
 function parseTargets(text: string) {
@@ -618,9 +601,7 @@ async function createCampaign() {
   meetingBusy.value = true
   try {
     const delays = campaignForm.value.delays.split(',').map(s => parseInt(s.trim(), 10)).filter(n => Number.isFinite(n))
-    const created = await api('/voice/campaigns', {
-      method: 'POST',
-      body: JSON.stringify({
+    const created = await api.post('/voice/campaigns', {
         name: campaignForm.value.name, agent_id: campaignForm.value.agent_id,
         endpoint_id: campaignForm.value.endpoint_id || null,
         targets: parseTargets(campaignForm.value.targets),
@@ -632,8 +613,7 @@ async function createCampaign() {
                  on_machine: campaignForm.value.amd_on_machine,
                  ...(campaignForm.value.amd_message ? { voicemail_message: campaignForm.value.amd_message } : {}) },
         },
-      }),
-    })
+      })
     campaignForm.value = { name: '', agent_id: '', endpoint_id: '', targets: '',
       max_attempts: 3, delays: '15, 60, 1440', amd_mode: 'disabled', amd_on_machine: 'hangup', amd_message: '' }
     await load()
@@ -646,7 +626,7 @@ async function createCampaign() {
 async function startCampaign(c: any) {
   campaignBusy.value = true
   try {
-    const res = await api(`/voice/campaigns/${c.id}/start`, { method: 'POST', body: JSON.stringify({}) })
+    const res = await api.post(`/voice/campaigns/${c.id}/start`, {})
     await load()
     await loadCampaignDetail(c)
     if (res.start_note) pageError.value = ''
@@ -657,7 +637,7 @@ async function startCampaign(c: any) {
 
 async function simulateAnswer(c: any, t: any) {
   try {
-    await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, { method: 'POST' })
+    await api.post(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`)
     await load()
     await loadCampaignDetail(c)
   } catch (e: any) {
@@ -669,8 +649,7 @@ async function simulateAnswer(c: any, t: any) {
 async function setMix(m: any, p: any, key: 'muted' | 'deafened' | 'solo', val: boolean) {
   meetingBusy.value = true
   try {
-    await api(`/voice/meetings/${m.id}/participants/${p.id}/mix`, {
-      method: 'PATCH', body: JSON.stringify({ [key]: val }) })
+    await api.patch(`/voice/meetings/${m.id}/participants/${p.id}/mix`, { [key]: val })
     await loadMeetingDetail(m)
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'mix failed'
@@ -680,8 +659,7 @@ async function setMix(m: any, p: any, key: 'muted' | 'deafened' | 'solo', val: b
 async function setFloor(m: any, mode: 'auto' | 'directed', participantId?: string) {
   meetingBusy.value = true
   try {
-    const res = await api(`/voice/meetings/${m.id}/floor`, {
-      method: 'POST', body: JSON.stringify({ mode, participant_id: participantId || null }) })
+    const res = await api.post(`/voice/meetings/${m.id}/floor`, { mode, participant_id: participantId || null })
     selectedMeeting.value = res.meeting
   } catch (e: any) {
     pageError.value = e?.data?.detail || e?.message || 'floor failed'
@@ -691,8 +669,7 @@ async function setFloor(m: any, mode: 'auto' | 'directed', participantId?: strin
 async function retryCampaign(c: any, force = false) {
   campaignBusy.value = true
   try {
-    const res = await api(`/voice/campaigns/${c.id}/retry`, {
-      method: 'POST', body: JSON.stringify({ force }) })
+    const res = await api.post(`/voice/campaigns/${c.id}/retry`, { force })
     await load()
     await loadCampaignDetail(c)
     if (res.retry_note) note.value = res.retry_note
@@ -703,8 +680,7 @@ async function retryCampaign(c: any, force = false) {
 
 async function simulateMachine(c: any, t: any, mode: boolean | string = true) {
   try {
-    await api(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, {
-      method: 'POST', body: JSON.stringify({ as_machine: mode }) })
+    await api.post(`/voice/campaigns/${c.id}/targets/${t.id}/simulate-answer`, { as_machine: mode })
     await load()
     await loadCampaignDetail(c)
   } catch (e: any) {
@@ -726,17 +702,7 @@ onMounted(load)
           <Webhook class="w-6 h-6 text-violet-400" /> Channels
         </h1>
         <p class="text-sm text-zinc-400 mt-1 max-w-3xl">
-          Real provider adapters - Meta Cloud API (WhatsApp, interactive buttons included), Telegram,
-          Discord, Telnyx Call Control for SIP + PSTN voice, Telnyx SMS, the any-gateway SMS contract
-          and Email (inbound parse + SMTP) - each webhook-native and verified with its own
-          credentials, feeding the SAME conversation layer. Voice Agents compose the voice stack
-          (greeting, ASR engine, TTS voice, barge-in, scaffolded handler) into one deployable phone
-          persona, bound to a KNOWLEDGE DATASET so every call answers from your data, with the LLM
-          brain routed through a REAL provider credential (openai, claude, deepseek, kimi, qwen,
-          openrouter, ...). Meetings give the stack legs (multi-party rooms with a merged,
-          speaker-attributed transcript) and campaigns dial outbound lists through the same agents;
-          the v70 media transport transcribes through the agent's engine (local whisper.cpp /
-          vosk / piper bridges when installed).
+          Connect a provider, compose a voice agent, and run meetings, queues and campaigns through it.
         </p>
       </div>
       <div class="flex gap-2 shrink-0">
@@ -753,6 +719,20 @@ onMounted(load)
     <div v-if="loading" class="flex items-center gap-2 text-zinc-400"><Loader2 class="w-4 h-4 animate-spin" /> Loading channels…</div>
 
     <template v-if="!loading">
+      <nav class="flex flex-wrap gap-1 border-b border-zinc-800">
+        <button
+          v-for="t in TABS" :key="t.id"
+          type="button"
+          class="flex items-center gap-1.5 rounded-t-lg border-b-2 px-3.5 py-2 text-sm font-medium transition"
+          :class="tab === t.id ? 'border-orange-500 text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'"
+          @click="tab = t.id">
+          <component :is="t.icon" class="h-4 w-4" :class="tab === t.id ? t.color : ''" />
+          {{ t.label }}
+          <span class="ml-0.5 rounded-full bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">{{ t.count }}</span>
+        </button>
+      </nav>
+
+      <div v-show="tab === 'endpoints'" class="space-y-6">
       <section class="flex flex-wrap gap-3">
         <div v-for="a in adapters" :key="a.id" class="rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3 min-w-56">
           <div class="text-sm font-medium text-zinc-200">{{ providerLabel(a.id) }}</div>
@@ -802,7 +782,9 @@ onMounted(load)
           </details>
         </div>
       </section>
+      </div>
 
+      <div v-show="tab === 'agents'" class="space-y-6">
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Bot class="w-4 h-4 text-fuchsia-400" /> Voice agents ({{ agents.length }})
@@ -923,7 +905,9 @@ onMounted(load)
           </details>
         </div>
       </section>
+      </div>
 
+      <div v-show="tab === 'meetings'" class="space-y-6">
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Users class="w-4 h-4 text-emerald-400" /> Voice meetings ({{ meetings.length }})
@@ -1087,7 +1071,9 @@ onMounted(load)
           <p v-for="n in selectedMeeting.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
         </div>
       </section>
+      </div>
 
+      <div v-show="tab === 'campaigns'" class="space-y-6">
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Megaphone class="w-4 h-4 text-amber-400" /> Outbound campaigns ({{ campaigns.length }})
@@ -1182,7 +1168,9 @@ onMounted(load)
           </div>
         </div>
       </section>
+      </div>
 
+      <div v-show="tab === 'queues'" class="space-y-6">
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Hourglass class="w-4 h-4 text-cyan-400" /> Channel queues ({{ queues.length }})
@@ -1303,7 +1291,9 @@ onMounted(load)
           <p v-for="n in selectedQueue.notes || []" :key="n" class="text-zinc-600">{{ n }}</p>
         </div>
       </section>
+      </div>
 
+      <div v-show="tab === 'sessions'" class="space-y-6">
       <section class="space-y-3">
         <h2 class="text-sm font-semibold text-zinc-300 uppercase tracking-wide flex items-center gap-2">
           <Phone class="w-4 h-4 text-sky-400" /> Voice sessions
@@ -1358,6 +1348,7 @@ onMounted(load)
           </ol>
         </div>
       </section>
+      </div>
     </template>
 
     <div v-if="showCreate" class="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" @click.self="showCreate = false">

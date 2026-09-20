@@ -37,9 +37,11 @@ interface BuiltRefs {
   workflow_id: string | null; workflow_name: string | null
   dataset_id: string | null; dataset_name: string | null
   contract_version: number | null; on_violation: string | null
-  dashboard_id: string | null; report_id: string | null; report_cron: string | null
+  dashboard_id: string | null; app_id: string | null; app_slug: string | null
+  report_id: string | null; report_cron: string | null
   notification_rule_id: string | null; policy: Record<string, any> | null
   notes: string[]
+  system_id?: string | null
 }
 
 const { api } = useApi()
@@ -170,7 +172,10 @@ async function build() {
   building.value = true
   buildError.value = ''
   try {
-    draft.value = await api.post(`/builder/systems/${draft.value.id}/build`)
+    // v-builder-system: bind everything the build creates into a real Py8n
+    // System (as the AI Composer already does) so there is something to
+    // open and run afterwards, instead of a pile of unlinked primitives.
+    draft.value = await api.post(`/builder/systems/${draft.value.id}/build`, { as_system: true })
     await loadDrafts()
   } catch (e: any) {
     buildError.value = e?.data?.detail || e?.message || 'Build failed'
@@ -390,6 +395,10 @@ onMounted(async () => {
               <span class="text-xs font-semibold">Dashboard</span>
               <span class="flex items-center gap-1 text-[10px] text-zinc-500">auto-generated <ExternalLink class="h-3 w-3" /></span>
             </NuxtLink>
+            <NuxtLink v-if="draft.built.app_id" :to="`/apps/${draft.built.app_id}`" class="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 transition hover:border-violet-500/40">
+              <span class="text-xs font-semibold">App</span>
+              <span class="flex items-center gap-1 text-[10px] text-zinc-500">forms · rules · Excel export <ExternalLink class="h-3 w-3" /></span>
+            </NuxtLink>
             <div v-if="draft.built.contract_version" class="flex items-center justify-between rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2">
               <span class="text-xs font-semibold">Schema contract</span>
               <span class="text-[10px]" :class="draft.built.on_violation === 'error' ? 'text-rose-300' : 'text-amber-300'">v{{ draft.built.contract_version }} · {{ draft.built.on_violation }} mode</span>
@@ -408,6 +417,13 @@ onMounted(async () => {
             </div>
           </div>
           <p v-for="(n, i) in draft.built.notes || []" :key="'bn' + i" class="mt-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-[10px] text-amber-300/90">{{ n }}</p>
+          <NuxtLink
+            v-if="draft.built.system_id"
+            :to="`/systems?id=${draft.built.system_id}`"
+            class="mt-3 inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-300 hover:text-emerald-200"
+          >
+            Open the system <ExternalLink class="h-3 w-3" />
+          </NuxtLink>
           <p class="mt-3 text-[10px] leading-relaxed text-zinc-600">
             The pipeline starts INACTIVE on purpose - fill in the source credentials (table, connection or URL),
             activate the trigger, and run it once to see the checkpoints move.

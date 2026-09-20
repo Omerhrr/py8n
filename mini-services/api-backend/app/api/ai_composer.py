@@ -39,6 +39,12 @@ class ProposeRequest(BaseModel):
 
 class BuildRequest(BaseModel):
     spec: dict = Field(..., description="The composed spec (from /propose or your own hand)")
+    credential_id: str | None = Field(
+        default=None,
+        description="Same vault credential used to propose the spec - used as the "
+                    "fallback llm_credential_id for any brain=ai_agent voice_agent "
+                    "component that does not name its own (the LLM cannot know "
+                    "vault credential ids, so it never sets this itself).")
 
 
 class GenerateRequest(BaseModel):
@@ -140,7 +146,9 @@ async def composer_build(body: BuildRequest, user=Depends(get_optional_user),
     """Spec -> real primitives + a RUNNING system. Owner-scoped."""
     owner = getattr(user, "id", None)
     try:
-        built = await composer.build_system(db, body.spec, owner_id=owner)
+        built = await composer.build_system(
+            db, body.spec, owner_id=owner,
+            default_llm_credential_id=body.credential_id)
     except composer.AIComposerError as exc:
         raise _http(exc) from exc
     await db.commit()
@@ -165,7 +173,9 @@ async def composer_generate(body: GenerateRequest, user=Depends(get_optional_use
                 {**cred["data"], "type": cred["type"]}, model=body.model)
         else:
             spec = composer.synthesize_spec(body.description)
-        built = await composer.build_system(db, spec, owner_id=owner)
+        built = await composer.build_system(
+            db, spec, owner_id=owner,
+            default_llm_credential_id=body.credential_id)
     except composer.AIComposerError as exc:
         raise _http(exc) from exc
     await db.commit()

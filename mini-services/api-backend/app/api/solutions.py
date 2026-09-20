@@ -329,6 +329,20 @@ async def install_solution(slug: str, body: SolutionInstallRequest | None = None
         counts: dict[str, int] = {}
         for c in comp_rows:
             counts[c.kind] = counts.get(c.kind, 0) + 1
+        # v121 fix: same class of gap as the AI Builder/Composer had
+        # (component_added never logged for server-side binds) - a
+        # marketplace solution installed with as_system=true built every
+        # SystemComponent row directly via db.add() and only ever wrote
+        # ONE aggregate "installed" op below, so the Operations tab could
+        # not show which individual objects got attached during install.
+        for c in comp_rows:
+            comp_op = await system_runtime.record_operation(
+                db, sys_row, "component_added", owner or "system",
+                {"kind": c.kind, "ref_id": c.ref_id, "component_id": c.id,
+                 "via": "solution_install"})
+            await system_runtime._emit_system_event(
+                db, sys_row, "system.component_added",
+                {"operation_id": comp_op.id, "kind": c.kind, "ref_id": c.ref_id})
         await system_runtime.install_mark(
             db, sys_row, solution_slug=s.slug, actor=owner or "system",
             component_counts=counts)

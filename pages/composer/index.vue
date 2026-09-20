@@ -9,7 +9,7 @@
 import { ref, computed, onMounted } from 'vue'
 import {
   Loader2, Sparkles, Database, Workflow, Bot, Video, Hourglass, Boxes,
-  CheckCircle2, AlertTriangle, ArrowRight, Wand2, ExternalLink, Info,
+  CheckCircle2, AlertTriangle, ArrowRight, Wand2, ExternalLink, Info, LayoutGrid,
 } from 'lucide-vue-next'
 import { useApi } from '~/composables/useApi'
 
@@ -22,6 +22,7 @@ interface SpecComponent {
   knowledge?: { dataset?: string; text_column?: string; answer_column?: string }
   modality?: string; agent?: string; meeting?: string
   max_size?: number; max_wait_seconds?: number; announce?: boolean
+  dataset?: string
 }
 interface Spec {
   name: string; description?: string; mode?: string; archetype?: string
@@ -29,7 +30,7 @@ interface Spec {
 }
 interface Built {
   datasets: any[]; workflows: any[]; voice_agents: any[]
-  meeting_rooms: any[]; queues: any[]
+  meeting_rooms: any[]; queues: any[]; apps: any[]
   system: { id: string; name: string; lifecycle: string; components: number } | null
   notes?: string[]
 }
@@ -57,6 +58,7 @@ const KIND_META: Record<string, { icon: any; label: string; color: string }> = {
   voice_agent: { icon: Bot, label: 'Voice agent', color: 'text-violet-400' },
   meeting_room: { icon: Video, label: 'Meeting room', color: 'text-amber-400' },
   queue: { icon: Hourglass, label: 'Queue', color: 'text-rose-400' },
+  app: { icon: LayoutGrid, label: 'App', color: 'text-fuchsia-400' },
 }
 
 const llmCredentials = computed(() =>
@@ -64,18 +66,22 @@ const llmCredentials = computed(() =>
     ['openai_compatible', 'anthropic'].includes(c.type)))
 
 onMounted(async () => {
+  // v-composer-robustness: the catalog is load-bearing (Propose spec can't
+  // validate without it); credentials are not - a credential the vault can
+  // no longer decrypt (see docker-compose.yml's appdata volume note) must
+  // degrade to "deterministic mode only", never take the whole page down.
   try {
-    const [cat, creds] = await Promise.all([
-      api('/ai-composer/catalog'),
-      api('/credentials'),
-    ])
-    catalog.value = cat
-    credentials.value = creds.credentials || creds || []
+    catalog.value = await api.get('/ai-composer/catalog')
   } catch (e: any) {
     pageError.value = e?.message || String(e)
-  } finally {
-    loading.value = false
   }
+  try {
+    const creds: any = await api.get('/credentials')
+    credentials.value = creds.credentials || creds || []
+  } catch {
+    credentials.value = []
+  }
+  loading.value = false
 })
 
 async function propose() {
@@ -86,7 +92,7 @@ async function propose() {
     const body: any = { description: description.value }
     if (credentialId.value) body.credential_id = credentialId.value
     if (model.value.trim()) body.model = model.value.trim()
-    const res = await api('/ai-composer/propose', body)
+    const res = await api.post('/ai-composer/propose', body)
     spec.value = res.spec
   } catch (e: any) {
     actionError.value = e?.message || String(e)
@@ -100,7 +106,15 @@ async function build() {
   actionError.value = ''
   building.value = true
   try {
-    built.value = await api('/ai-composer/build', { spec: spec.value })
+    // Bug fix: this never sent credential_id, so a brain=ai_agent voice
+    // agent the LLM proposed (it can never know a vault credential id
+    // itself) had no way to build - a 400 with no field anywhere to fix
+    // it. Send the SAME credential picked for propose as the build-time
+    // fallback (the backend only uses it when a component doesn't already
+    // name its own llm_credential_id).
+    const body: any = { spec: spec.value }
+    if (credentialId.value) body.credential_id = credentialId.value
+    built.value = await api.post('/ai-composer/build', body)
   } catch (e: any) {
     actionError.value = e?.message || String(e)
   } finally {
@@ -116,7 +130,7 @@ async function generate() {
     const body: any = { description: description.value }
     if (credentialId.value) body.credential_id = credentialId.value
     if (model.value.trim()) body.model = model.value.trim()
-    built.value = await api('/ai-composer/generate', body)
+    built.value = await api.post('/ai-composer/generate', body)
   } catch (e: any) {
     actionError.value = e?.message || String(e)
   } finally {
@@ -266,6 +280,10 @@ function stepLine(s: { type: string; name?: string }) {
                 <li v-if="c.agent">agent: {{ c.agent }}</li>
                 <li>announcements: {{ c.announce !== false ? 'on' : 'off' }} - SMS/callback backchannel pre-wired</li>
               </template>
+              <template v-else-if="c.kind === 'app'">
+                <li>dataset: {{ c.dataset }}</li>
+                <li>forms + records table + Excel export, auto-laid-out from the dataset's columns</li>
+              </template>
             </ul>
           </div>
         </div>
@@ -306,6 +324,12 @@ function stepLine(s: { type: string; name?: string }) {
               {{ r.title }} <span class="text-zinc-500">({{ r.modality }})</span>
             </p>
             <p v-for="q in built.queues" :key="q.id" class="text-zinc-300 text-xs">{{ q.name }}</p>
+            <template v-if="built.apps?.length">
+              <h3 class="text-xs uppercase tracking-wide text-zinc-500 mt-3 mb-1">Apps</h3>
+              <NuxtLink v-for="ap in built.apps" :key="ap.id" :to="`/apps/${ap.id}`" class="flex items-center gap-1.5 text-zinc-300 text-xs hover:text-violet-300">
+                {{ ap.name }} <span class="text-zinc-500">({{ ap.dataset }})</span> <ExternalLink class="w-3 h-3" />
+              </NuxtLink>
+            </template>
           </div>
         </div>
         <div v-if="built.notes?.length" class="mt-3 space-y-1">
@@ -314,7 +338,7 @@ function stepLine(s: { type: string; name?: string }) {
           </p>
         </div>
         <NuxtLink
-          :to="`/systems/${built.system?.id}`"
+          :to="`/systems?id=${built.system?.id}`"
           class="inline-flex items-center gap-1.5 mt-3 text-xs text-indigo-400 hover:text-indigo-300"
         >
           Open the system <ExternalLink class="w-3 h-3" />

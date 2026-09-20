@@ -83,7 +83,7 @@ async def execution_queue(
     Progress fields are null for rows the map no longer tracks (e.g. resumed
     runs after a restart). Ordered oldest first: the queue is FIFO-ish.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
 
     from ..auth import visible_workflow_ids
     from ..services.executor import _live_progress
@@ -107,7 +107,17 @@ async def execution_queue(
         ).all()
         names = dict(name_rows)
 
-    now = datetime.utcnow()  # started_at is stored naive (sqlite) - stay naive
+    # Bug fix: this used to compare against a NAIVE datetime.utcnow() with
+    # the comment "started_at is stored naive (sqlite) - stay naive" - true
+    # under the old sqlite backend, but ExecutionLog.started_at is
+    # DateTime(timezone=True) and this stack runs Postgres now, where
+    # asyncpg hands back TIMEZONE-AWARE datetimes. Subtracting an aware
+    # started_at from a naive "now" raised TypeError: can't subtract
+    # offset-naive and offset-aware datetimes on every /executions/queue
+    # poll while any execution was "running" - i.e. constantly, on a live
+    # dashboard. now is aware UTC; a defensively-naive started (e.g. an old
+    # row written before this column had a timezone) is treated as UTC too.
+    now = datetime.now(timezone.utc)
     items = []
     for r in rows:
         prog = _live_progress.get(r.id) or {}
@@ -116,6 +126,9 @@ async def execution_queue(
         if nodes_total:
             nodes_done = min(nodes_done, nodes_total)
         started = r.started_at
+        started_aware = (
+            started.replace(tzinfo=timezone.utc) if started and started.tzinfo is None else started
+        )
         items.append(
             {
                 "execution_id": r.id,
@@ -125,8 +138,8 @@ async def execution_queue(
                 "status": r.status,
                 "started_at": started.isoformat() if started else None,
                 "duration_ms": (
-                    int((now - started).total_seconds() * 1000)
-                    if started and r.status == "running"
+                    int((now - started_aware).total_seconds() * 1000)
+                    if started_aware and r.status == "running"
                     else r.duration_ms
                 ),
                 "nodes_done": nodes_done,

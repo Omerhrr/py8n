@@ -84,11 +84,11 @@ function storeKey() { return `py8n-meeting-${meetingId.value}` }
 // ------------------------------------------------------------------ data
 async function refresh(full: boolean) {
   try {
-    meeting.value = await api(`/voice/meetings/${meetingId.value}`)
+    meeting.value = await api.get(`/voice/meetings/${meetingId.value}`)
     if (me.value) {
-      const msgs = await api(`/voice/meetings/${meetingId.value}/chat?limit=100`).catch(() => ({ messages: [] }))
+      const msgs = await api.get(`/voice/meetings/${meetingId.value}/chat?limit=100`).catch(() => ({ messages: [] }))
       if (!chat.value.length || full) chat.value = msgs.messages || []
-      recordings.value = (await api(`/voice/meetings/${meetingId.value}/recordings`).catch(() => ({ recordings: [] }))).recordings || []
+      recordings.value = (await api.get(`/voice/meetings/${meetingId.value}/recordings`).catch(() => ({ recordings: [] }))).recordings || []
     }
     // v85 deepening: keep the video mesh honest - pull offers for tracks
     // published before (or while) we joined, and push ours to newcomers
@@ -109,9 +109,7 @@ async function join() {
   joining.value = true
   error.value = ''
   try {
-    const out = await api(`/voice/meetings/${meetingId.value}/join`, {
-      method: 'POST', body: { label, channel: 'web' },
-    })
+    const out = await api.post(`/voice/meetings/${meetingId.value}/join`, { label, channel: 'web' })
     me.value = { participantId: out.participant.id, sessionId: out.participant.session_id, label }
     sessionStorage.setItem(storeKey(), JSON.stringify(me.value))
     joinLabel.value = ''
@@ -127,7 +125,7 @@ async function join() {
 
 async function leave() {
   if (me.value) {
-    try { await api(`/voice/sessions/${me.value.sessionId}/events`, { method: 'POST', body: { kind: 'hangup', payload: { reason: 'left the room' } } }) } catch {}
+    try { await api.post(`/voice/sessions/${me.value.sessionId}/events`, { kind: 'hangup', payload: { reason: 'left the room' } }) } catch {}
   }
   sessionStorage.removeItem(storeKey())
   teardownMedia(); teardownVideo()
@@ -417,10 +415,7 @@ async function toggleScreen() {
 async function publishLocal(kind: 'camera' | 'screen') {
   if (!me.value || !localStream) return
   localTrackId = `trk-${Math.random().toString(36).slice(2, 12)}`
-  await api(`/voice/meetings/${meetingId.value}/video/publish`, {
-    method: 'POST',
-    body: { participant_id: me.value.participantId, track_id: localTrackId, kind },
-  })
+  await api.post(`/voice/meetings/${meetingId.value}/video/publish`, { participant_id: me.value.participantId, track_id: localTrackId, kind })
   if (kind === 'camera') camOn.value = true; else screenOn.value = true
   if (localVideo.value) {
     localVideo.srcObject = localStream
@@ -446,10 +441,7 @@ async function offerTo(pid: string, stream: MediaStream) {
 async function unpublishLocal() {
   if (me.value && localTrackId) {
     try {
-      await api(`/voice/meetings/${meetingId.value}/video/unpublish`, {
-        method: 'POST',
-        body: { participant_id: me.value.participantId, track_id: localTrackId },
-      })
+      await api.post(`/voice/meetings/${meetingId.value}/video/unpublish`, { participant_id: me.value.participantId, track_id: localTrackId })
     } catch {}
   }
   teardownVideo()
@@ -528,10 +520,7 @@ async function sendChat() {
   if (!text || !me.value) return
   chatInput.value = ''
   try {
-    const out = await api(`/voice/meetings/${meetingId.value}/chat`, {
-      method: 'POST',
-      body: { participant_id: me.value.participantId, author: me.value.label, text, ask_agent: askAgent.value },
-    })
+    const out = await api.post(`/voice/meetings/${meetingId.value}/chat`, { participant_id: me.value.participantId, author: me.value.label, text, ask_agent: askAgent.value })
     chat.value.push(out.message)
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -544,9 +533,9 @@ async function sendChat() {
 // the room (the head releases and lands here as a leg, v76 machinery).
 async function refreshRoomQueue() {
   try {
-    const all = (await api('/voice/queues').catch(() => ({ queues: [] }))).queues || []
+    const all = (await api.get('/voice/queues').catch(() => ({ queues: [] }))).queues || []
     const hit = all.find((q: any) => q.meeting_id === meetingId.value)
-    roomQueue.value = hit ? await api(`/voice/queues/${hit.id}`) : null
+    roomQueue.value = hit ? await api.get(`/voice/queues/${hit.id}`) : null
   } catch {
     roomQueue.value = null
   }
@@ -557,7 +546,7 @@ async function seatNext() {
   seatingBusy.value = true
   error.value = ''
   try {
-    await api(`/voice/queues/${roomQueue.value.id}/next`, { method: 'POST' })
+    await api.post(`/voice/queues/${roomQueue.value.id}/next`)
     await Promise.all([refresh(false), refreshRoomQueue()])
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -573,11 +562,9 @@ async function toggleHand() {
     const raised = (meeting.value?.hand_queue?.entries || []).some(
       (e: any) => e.participant_id === me.value?.participantId)
     if (raised) {
-      await api(`/voice/meetings/${meetingId.value}/hand/${me.value.participantId}`, { method: 'DELETE' })
+      await api.del(`/voice/meetings/${meetingId.value}/hand/${me.value.participantId}`)
     } else {
-      await api(`/voice/meetings/${meetingId.value}/hand`, {
-        method: 'POST', body: { participant_id: me.value.participantId, note: '' },
-      })
+      await api.post(`/voice/meetings/${meetingId.value}/hand`, { participant_id: me.value.participantId, note: '' })
     }
     await refresh(false)
   } catch (e: any) {
@@ -587,7 +574,7 @@ async function toggleHand() {
 
 async function callNextHand() {
   try {
-    await api(`/voice/meetings/${meetingId.value}/hand/next`, { method: 'POST' })
+    await api.post(`/voice/meetings/${meetingId.value}/hand/next`)
     await refresh(false)
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -599,9 +586,7 @@ async function startRecording() {
   recordingBusy.value = true
   error.value = ''
   try {
-    await api(`/voice/meetings/${meetingId.value}/recordings`, {
-      method: 'POST', body: { name: `${meeting.value?.title || 'room'} - ${new Date().toLocaleString()}` },
-    })
+    await api.post(`/voice/meetings/${meetingId.value}/recordings`, { name: `${meeting.value?.title || 'room'} - ${new Date().toLocaleString()}` })
     await refresh(true)
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -614,7 +599,7 @@ async function stopRecording(rec: any) {
   recordingBusy.value = true
   error.value = ''
   try {
-    await api(`/voice/meetings/${meetingId.value}/recordings/${rec.id}/stop`, { method: 'POST' })
+    await api.post(`/voice/meetings/${meetingId.value}/recordings/${rec.id}/stop`)
     await refresh(true)
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -657,19 +642,19 @@ function dt(s?: string | null) {
     <header class="flex flex-wrap items-center justify-between gap-3">
       <div>
         <NuxtLink to="/meetings" class="text-xs text-indigo-600 hover:underline">← all meetings</NuxtLink>
-        <h1 class="text-2xl font-bold text-slate-800">
+        <h1 class="text-2xl font-bold text-zinc-100">
           {{ meeting?.title || 'Room' }}
           <span
             class="ml-2 text-xs px-2 py-0.5 rounded-full align-middle"
-            :class="meeting?.state === 'active' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'">
+            :class="meeting?.state === 'active' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-zinc-800 text-zinc-500'">
             {{ meeting?.state }}
           </span>
         </h1>
-        <p v-if="wsState" class="text-xs text-slate-400">{{ wsState }}</p>
+        <p v-if="wsState" class="text-xs text-zinc-500">{{ wsState }}</p>
       </div>
       <div v-if="me && meeting?.state === 'active'" class="flex items-center gap-2">
         <button
-          :class="micOn ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700'"
+          :class="micOn ? 'bg-emerald-600 text-white' : 'bg-zinc-900 border border-zinc-700 text-zinc-200'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
           @click="toggleMic">
           {{ micOn ? 'Mic on' : 'Mic off' }}
@@ -677,13 +662,13 @@ function dt(s?: string | null) {
         <select
           v-if="micDevices.length > 1"
           v-model="micDeviceId"
-          class="px-2 py-1.5 rounded-lg border border-slate-300 text-xs max-w-28"
+          class="px-2 py-1.5 rounded-lg border border-zinc-700 text-xs max-w-28"
           @change="switchMic">
           <option value="">default mic</option>
           <option v-for="d in micDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || 'mic' }}</option>
         </select>
         <button
-          :class="camOn ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700'"
+          :class="camOn ? 'bg-emerald-600 text-white' : 'bg-zinc-900 border border-zinc-700 text-zinc-200'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
           @click="toggleCamera">
           {{ camOn ? 'Camera on' : 'Camera off' }}
@@ -691,19 +676,19 @@ function dt(s?: string | null) {
         <select
           v-if="camDevices.length > 1"
           v-model="camDeviceId"
-          class="px-2 py-1.5 rounded-lg border border-slate-300 text-xs max-w-28"
+          class="px-2 py-1.5 rounded-lg border border-zinc-700 text-xs max-w-28"
           @change="switchCamera">
           <option value="">default camera</option>
           <option v-for="d in camDevices" :key="d.deviceId" :value="d.deviceId">{{ d.label || 'camera' }}</option>
         </select>
         <button
-          :class="screenOn ? 'bg-emerald-600 text-white' : 'bg-white border border-slate-300 text-slate-700'"
+          :class="screenOn ? 'bg-emerald-600 text-white' : 'bg-zinc-900 border border-zinc-700 text-zinc-200'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
           @click="toggleScreen">
           {{ screenOn ? 'Sharing' : 'Share screen' }}
         </button>
         <button
-          :class="isRaised(myParticipant) ? 'bg-amber-500 text-white' : 'bg-white border border-slate-300 text-slate-700'"
+          :class="isRaised(myParticipant) ? 'bg-amber-500 text-white' : 'bg-zinc-900 border border-zinc-700 text-zinc-200'"
           class="px-3 py-1.5 rounded-lg text-sm hover:opacity-90"
           @click="toggleHand">
           {{ isRaised(myParticipant) ? 'Lower hand' : 'Raise hand' }}
@@ -714,18 +699,18 @@ function dt(s?: string | null) {
       </div>
     </header>
 
-    <p v-if="error" class="rounded-lg bg-rose-50 border border-rose-200 text-rose-700 px-4 py-2 text-sm">{{ error }}</p>
+    <p v-if="error" class="rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 px-4 py-2 text-sm">{{ error }}</p>
 
-    <div v-if="queueBanner" class="rounded-lg bg-amber-50 border border-amber-200 text-amber-800 px-4 py-2 text-sm">
+    <div v-if="queueBanner" class="rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-300 px-4 py-2 text-sm">
       <b>{{ queueBanner.queue_name }}</b>: you are #{{ queueBanner.position }} of {{ queueBanner.depth }}
       (waited {{ queueBanner.waited_seconds }}s) - {{ queueBanner.text }}
       <button class="ml-2 underline text-xs" @click="queueBanner = null">dismiss</button>
     </div>
 
     <!-- join panel -->
-    <section v-if="!me && meeting?.state === 'active'" class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm max-w-md space-y-3">
-      <h2 class="font-semibold text-slate-800">Join this room from the browser</h2>
-      <p class="text-xs text-slate-500">
+    <section v-if="!me && meeting?.state === 'active'" class="rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-sm max-w-md space-y-3">
+      <h2 class="font-semibold text-zinc-100">Join this room from the browser</h2>
+      <p class="text-xs text-zinc-500">
         You become a web leg: your mic streams over the session's media websocket
         (VAD + ASR + the agent's turns), the room's chat and announcements are pushed
         to you live, and your camera registers as a first-class video track
@@ -734,7 +719,7 @@ function dt(s?: string | null) {
       <form class="flex gap-2" @submit.prevent="join">
         <input
           v-model="joinLabel" maxlength="140" placeholder="your name in the room…"
-          class="flex-1 px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+          class="flex-1 px-3 py-2 rounded-lg border border-zinc-700 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
         <button
           type="submit" :disabled="joining || !joinLabel.trim()"
           class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
@@ -743,29 +728,29 @@ function dt(s?: string | null) {
       </form>
     </section>
 
-    <p v-if="loading && !meeting" class="text-sm text-slate-400">loading…</p>
+    <p v-if="loading && !meeting" class="text-sm text-zinc-500">loading…</p>
 
     <div v-if="meeting" class="grid gap-5 lg:grid-cols-3">
       <!-- the video grid -->
       <section class="lg:col-span-2 space-y-4">
         <div class="grid gap-3 sm:grid-cols-2">
-          <div v-if="camOn || screenOn" class="rounded-xl overflow-hidden bg-slate-900 border border-slate-700">
+          <div v-if="camOn || screenOn" class="rounded-xl overflow-hidden bg-zinc-950 border border-zinc-700">
             <video ref="localVideo" autoplay playsinline class="w-full aspect-video object-cover" />
-            <p class="text-xs text-slate-300 px-2 py-1">
+            <p class="text-xs text-zinc-300 px-2 py-1">
               you ({{ screenOn ? 'screen' : 'camera' }}){{ iHoldTheFloor ? ' · holds the floor' : '' }}
             </p>
           </div>
           <div
             v-for="v in remoteVideos" :key="v.pid"
-            class="rounded-xl overflow-hidden bg-slate-900 border border-slate-700">
+            class="rounded-xl overflow-hidden bg-zinc-950 border border-zinc-700">
             <video
               :ref="(el: any) => { if (el) { el.srcObject = v.stream; el.muted = true; el.play?.().catch(() => {}) } }"
               autoplay playsinline class="w-full aspect-video object-cover" />
-            <p class="text-xs text-slate-300 px-2 py-1">{{ v.label }} ({{ v.kind }})</p>
+            <p class="text-xs text-zinc-300 px-2 py-1">{{ v.label }} ({{ v.kind }})</p>
           </div>
           <div
             v-if="!(camOn || screenOn) && !remoteVideos.length"
-            class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-6 text-xs text-slate-400 sm:col-span-2">
+            class="rounded-xl border border-dashed border-zinc-700 bg-zinc-900 p-6 text-xs text-zinc-500 sm:col-span-2">
             No cameras live in this room yet. Publish yours and everyone joined -
             now or later - is pulled in automatically: the publisher offers, the
             late joiner says hello, py8n relays the handshake (never the pixels).
@@ -773,8 +758,8 @@ function dt(s?: string | null) {
         </div>
 
         <!-- participants -->
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-          <h2 class="text-sm font-semibold text-slate-700 mb-2">
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
+          <h2 class="text-sm font-semibold text-zinc-200 mb-2">
             Participants ({{ meeting.counts?.joined ?? 0 }} joined)
             <span v-if="meeting.floor?.participant_id" class="ml-2 text-xs font-normal text-amber-600">
               floor: {{ meeting.floor?.label || meeting.floor.participant_id }}
@@ -784,17 +769,17 @@ function dt(s?: string | null) {
             <li
               v-for="p in meeting.participants" :key="p.id"
               class="flex items-center gap-2"
-              :class="p.id === me?.participantId ? 'text-indigo-700 font-medium' : 'text-slate-600'">
+              :class="p.id === me?.participantId ? 'text-indigo-400 font-medium' : 'text-zinc-400'">
               <span class="inline-block w-2 h-2 rounded-full"
-                :class="p.state === 'joined' ? 'bg-emerald-500' : 'bg-slate-300'" />
+                :class="p.state === 'joined' ? 'bg-emerald-500' : 'bg-zinc-600'" />
               {{ p.label || p.address || p.id.slice(0, 8) }}
-              <span class="text-xs text-slate-400">[{{ p.channel }} · {{ p.session_state || p.state }}]</span>
+              <span class="text-xs text-zinc-500">[{{ p.channel }} · {{ p.session_state || p.state }}]</span>
               <span v-if="p.id === meeting.floor?.participant_id" class="text-xs text-amber-600">floor</span>
               <span v-if="isRaised(p)" class="text-xs text-amber-500">✋ #{{ isRaised(p) }}</span>
               <span v-if="(meeting.video?.screen_holders || []).includes(p.label)" class="text-xs text-sky-600">screen</span>
               <button
                 v-if="meeting.state === 'active' && (meeting.hand_queue?.entries || []).length"
-                class="ml-auto text-xs px-2 py-0.5 rounded border border-slate-200 hover:bg-slate-50"
+                class="ml-auto text-xs px-2 py-0.5 rounded border border-zinc-800 hover:bg-zinc-900"
                 @click="callNextHand">
                 call next hand
               </button>
@@ -803,13 +788,13 @@ function dt(s?: string | null) {
         </div>
 
         <!-- live transcript (derived from the legs' timelines) -->
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm max-h-72 overflow-y-auto">
-          <h2 class="text-sm font-semibold text-slate-700 mb-2">Live transcript <span class="text-xs text-slate-400">(derived at read time)</span></h2>
-          <p v-if="!meeting.transcript?.length" class="text-xs text-slate-400">nothing said yet.</p>
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm max-h-72 overflow-y-auto">
+          <h2 class="text-sm font-semibold text-zinc-200 mb-2">Live transcript <span class="text-xs text-zinc-500">(derived at read time)</span></h2>
+          <p v-if="!meeting.transcript?.length" class="text-xs text-zinc-500">nothing said yet.</p>
           <ul class="space-y-1 text-sm">
             <li v-for="(ln, i) in meeting.transcript || []" :key="i">
-              <span class="text-xs text-slate-400">{{ dt(ln.at) }}</span>
-              <b :class="ln.side === 'agent' ? 'text-violet-700' : 'text-slate-700'">{{ ln.speaker }}</b>:
+              <span class="text-xs text-zinc-500">{{ dt(ln.at) }}</span>
+              <b :class="ln.side === 'agent' ? 'text-violet-400' : 'text-zinc-200'">{{ ln.speaker }}</b>:
               {{ ln.text }}
             </li>
           </ul>
@@ -818,11 +803,11 @@ function dt(s?: string | null) {
 
       <!-- the side panel: waiting room + chat + recordings -->
       <section class="space-y-4">
-        <div v-if="roomQueue" class="rounded-xl border border-amber-200 bg-amber-50 p-4 shadow-sm space-y-2">
+        <div v-if="roomQueue" class="rounded-xl border border-amber-500/25 bg-amber-500/10 p-4 space-y-2">
           <div class="flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-amber-800">
+            <h2 class="text-sm font-semibold text-amber-300">
               Waiting room: {{ roomQueue.name }}
-              <span class="ml-1 text-xs font-normal text-amber-600">{{ roomQueue.counts?.waiting ?? (roomQueue.entries || []).length }} waiting</span>
+              <span class="ml-1 text-xs font-normal text-amber-400">{{ roomQueue.counts?.waiting ?? (roomQueue.entries || []).length }} waiting</span>
             </h2>
             <button
               :disabled="seatingBusy || !(roomQueue.entries || []).length"
@@ -834,7 +819,7 @@ function dt(s?: string | null) {
           <ul class="space-y-1 text-xs text-amber-900">
             <li v-for="e in (roomQueue.entries || []).slice(0, 8)" :key="e.id" class="flex items-center gap-2">
               <span class="inline-block w-2 h-2 rounded-full"
-                :class="e.status === 'waiting' ? 'bg-amber-500' : 'bg-slate-300'" />
+                :class="e.status === 'waiting' ? 'bg-amber-500' : 'bg-zinc-600'" />
               #{{ e.position }} {{ e.label || e.session_id?.slice(0, 8) }}
               <span class="text-amber-600">[{{ e.status }} · waited {{ Math.round(e.waited_seconds || 0) }}s]</span>
             </li>
@@ -842,31 +827,31 @@ function dt(s?: string | null) {
           <p v-if="!(roomQueue.entries || []).length" class="text-xs text-amber-600">nobody waiting - the line is clear.</p>
         </div>
 
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm flex flex-col max-h-96">
-          <h2 class="text-sm font-semibold text-slate-700 mb-2">Room chat</h2>
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm flex flex-col max-h-96">
+          <h2 class="text-sm font-semibold text-zinc-200 mb-2">Room chat</h2>
           <div class="flex-1 overflow-y-auto space-y-2 mb-2">
-            <p v-if="!chat.length" class="text-xs text-slate-400">
+            <p v-if="!chat.length" class="text-xs text-zinc-500">
               no messages yet{{ me ? ' - say something' : ' (join to speak)' }}.
             </p>
             <div v-for="m in chat" :key="m.id" class="text-sm">
-              <b class="text-slate-700">{{ m.author }}</b>
-              <span class="text-xs text-slate-400">[{{ m.role }}] {{ dt(m.created_at) }}</span>
-              <p class="text-slate-600">{{ m.text }}</p>
+              <b class="text-zinc-200">{{ m.author }}</b>
+              <span class="text-xs text-zinc-500">[{{ m.role }}] {{ dt(m.created_at) }}</span>
+              <p class="text-zinc-400">{{ m.text }}</p>
             </div>
           </div>
           <form v-if="me && meeting.state === 'active'" class="space-y-1" @submit.prevent="sendChat">
             <input
               v-model="chatInput" maxlength="2000" placeholder="type to the room…"
-              class="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
-            <label class="text-xs text-slate-500 flex items-center gap-1">
+              class="w-full px-3 py-2 rounded-lg border border-zinc-700 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-400">
+            <label class="text-xs text-zinc-500 flex items-center gap-1">
               <input v-model="askAgent" type="checkbox"> ask the room agent (it answers in chat and on your leg)
             </label>
           </form>
         </div>
 
-        <div class="rounded-xl border border-slate-200 bg-white p-4 shadow-sm space-y-2">
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm space-y-2">
           <div class="flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-slate-700">Recording</h2>
+            <h2 class="text-sm font-semibold text-zinc-200">Recording</h2>
             <button
               v-if="meeting.state === 'active' && !activeRecording"
               :disabled="recordingBusy"
@@ -877,7 +862,7 @@ function dt(s?: string | null) {
             <button
               v-if="activeRecording"
               :disabled="recordingBusy"
-              class="px-3 py-1.5 rounded-lg bg-slate-700 text-white text-xs hover:bg-slate-800 disabled:opacity-50"
+              class="px-3 py-1.5 rounded-lg bg-zinc-700 text-white text-xs hover:bg-zinc-600 disabled:opacity-50"
               @click="stopRecording(activeRecording)">
               ■ Stop
             </button>
@@ -886,7 +871,7 @@ function dt(s?: string | null) {
             recording since {{ dt(activeRecording.started_at) }} - transcript + chat +
             web-leg audio are archived when it stops.
           </p>
-          <div v-for="rec in recordings" :key="rec.id" class="text-xs text-slate-500 border-t border-slate-100 pt-1">
+          <div v-for="rec in recordings" :key="rec.id" class="text-xs text-zinc-500 border-t border-zinc-800 pt-1">
             <p class="truncate"><b>{{ rec.name }}</b> ({{ rec.state }})</p>
             <p>
               {{ rec.counts?.transcript_lines }} lines · {{ rec.counts?.chat_lines }} chat ·
@@ -895,12 +880,12 @@ function dt(s?: string | null) {
               <button v-if="rec.artifacts?.chat" class="underline ml-1" @click="downloadArchive(rec, 'chat')">chat</button>
             </p>
           </div>
-          <p v-if="!recordings.length" class="text-xs text-slate-400">
+          <p v-if="!recordings.length" class="text-xs text-zinc-500">
             no recordings yet - Record archives this room's words and web-leg audio.
           </p>
         </div>
 
-        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4 text-xs text-slate-500 space-y-1">
+        <div class="rounded-xl border border-zinc-800 bg-zinc-900 p-4 text-xs text-zinc-500 space-y-1">
           <p><b>How this room works:</b> py8n owns the room, the transcript, the chat,
           the floor and the archives. Your browser carries the audio (media websocket)
           and the video (WebRTC peer-to-peer - the signaling relays through py8n, the

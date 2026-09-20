@@ -292,6 +292,7 @@ export interface Credential {
   masked_hint: string
   created_at: string
   rotated_at: string | null
+  decrypt_error?: boolean
 }
 
 export interface CredentialEvent {

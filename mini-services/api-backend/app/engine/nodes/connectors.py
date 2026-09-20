@@ -15,6 +15,14 @@ are primitives that feed the dataset estate from anywhere:
                        sheets via the no-auth CSV export endpoint, private
                        ones via a service-account credential (google-auth,
                        Sheets REST v4).
+* ``google_sheets_write`` (v135) - push upstream items INTO a Google Sheet
+                       tab. Write requires the full ``spreadsheets`` OAuth
+                       scope, which Google does not grant to anonymous/public
+                       access, so this is service-account only - share the
+                       target sheet with the credential's client_email as
+                       Editor first. ``overwrite`` clears the tab and writes
+                       header + rows; ``append`` adds rows after whatever is
+                       already there.
 * ``ftp_source``     (v52) - read a csv/tsv file over FTP or FTPS (stdlib
                        ``ftplib``, zero extra deps) - the boring-but-real
                        export drop of a thousand legacy systems.
@@ -322,11 +330,13 @@ async def _fetch_public_csv(sheet_id: str, gid: int, tab: str) -> bytes:
         raise NodeExecutionError(f"Google Sheets export failed: {exc}") from exc
 
 
-def _service_account_credentials(cred: dict):
+def _service_account_credentials(cred: dict, scopes: list[str] | None = None):
     """Build google-auth service-account credentials from a vault credential.
 
     Accepts either a full service-account JSON (credential field ``json`` -
-    dict or string) or ``client_email`` + ``private_key`` fields.
+    dict or string) or ``client_email`` + ``private_key`` fields. ``scopes``
+    defaults to read-only (the source node's use case); pass the full
+    ``spreadsheets`` scope for write access (v135).
     """
     try:
         from google.oauth2 import service_account  # deferred: optional dep
@@ -359,7 +369,7 @@ def _service_account_credentials(cred: dict):
         )
     if not isinstance(info, dict) or "client_email" not in info or "private_key" not in info:
         raise NodeExecutionError("service-account json is missing client_email/private_key")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    scopes = scopes or ["https://www.googleapis.com/auth/spreadsheets.readonly"]
     return service_account.Credentials.from_service_account_info(info, scopes=scopes)
 
 
@@ -401,6 +411,80 @@ def _values_to_df(values: list[list]) -> "pd.DataFrame":
     header = [str(c or f"col_{i + 1}") for i, c in enumerate(padded[0])]
     body = padded[1:] if len(padded) > 1 else []
     return pd.DataFrame(body, columns=header)
+
+
+def _sheets_cell(v: Any) -> Any:
+    """Coerce one field value into something the Sheets API will accept."""
+    if v is None:
+        return ""
+    if isinstance(v, (dict, list)):
+        import json as _json
+
+        return _json.dumps(v)
+    return v
+
+
+async def _clear_sa_values(sheet_id: str, tab: str, token: str) -> None:
+    """Clear a tab's contents before an overwrite (Sheets REST v4, v135)."""
+    import httpx
+
+    range_a1 = f"'{tab.strip()}'" if tab.strip() else "A1:ZZ"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{quote(range_a1, safe='')}:clear"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers={"Authorization": f"Bearer {token}"})
+            if resp.status_code != 200:
+                raise NodeExecutionError(
+                    f"Sheets API clear returned HTTP {resp.status_code} "
+                    "(check the sheet is shared with the service account as Editor)"
+                )
+    except httpx.HTTPError as exc:
+        raise NodeExecutionError(f"Sheets API clear failed: {exc}") from exc
+
+
+async def _update_sa_values(sheet_id: str, tab: str, values: list[list], token: str) -> int:
+    """Write ``values`` starting at A1 of ``tab`` (overwrite mode, v135)."""
+    import httpx
+
+    range_a1 = f"'{tab.strip()}'!A1" if tab.strip() else "A1"
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
+        f"{quote(range_a1, safe='')}?valueInputOption=USER_ENTERED"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.put(url, headers={"Authorization": f"Bearer {token}"}, json={"values": values})
+            if resp.status_code != 200:
+                raise NodeExecutionError(
+                    f"Sheets API update returned HTTP {resp.status_code} "
+                    "(check the sheet is shared with the service account as Editor)"
+                )
+            return int(resp.json().get("updatedRows") or len(values))
+    except httpx.HTTPError as exc:
+        raise NodeExecutionError(f"Sheets API update failed: {exc}") from exc
+
+
+async def _append_sa_values(sheet_id: str, tab: str, values: list[list], token: str) -> int:
+    """Append ``values`` after the last row of ``tab`` (append mode, v135)."""
+    import httpx
+
+    range_a1 = f"'{tab.strip()}'" if tab.strip() else "A1:ZZ"
+    url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/"
+        f"{quote(range_a1, safe='')}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(url, headers={"Authorization": f"Bearer {token}"}, json={"values": values})
+            if resp.status_code != 200:
+                raise NodeExecutionError(
+                    f"Sheets API append returned HTTP {resp.status_code} "
+                    "(check the sheet is shared with the service account as Editor)"
+                )
+            updates = resp.json().get("updates") or {}
+            return int(updates.get("updatedRows") or len(values))
+    except httpx.HTTPError as exc:
+        raise NodeExecutionError(f"Sheets API append failed: {exc}") from exc
 
 
 class GoogleSheetsSourceNode(BaseNode):
@@ -476,6 +560,103 @@ class GoogleSheetsSourceNode(BaseNode):
             "tab": tab,
             "mode": auth,
             "columns": list(df.columns),
+        })
+
+
+class GoogleSheetsWriteNode(BaseNode):
+    """Pushes upstream items into a Google Sheet tab (v135) - service-account only.
+
+    The public no-auth CSV export used by ``google_sheets_source`` is
+    read-only; writing needs an OAuth token with the full ``spreadsheets``
+    scope, so this node always authenticates via a service account - share
+    the target sheet with the credential's client_email as Editor first.
+    """
+
+    type = "google_sheets_write"
+    name = "Google Sheets Write"
+    description = (
+        "Pushes upstream items into a Google Sheet tab (service-account "
+        "auth - share the sheet with the credential's client_email as "
+        "Editor). 'overwrite' clears the tab and writes header + rows; "
+        "'append' adds rows after whatever is already there, with no header."
+    )
+    category = "actions"
+    icon = "sheet"
+    color = "#16a34a"
+
+    class ParamsModel(BaseModel):
+        sheet: str = Field(default="", description="Full Sheets URL or bare spreadsheet ID")
+        tab: str = Field(default="", description="Tab (sheet) name to write to")
+        credential_id: str | None = Field(
+            default=None,
+            description=(
+                "Service-account credential (json blob, or client_email + "
+                "private_key) - share the sheet with its client_email as Editor"
+            ),
+            json_schema_extra={"widget": "credential"},
+        )
+        write_mode: str = Field(
+            default="overwrite",
+            description="overwrite clears the tab and writes header+rows; append adds rows after existing data (no header)",
+            json_schema_extra={"widget": "select", "options": ["overwrite", "append"]},
+        )
+        columns: list[str] = Field(
+            default_factory=list,
+            description="Column order for the written rows (defaults to the union of keys across the incoming items)",
+        )
+
+    async def execute(self, context: ExecutionContext) -> NodeResult:
+        from .data import _items
+
+        p = self.params  # type: GoogleSheetsWriteNode.ParamsModel
+        if not p.credential_id:
+            raise NodeExecutionError(
+                "google_sheets_write needs a service-account credential_id - "
+                "public/anonymous access cannot write to a sheet"
+            )
+        if not p.tab.strip():
+            raise NodeExecutionError("A tab (sheet) name is required")
+        write_mode = (p.write_mode or "overwrite").strip().lower()
+        if write_mode not in ("overwrite", "append"):
+            raise NodeExecutionError("write_mode must be 'overwrite' or 'append'")
+
+        rows_in = [r for r in _items(context.current_input) if isinstance(r, dict)]
+        if not rows_in:
+            raise NodeExecutionError(
+                "Google Sheets Write received no row(s) to write - connect a "
+                "node whose output has actual items (Dataset Read, an HTTP "
+                "response, a Set Fields node, ...) before this node."
+            )
+
+        columns = list(p.columns) if p.columns else list(dict.fromkeys(k for r in rows_in for k in r.keys()))
+        if not columns:
+            raise NodeExecutionError("Could not determine any columns to write - the incoming items have no fields")
+
+        sheet_id, _ = _extract_sheet_id(p.sheet)
+
+        from ...services.crypto import decrypt_credential
+
+        cred = await decrypt_credential(context, p.credential_id, owner_id=context.owner_id)
+        if cred.get("type") not in (None, "", "google_service_account"):
+            raise NodeExecutionError("Sheets write needs a google_service_account credential")
+        credentials = _service_account_credentials(cred, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        token = await asyncio.to_thread(_refresh_sa_token, credentials)
+
+        data_rows = [[_sheets_cell(r.get(c)) for c in columns] for r in rows_in]
+
+        if write_mode == "append":
+            written = await _append_sa_values(sheet_id, p.tab, data_rows, token)
+        else:
+            await _clear_sa_values(sheet_id, p.tab, token)
+            written = await _update_sa_values(sheet_id, p.tab, [columns] + data_rows, token)
+
+        return self._single({
+            "sheet_id": sheet_id,
+            "tab": p.tab,
+            "write_mode": write_mode,
+            "rows_written": len(rows_in),
+            "updated_rows": written,
+            "columns": columns,
         })
 
 

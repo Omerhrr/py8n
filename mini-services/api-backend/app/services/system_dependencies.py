@@ -104,8 +104,12 @@ async def dependency_graph(db: AsyncSession, user, system_id: str | None = None)
         name = ref_id[:8]
         if model is not None:
             row = await db.get(model, ref_id)
-            if row is not None and getattr(row, "name", None):
-                name = row.name
+            # v113 fix: same VoiceMeeting/.title gap as systems.py - fall
+            # back to .title so Room dependency edges get a real label.
+            if row is not None:
+                label = getattr(row, "name", None) or getattr(row, "title", None)
+                if label:
+                    name = label
         names_cache[ref_id] = name
         return name
 
@@ -127,8 +131,23 @@ async def dependency_graph(db: AsyncSession, user, system_id: str | None = None)
     wf_refs = index.get("workflow", {})
     ds_index = index.get("dataset", {})
     model_index = index.get("model", {})
+
+    # Perf fix (was N+1: one `await db.get()` per workflow, and one more
+    # per (workflow, dataset) pair inside the loop below - O(W*D) round
+    # trips to Postgres, which is what made this endpoint take several
+    # seconds once the estate grew past a couple dozen systems). Batch
+    # both lookups once, up front, and read from the in-memory maps.
+    wf_rows: dict[str, Workflow] = {}
+    if wf_refs:
+        res = await db.execute(select(Workflow).where(Workflow.id.in_(list(wf_refs.keys()))))
+        wf_rows = {row.id: row for row in res.scalars().all()}
+    ds_rows: dict[str, Dataset] = {}
+    if ds_index:
+        res = await db.execute(select(Dataset).where(Dataset.id.in_(list(ds_index.keys()))))
+        ds_rows = {row.id: row for row in res.scalars().all()}
+
     for wf_id, holders in wf_refs.items():
-        wf = await db.get(Workflow, wf_id)
+        wf = wf_rows.get(wf_id)
         if wf is None or not wf.graph:
             continue
         wf_name = wf.name
@@ -137,7 +156,7 @@ async def dependency_graph(db: AsyncSession, user, system_id: str | None = None)
         # THIS workflow's graph mention its name in write-type or
         # read-type nodes?
         for ds_id, ds_holders in ds_index.items():
-            ds_row = await db.get(Dataset, ds_id)
+            ds_row = ds_rows.get(ds_id)
             if ds_row is None:
                 continue
             direction = None

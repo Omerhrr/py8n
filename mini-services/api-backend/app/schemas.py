@@ -249,6 +249,10 @@ class CredentialOut(BaseModel):
     masked_hint: str
     created_at: datetime
     rotated_at: datetime | None = None  # v43: last secret rotation
+    # v108: true when the stored payload could not be decrypted (a rotated
+    # FERNET_KEY orphaned it) - the row still lists so one broken credential
+    # can never 500 the whole vault; the client should offer delete/rotate.
+    decrypt_error: bool = False
 
 
 class CredentialDetail(CredentialOut):

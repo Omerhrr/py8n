@@ -160,17 +160,27 @@ async def _fire_scheduled_workflow(workflow_id: str, node_id: str) -> None:
         wf = (
             await session.execute(select(Workflow).where(Workflow.id == workflow_id))
         ).scalar_one_or_none()
-    if wf is None or not wf.is_active:
-        return
-    # v81: the system lifecycle gate - a tick on a workflow whose system is
-    # paused/stopped returns honestly instead of firing
-    if await system_runtime.workflow_gated(session, workflow_id):
-        logger.info("Schedule tick held: workflow %s's system is not running", workflow_id)
-        return
-    nodes = wf.schedule_nodes()
-    if not any(n["id"] == node_id for n in nodes):
-        return  # node was removed; job will be resynced by the save handler
+        if wf is None or not wf.is_active:
+            return
+        # v81: the system lifecycle gate - a tick on a workflow whose system is
+        # paused/stopped returns honestly instead of firing
+        if await system_runtime.workflow_gated(session, workflow_id):
+            logger.info("Schedule tick held: workflow %s's system is not running", workflow_id)
+            return
+        nodes = wf.schedule_nodes()
+        if not any(n["id"] == node_id for n in nodes):
+            return  # node was removed; job will be resynced by the save handler
 
+    # Bug fix: the checks above used to run AFTER this `async with` block had
+    # already closed `session` (dedented one level too far) - each tick that
+    # reached workflow_gated() silently checked out a fresh, unmanaged
+    # connection from the pool that was never returned, only picked up later
+    # by the garbage collector ("non-checked-in connection" in the api logs).
+    # With two active schedule triggers firing every 5 minutes that leaked a
+    # connection every tick until the pool was exhausted and requests needing
+    # a session started failing upstream (502s at the Caddy edge). Keeping
+    # every session-dependent check inside the `async with` fixes both the
+    # leak and the stale-session misuse.
     try:
         exec_id = await dispatch_execution(
             workflow_id,

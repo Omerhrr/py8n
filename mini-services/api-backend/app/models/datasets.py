@@ -102,8 +102,8 @@ class DatasetContract(Base):
     dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, unique=True, index=True)
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     columns_json: Mapped[list] = mapped_column(JSONVariant, default=list)
-    # warn | error
-    on_violation: Mapped[str] = mapped_column(String(10), default="warn", nullable=False)
+    # warn | error | dead_letter
+    on_violation: Mapped[str] = mapped_column(String(20), default="warn", nullable=False)
     version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
@@ -167,7 +167,7 @@ class DatasetContractRevision(Base):
     owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     columns_json: Mapped[list] = mapped_column(JSONVariant, default=list)
-    on_violation: Mapped[str] = mapped_column(String(10), default="warn", nullable=False)
+    on_violation: Mapped[str] = mapped_column(String(20), default="warn", nullable=False)
     note: Mapped[str] = mapped_column(String(200), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, index=True)
 

@@ -32,7 +32,7 @@ async function loadHistory() {
     if (typePattern.value.trim()) params.set('type', typePattern.value.trim())
     if (source.value) params.set('source', source.value)
     params.set('limit', '100')
-    const res = await api(`/events?${params.toString()}`)
+    const res = await api.get(`/events?${params.toString()}`)
     events.value = res.events || []
   } catch (e: any) {
     error.value = e?.message || String(e)
@@ -83,16 +83,16 @@ function pretty(p: any) {
 }
 
 const sourceColor: Record<string, string> = {
-  voice: 'bg-sky-100 text-sky-700',
-  queue: 'bg-amber-100 text-amber-700',
-  sms: 'bg-lime-100 text-lime-700',
-  meeting: 'bg-indigo-100 text-indigo-700',
-  video: 'bg-fuchsia-100 text-fuchsia-700',
-  recording: 'bg-rose-100 text-rose-700',
-  media: 'bg-cyan-100 text-cyan-700',
-  campaign: 'bg-orange-100 text-orange-700',
-  user: 'bg-slate-200 text-slate-700',
-  system: 'bg-emerald-100 text-emerald-700',
+  voice: 'border-sky-500/25 bg-sky-500/10 text-sky-300',
+  queue: 'border-amber-500/25 bg-amber-500/10 text-amber-300',
+  sms: 'border-lime-500/25 bg-lime-500/10 text-lime-300',
+  meeting: 'border-indigo-500/25 bg-indigo-500/10 text-indigo-300',
+  video: 'border-fuchsia-500/25 bg-fuchsia-500/10 text-fuchsia-300',
+  recording: 'border-rose-500/25 bg-rose-500/10 text-rose-300',
+  media: 'border-cyan-500/25 bg-cyan-500/10 text-cyan-300',
+  campaign: 'border-orange-500/25 bg-orange-500/10 text-orange-300',
+  user: 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300',
+  system: 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300',
 }
 
 onMounted(() => { loadHistory(); connect() })
@@ -102,11 +102,11 @@ onMounted(() => { loadHistory(); connect() })
   <div class="p-6 max-w-6xl mx-auto space-y-5">
     <header class="flex flex-wrap items-end justify-between gap-3">
       <div>
-        <h1 class="text-xl font-semibold text-slate-800">Events</h1>
-        <p class="text-sm text-slate-500 max-w-2xl mt-1">
+        <h1 class="text-xl font-semibold text-zinc-100">Events</h1>
+        <p class="text-sm text-zinc-400 max-w-2xl mt-1">
           The real-time event system - one first-class primitive for everything the
           platform's live layers do. Workflows subscribe with an
-          <span class="font-mono text-xs bg-slate-100 px-1 rounded">Event Trigger</span>
+          <span class="font-mono text-xs bg-zinc-800 text-zinc-300 px-1 rounded">Event Trigger</span>
           node (a type pattern like <span class="font-mono text-xs">queue.*</span>);
           this tail shows what is flowing right now.
         </p>
@@ -114,13 +114,13 @@ onMounted(() => { loadHistory(); connect() })
       <div class="flex items-center gap-2">
         <span
           class="text-xs px-2 py-0.5 rounded-full flex items-center gap-1"
-          :class="live ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'">
-          <span class="w-1.5 h-1.5 rounded-full" :class="live ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'"></span>
+          :class="live ? 'bg-emerald-500/10 text-emerald-300' : 'bg-zinc-800 text-zinc-500'">
+          <span class="w-1.5 h-1.5 rounded-full" :class="live ? 'bg-emerald-500 animate-pulse' : 'bg-zinc-500'"></span>
           {{ live ? 'live' : 'offline' }}
         </span>
         <button
-          class="px-3 py-1.5 rounded-lg border text-xs hover:bg-slate-50"
-          :class="live ? 'border-rose-200 text-rose-600' : 'border-emerald-200 text-emerald-700'"
+          class="px-3 py-1.5 rounded-lg border text-xs transition hover:bg-zinc-900"
+          :class="live ? 'border-rose-500/30 text-rose-400' : 'border-emerald-500/30 text-emerald-400'"
           @click="live ? disconnect() : connect()">
           {{ live ? 'Disconnect' : 'Go live' }}
         </button>
@@ -130,49 +130,49 @@ onMounted(() => { loadHistory(); connect() })
     <form class="flex flex-wrap items-center gap-2" @submit.prevent="loadHistory">
       <input
         v-model="typePattern" placeholder="type pattern (queue.* / participant.joined)" maxlength="80"
-        class="px-3 py-2 rounded-lg border border-slate-300 text-sm w-72 focus:outline-none focus:ring-2 focus:ring-indigo-400">
+        class="px-3 py-2 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 text-sm w-72 placeholder-zinc-500 outline-none transition focus:border-indigo-500/60">
       <select
         v-model="source"
-        class="px-3 py-2 rounded-lg border border-slate-300 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-400">
+        class="px-3 py-2 rounded-lg border border-zinc-700 bg-zinc-900 text-zinc-100 text-sm outline-none transition focus:border-indigo-500/60">
         <option v-for="s in SOURCES" :key="s" :value="s">{{ s || 'any source' }}</option>
       </select>
       <button
         type="submit" :disabled="loading"
-        class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-50">
+        class="px-4 py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium transition hover:bg-indigo-500 disabled:opacity-50">
         {{ loading ? 'loading…' : 'Load history' }}
       </button>
-      <span v-if="received" class="text-xs text-slate-400">{{ received }} live event(s) this session</span>
+      <span v-if="received" class="text-xs text-zinc-500">{{ received }} live event(s) this session</span>
     </form>
 
-    <p v-if="error" class="rounded-lg bg-rose-50 border border-rose-200 text-rose-700 px-4 py-2 text-sm">{{ error }}</p>
-    <p v-if="liveError" class="rounded-lg bg-amber-50 border border-amber-200 text-amber-700 px-4 py-2 text-sm">{{ liveError }}</p>
+    <p v-if="error" class="rounded-lg bg-rose-500/10 border border-rose-500/25 text-rose-300 px-4 py-2 text-sm">{{ error }}</p>
+    <p v-if="liveError" class="rounded-lg bg-amber-500/10 border border-amber-500/25 text-amber-300 px-4 py-2 text-sm">{{ liveError }}</p>
 
     <section class="space-y-2">
-      <p v-if="!events.length" class="text-sm text-slate-400">
+      <p v-if="!events.length" class="text-sm text-zinc-500">
         Nothing here yet - make a call, wait in a line, join a room, record something,
         or emit an event of your own via POST /events.
       </p>
       <div
         v-for="e in events" :key="e.id"
-        class="rounded-xl border border-slate-200 bg-white p-3 shadow-sm">
+        class="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
         <div class="flex flex-wrap items-center gap-2">
           <span
-            class="text-xs px-2 py-0.5 rounded-full font-medium"
-            :class="sourceColor[e.source] || 'bg-slate-100 text-slate-600'">
+            class="text-xs px-2 py-0.5 rounded-full border font-medium"
+            :class="sourceColor[e.source] || 'border-zinc-600/40 bg-zinc-700/20 text-zinc-300'">
             {{ e.source }}
           </span>
-          <span class="font-mono text-sm font-semibold text-slate-800">{{ e.type }}</span>
-          <span v-if="e.actor" class="text-xs text-slate-500">by {{ e.actor }}</span>
-          <span v-if="e.target_type" class="text-xs text-slate-400">
+          <span class="font-mono text-sm font-semibold text-zinc-100">{{ e.type }}</span>
+          <span v-if="e.actor" class="text-xs text-zinc-400">by {{ e.actor }}</span>
+          <span v-if="e.target_type" class="text-xs text-zinc-500">
             → {{ e.target_type }}<span v-if="e.target_id"> {{ e.target_id.slice(0, 8) }}</span>
           </span>
-          <span class="ml-auto text-xs text-slate-400">{{ dt(e.created_at) }}</span>
+          <span class="ml-auto text-xs text-zinc-500">{{ dt(e.created_at) }}</span>
         </div>
-        <div class="mt-1 flex flex-wrap gap-3 text-xs text-slate-500">
+        <div class="mt-1 flex flex-wrap gap-3 text-xs text-zinc-500">
           <span v-if="e.correlation_id" class="font-mono">corr {{ e.correlation_id.slice(0, 12) }}</span>
           <span v-if="e.session_id" class="font-mono">call {{ e.session_id.slice(0, 12) }}</span>
         </div>
-        <pre v-if="pretty(e.payload)" class="mt-1 text-xs text-slate-600 bg-slate-50 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">{{ pretty(e.payload) }}</pre>
+        <pre v-if="pretty(e.payload)" class="mt-1 text-xs text-zinc-400 bg-zinc-950/60 border border-zinc-800 rounded-lg p-2 overflow-x-auto whitespace-pre-wrap break-all">{{ pretty(e.payload) }}</pre>
       </div>
     </section>
   </div>

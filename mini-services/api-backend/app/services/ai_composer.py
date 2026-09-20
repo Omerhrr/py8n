@@ -76,6 +76,13 @@ COMPOSER_KINDS: dict[str, dict] = {
         "params": ["name", "meeting (meeting_room name in this spec)", "agent?",
                    "max_size?", "max_wait_seconds?", "announce?", "sms_channel_id?", "callback_endpoint_id?"],
     },
+    "app": {
+        "label": "App",
+        "builds": ("a real Apps-builder App bound to a dataset in this spec - forms, a "
+                   "records table, business rules and Excel export, published at /run/{slug} "
+                   "(the exact same primitive the Apps builder UI creates, not a parallel one-off)"),
+        "params": ["name", "description?", "dataset (dataset name in this spec)"],
+    },
 }
 
 TRIGGER_TYPES = ("manual_trigger", "schedule_trigger", "webhook_trigger",
@@ -138,11 +145,21 @@ _FALLBACK_ARCHETYPE = "support_line"
 
 
 def detect_archetype(description: str) -> str:
+    """v110: BEST-match archetype, not first-match.
+
+    _ARCHETYPES is a fixed list; the old version returned the first entry
+    with ANY matching keyword, so a clinic/appointment/patient description
+    that also happened to mention "FAQ" (a support_line keyword, and a
+    very generic one) got tagged "support_line" - wrong, and confusing
+    anywhere the archetype label is shown or filtered on - even though
+    the LLM's actual build was fine. Now every archetype is scored by how
+    many of its keywords appear, and the highest score wins (ties keep
+    the original list order, via stable sort)."""
     low = f" {(description or '').lower()} "
-    for a in _ARCHETYPES:
-        if any(k in low for k in a["keywords"]):
-            return a["id"]
-    return _FALLBACK_ARCHETYPE
+    scored = [(sum(1 for k in a["keywords"] if k in low), i, a["id"])
+              for i, a in enumerate(_ARCHETYPES)]
+    best_score, _, best_id = max(scored, key=lambda t: (t[0], -t[1]))
+    return best_id if best_score > 0 else _FALLBACK_ARCHETYPE
 
 
 def archetypes_out() -> list[dict]:
@@ -281,6 +298,30 @@ def _archetype_spec(archetype: str, description: str) -> dict:
             "Callers hear their queue position; a reply '1' to the backchannel SMS leaves the line.",
             "Bind the SMS channel and callback endpoint on the queue when the credentials exist.",
         ]
+    # v121: every archetype here composes TELEPHONY infrastructure (a voice
+    # agent, a phone queue, SMS/callback backchannel) - but detect_archetype
+    # can match on a single generic keyword ("support", "booking", "lead",
+    # "pipeline"...) that appears in plenty of non-phone descriptions (a
+    # data pipeline about "support tickets", a sales dataset with no
+    # "call"/"phone"/"queue" intent at all). Flag it honestly instead of
+    # silently handing back a full phone-support system for a request that
+    # never asked for one.
+    call_intent_words = ("call", "calls", "calling", "phone", "voice", "dial",
+                         "ivr", "hotline", "hold", "queue", "sms", "text back",
+                         "text message", "ring", "answer the phone", "voicemail",
+                         "meeting", "zoom", "video", "webinar", "room")
+    low_desc = f" {description.lower()} "
+    if not any(w in low_desc for w in call_intent_words):
+        note = (f"archetype={archetype!r} builds telephony (voice agent, phone "
+                "queue, SMS backchannel), but this description never mentions "
+                "calls, phone, voice or a queue - double-check this is what you "
+                "wanted; a pure data/workflow request suits the AI System "
+                "Builder (/builder) better.")
+        # notes are truncated to 300 chars downstream (validate_spec) - keep
+        # margin regardless of which archetype name gets interpolated (the
+        # longest id, clinic_front_desk, is the worst case)
+        assert len(note) <= 295, f"honesty note too long for the notes truncation ({len(note)} chars)"
+        notes = list(notes) + [note]
     return {
         "name": _title_from(description) or archetype.replace("_", " ").title(),
         "description": description.strip()[:500],
@@ -326,11 +367,30 @@ _LLM_SYSTEM = (
     '{"kind": "voice_agent", "name": str, "greeting": str, "system_prompt": str?, "brain": "scaffold"|"ai_agent", "llm_credential_id": str?, "knowledge": {"dataset": str, "text_column": str, "answer_column": str, "top_k"?: int}}\n'
     '{"kind": "meeting_room", "name": str, "title"?: str, "agent"?: str (voice_agent name), "modality"?: "audio"|"video"}\n'
     '{"kind": "queue", "name": str, "meeting": str (meeting_room name), "agent"?: str, "max_size"?: int, "max_wait_seconds"?: int, "announce"?: bool, "sms_channel_id"?: str, "callback_endpoint_id"?: str}\n'
+    '{"kind": "app", "name": str, "description": str?, "dataset": str (dataset name in this spec)} '
+    "- builds a real Apps-builder app over that dataset: a records table, an add/edit "
+    "form and Excel export, auto-laid-out from the dataset's own columns (use this "
+    "whenever the request talks about managing, editing, entering, or tracking "
+    "records - invoicing, CRM, inventory, orders, tickets - not just storing them)\n"
     "Rules: 1-24 components; names unique; a queue's meeting and a room's agent "
-    "must reference components IN THIS SPEC; a voice_agent's knowledge.dataset "
-    "must reference a dataset in this spec and its columns must exist on it; "
+    "must reference components IN THIS SPEC; a voice_agent's knowledge.dataset and "
+    "an app's dataset must reference a dataset in this spec and its columns must exist on it; "
     "workflow step types must come from the allowed node types listed below; "
     "event_trigger needs params.event_type from the known event patterns. "
+    "v117: step params must use each node's REAL schema, not an invented one - "
+    '"filter" and "if_condition" take {"field"?: str (dot-path into the item; '
+    "empty = whole item), \"operator\": one of equals|not_equals|contains|"
+    "not_contains|greater_than|less_than|is_empty|not_empty|is_true|regex, "
+    '"right_value"?: any} - there is NO free-form boolean-expression param on '
+    "either node; express \"a and b\" as two chained steps, not one expression "
+    "string. Template placeholders ({{ ... }}) may ONLY reference values that "
+    "actually exist at runtime: {{ input.<field> }} or {{ input }} for the "
+    "current item, {{ execution.trigger_payload.<field> }} for data the "
+    "trigger received, {{ nodes.<step_name_or_id>.output.<field> }} for an "
+    "earlier step's output, {{ env.<KEY> }} for an environment variable, "
+    "{{ now }} for the current timestamp - NEVER invent a bare variable name "
+    "like {{ last_week_start }} or {{ trigger.slot_start }} that isn't one of "
+    "these; compute a derived value with a \"code\" step first if you need one. "
     "No prose outside the JSON."
 )
 
@@ -367,17 +427,78 @@ def propose_with_llm_sync(description: str, cred_data: dict, *,
     Raises AIComposerError on ANY model failure (loud: the user chose the
     model); deterministic fallback is the CALLER's explicit choice.
     """
-    try:
-        # runs in a worker thread (asyncio.to_thread) - its own loop carries
-        # the async routing call, exactly like the vault's decrypt_credential
-        result = asyncio.run(chat_completion(
-            cred_data, model=model or "",
-            messages=[{"role": "system", "content": _LLM_SYSTEM},
-                      {"role": "user", "content": _catalog_payload(description)}],
-            temperature=0.2, max_tokens=1600))
-    except Exception as exc:  # LLMRoutingError or transport failure - loud
-        raise AIComposerError(f"the LLM proposal failed: {exc}") from exc
-    spec = _extract_json(result["text"])
+    messages = [{"role": "system", "content": _LLM_SYSTEM},
+                {"role": "user", "content": _catalog_payload(description)}]
+    # v110/v111: one bounded retry on a malformed-JSON reply, PLUS the real
+    # root cause found while build-testing a 6-component clinic system:
+    # max_tokens was capped at 1600 while the composer's own contract
+    # allows up to MAX_COMPONENTS=24 richly-described components - a
+    # spec anywhere near that size gets CUT OFF mid-JSON (the parse error's
+    # character offset landed exactly at the ~1600-token mark, every time,
+    # for the same description - not random sampling noise, truncation).
+    # 3200 gives real headroom for a complex spec; stop_reason tells us
+    # definitively whether a failure was truncation (in which case the
+    # retry asks for something that FITS, not just "fix the syntax") or an
+    # actual formatting slip (in which case the original repair prompt is
+    # the right one).
+    TRUNCATED = {"length", "max_tokens", "max_output_tokens"}
+    max_tokens = 3200
+    last_result: dict | None = None
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            result = asyncio.run(chat_completion(
+                cred_data, model=model or "", messages=messages,
+                temperature=0.2, max_tokens=max_tokens))
+        except Exception as exc:  # LLMRoutingError or transport failure - loud
+            raise AIComposerError(f"the LLM proposal failed: {exc}") from exc
+        last_result = result
+        try:
+            spec = _extract_json(result["text"])
+        except AIComposerError as exc:
+            last_err = exc
+            if attempt == 0:
+                truncated = str(result.get("stop_reason") or "").lower() in TRUNCATED
+                if truncated:
+                    max_tokens = min(max_tokens * 2, 8000)
+                    repair = ("That reply was CUT OFF before the JSON object finished "
+                              f"(ran out of output length). Reply again with a MORE CONCISE "
+                              "design (fewer components and/or shorter descriptions) so the "
+                              "complete JSON object fits - still following every rule above.")
+                else:
+                    repair = (f"That reply was not valid JSON ({exc}). Reply again with ONLY "
+                              "the corrected JSON object - no prose, no markdown fences.")
+                messages = messages + [
+                    {"role": "assistant", "content": result["text"][:4000]},
+                    {"role": "user", "content": repair},
+                ]
+                continue
+            raise
+        # v111: JSON that parses but breaks a COMPOSER RULE (e.g. a trigger
+        # type reused as a mid-workflow step) used to sail through this
+        # function fine and only fail later, at the API layer's separate
+        # validate_spec() call, as a 422 with no retry - one bad sample and
+        # the user retypes the whole description. Give it the exact same
+        # one-shot repair treatment as a JSON parse failure: validate HERE
+        # too, and if it fails on the first attempt, tell the model
+        # precisely which rule it broke and ask for a fix.
+        try:
+            validate_spec(spec)
+            break
+        except AIComposerError as exc:
+            last_err = exc
+            if attempt == 0:
+                messages = messages + [
+                    {"role": "assistant", "content": result["text"][:4000]},
+                    {"role": "user", "content": f"That JSON parsed but is not a valid spec: {exc}. "
+                                                "Reply again with a corrected JSON object that fixes "
+                                                "exactly this, following every rule above."},
+                ]
+                continue
+            break  # exhausted - hand the (still-invalid) spec back; the caller's own validate_spec raises the 422 as before
+    else:  # pragma: no cover - loop always breaks or raises
+        raise last_err or AIComposerError("the model's reply was not parseable JSON")
+    result = last_result
     spec["mode"] = "llm"
     spec["archetype"] = detect_archetype(description)
     if notes:
@@ -414,6 +535,8 @@ def validate_spec(spec: dict) -> dict:
     rooms: dict[str, dict] = {}
     queues: list[dict] = []
     workflows: list[dict] = []
+    apps: dict[str, dict] = {}
+    honesty_notes: list[str] = []
 
     for i, raw in enumerate(comps):
         c = raw if isinstance(raw, dict) else {}
@@ -464,6 +587,20 @@ def validate_spec(spec: dict) -> dict:
             for s_i, s in enumerate(steps[:MAX_STEPS]):
                 s = s if isinstance(s, dict) else {}
                 stype = str(s.get("type") or "").strip()
+                sname_low = str(s.get("name") or "").lower()
+                # v110: py8n has NO sms-send node (grep the registry - the
+                # only outbound-notification node is email_send). A step
+                # named "Send SMS ..." that resolves to email_send is a
+                # real behavior mismatch, not just cosmetic - the run sends
+                # an email, silently, while everything in the UI calls it
+                # SMS. Surface it as a build note instead of staying quiet.
+                if stype == "email_send" and ("sms" in sname_low or "text message" in sname_low):
+                    honesty_notes.append(
+                        f"Workflow {cname!r} step {s.get('name') or s_i!r}: named for SMS but py8n "
+                        "has no SMS-send node yet, so this actually sends an EMAIL (email_send). "
+                        "Rename it or wire a real SMS integration (e.g. an HTTP Request node to "
+                        "Twilio/etc.) if a text message is actually required."
+                    )
                 if stype in TRIGGER_TYPES:
                     errors.append(f"workflow {cname!r}: step[{s_i}] {stype!r} is a trigger - "
                                   "a composed workflow has exactly ONE trigger, in trigger.type")
@@ -473,6 +610,110 @@ def validate_spec(spec: dict) -> dict:
                 elif get_node_class(stype) is None:
                     errors.append(f"workflow {cname!r}: step[{s_i}] node type {stype!r} is not "
                                   "registered in this build")
+                else:
+                    # v117: validate_spec never checked step["params"] against
+                    # the node's OWN schema - only that the node type name was
+                    # composable. Three separate LLM builds this session
+                    # invented plausible-but-nonexistent param shapes (a
+                    # Filter step with {"expression": "..."} when the real
+                    # schema is field/operator/right_value; an If Condition
+                    # step referencing {{trigger.slot_start}} when the real
+                    # scope is {{execution.trigger_payload.slot_start}}) -
+                    # every one of them BUILT successfully and then crashed
+                    # on first run with a confusing TemplateResolutionError,
+                    # because unresolved {{ }} placeholders in ANY param
+                    # value get Jinja-resolved before the node ever gets a
+                    # chance to reject the unknown key. Catch the unknown-key
+                    # case at build time instead, with a message that names
+                    # the actual allowed params - this also feeds the
+                    # existing one-retry repair loop in
+                    # propose_with_llm_sync(), so the LLM gets a chance to
+                    # fix ITS OWN mistake before the user ever sees it.
+                    node_cls = get_node_class(stype)
+                    params = s.get("params")
+                    if isinstance(params, dict) and node_cls is not None and node_cls.ParamsModel is not None:
+                        allowed = set(node_cls.ParamsModel.model_fields.keys())
+                        unknown = sorted(set(params.keys()) - allowed)
+                        if unknown:
+                            errors.append(
+                                f"workflow {cname!r}: step[{s_i}] ({stype!r}) params has unknown "
+                                f"field(s) {unknown} - allowed params for {stype!r} are "
+                                f"{sorted(allowed)}"
+                            )
+                        else:
+                            # v118: same bug class, one level deeper - the
+                            # keys can be right and the VALUE shape still
+                            # wrong (e.g. summarize's group_by wants a list,
+                            # the LLM gave a bare string). Try constructing
+                            # the real ParamsModel and surface genuine type
+                            # errors at build time. A field whose raw value
+                            # is still an unresolved {{ }} template is
+                            # skipped - its real type is only known after
+                            # Jinja resolves it at runtime, so it can't be
+                            # judged here.
+                            from pydantic import ValidationError as _PydanticValidationError
+                            try:
+                                node_cls.ParamsModel(**params)
+                            except _PydanticValidationError as exc:
+                                real_errors = []
+                                for err in exc.errors(include_url=False):
+                                    loc = err.get("loc") or ()
+                                    key = loc[0] if loc else None
+                                    raw = params.get(key) if key is not None else None
+                                    if isinstance(raw, str) and "{{" in raw:
+                                        continue
+                                    real_errors.append(
+                                        f"{'.'.join(str(x) for x in loc) or '(root)'}: {err.get('msg')}"
+                                    )
+                                if real_errors:
+                                    errors.append(
+                                        f"workflow {cname!r}: step[{s_i}] ({stype!r}) params are "
+                                        "invalid - " + "; ".join(real_errors)
+                                    )
+                            # v119: same bug class, one level deeper still -
+                            # summarize's sort_by/having[].label must name an
+                            # ACTUAL output label, which is derived from
+                            # group_by + aggregates (see SummarizeNode.execute:
+                            # f"{field}_{op}" per aggregate, plus every
+                            # group_by field, plus the always-present
+                            # "_count"). The LLM invented "confirmed_count"
+                            # when its own aggregates list never defined an
+                            # aggregate that would produce that label - built
+                            # fine, then NodeExecutionError'd on first run.
+                            # This is deterministic (no node execution
+                            # needed), so check it here instead of hoping.
+                            if stype == "summarize":
+                                raw_gb = params.get("group_by")
+                                gb = [str(g) for g in raw_gb] if isinstance(raw_gb, list) else []
+                                aggs = params.get("aggregates") or []
+                                agg_labels = set()
+                                if isinstance(aggs, list):
+                                    for agg in aggs:
+                                        if isinstance(agg, dict):
+                                            op = str(agg.get("op") or "count")
+                                            field = str(agg.get("field") or "")
+                                            agg_labels.add(f"{field}_{op}" if field else op)
+                                known_labels = set(gb) | agg_labels | {"_count"}
+                                sort_by = str(params.get("sort_by") or "")
+                                if sort_by and sort_by not in known_labels:
+                                    errors.append(
+                                        f"workflow {cname!r}: step[{s_i}] (summarize) sort_by "
+                                        f"{sort_by!r} is not a label this step actually produces "
+                                        f"(available: {sorted(known_labels)}) - it must be a "
+                                        "group_by field or a \"field_op\" aggregate label"
+                                    )
+                                having = params.get("having") or []
+                                if isinstance(having, list):
+                                    for clause in having:
+                                        if isinstance(clause, dict):
+                                            hlabel = str(clause.get("label") or "")
+                                            if hlabel and hlabel not in known_labels:
+                                                errors.append(
+                                                    f"workflow {cname!r}: step[{s_i}] (summarize) "
+                                                    f"having label {hlabel!r} is not a label this "
+                                                    f"step actually produces (available: "
+                                                    f"{sorted(known_labels)})"
+                                                )
             workflows.append({"name": cname, "trigger": trig, "steps": steps,
                               "description": str(c.get("description") or "")})
 
@@ -491,6 +732,12 @@ def validate_spec(spec: dict) -> dict:
             rooms[cname] = c
         elif kind == "queue":
             queues.append(c)
+        elif kind == "app":
+            ds_name = str(c.get("dataset") or "").strip()
+            if ds_name not in datasets:
+                errors.append(f"app {cname!r}: dataset {ds_name!r} is not a dataset "
+                              "in this spec (bind the app to a component you compose)")
+            apps[cname] = c
 
     for q in queues:
         qname = str(q.get("name") or "")
@@ -521,15 +768,67 @@ def validate_spec(spec: dict) -> dict:
                     errors.append(f"voice_agent {aname!r}: knowledge.answer_column {ans_col!r} "
                                   f"is not a column of dataset {ds_name!r} ({', '.join(cols)})")
 
+    # v114: the Composer's schema (both deterministic archetype templates
+    # AND the LLM-first prompt) has NO "report"/scheduled-summary component
+    # kind at all - it only builds datasets, workflows, voice_agents,
+    # meeting_rooms and queues. A description that asks for a "daily
+    # summary"/"weekly digest"/report built NOTHING for that ask and said
+    # nothing about the gap, unlike the SMS case above which at least
+    # builds something (mislabeled). Surface it the same way: honestly,
+    # once, pointing at the tool that actually has this capability.
+    desc_low = str(spec.get("description") or "").lower()
+    if re.search(r"\b(report|summary|digest|recap)\b", desc_low):
+        honesty_notes.append(
+            "This description mentions a report/summary, but the AI System Composer has no "
+            "report component - it only builds datasets, workflows, voice agents, rooms and "
+            "queues. Use the AI System Builder (/builder) for a scheduled report, or add one "
+            "to a dataset here manually."
+        )
+
+    # v116: same silent-drop class as the report gap above, for third-party
+    # messaging channels. py8n's only REAL outbound-notification nodes are
+    # email_send and slack_message (grep COMPOSER_NODE_TYPES) - there is no
+    # whatsapp/telegram/discord/messenger send capability anywhere in the
+    # platform. A description asking for one gets nothing built for it and,
+    # unlike "sms" (which at least gets flagged when a step is misnamed for
+    # it), previously said nothing at all, because the deterministic
+    # archetype templates never generate a step for these in the first
+    # place - there was no step to inspect and flag.
+    unsupported_channels = sorted({
+        m for m in re.findall(r"\b(whatsapp|telegram|discord|messenger|instagram dm|imessage)\b", desc_low)
+    })
+    if unsupported_channels:
+        honesty_notes.append(
+            f"This description mentions {', '.join(unsupported_channels)}, but py8n has no "
+            "integration for that - the only real outbound-notification channels are email "
+            "(email_send) and Slack (slack_message). Wire an HTTP Request node to that "
+            "provider's API yourself if you need it."
+        )
+
     if errors:
         raise AIComposerError("invalid spec - " + " | ".join(errors[:12]))
+
+    # v114 fix: build_system() calls validate_spec() a SECOND time on a spec
+    # that came out of propose()/generate() - which already ran validate_spec
+    # once and baked its honesty_notes into spec["notes"]. Re-scanning the
+    # same description on the second pass re-appended the SAME honesty note,
+    # so every "SMS is really email" / "no report component" note doubled up
+    # in the built system's notes. De-dupe by text, preserving order, so a
+    # note appears once no matter how many validation passes it survives.
+    raw_notes = [str(n)[:300] for n in list(spec.get("notes") or []) + honesty_notes if str(n).strip()]
+    seen_notes: set[str] = set()
+    deduped_notes: list[str] = []
+    for n in raw_notes:
+        if n not in seen_notes:
+            seen_notes.add(n)
+            deduped_notes.append(n)
 
     return {
         "name": name[:140],
         "description": str(spec.get("description") or "").strip()[:500],
         "mode": str(spec.get("mode") or "validated"),
         "archetype": str(spec.get("archetype") or ""),
-        "notes": [str(n)[:300] for n in (spec.get("notes") or []) if str(n).strip()][:12],
+        "notes": deduped_notes[:12],
         "components": comps,
     }
 
@@ -577,19 +876,23 @@ def _workflow_graph(wspec: dict) -> dict:
                            str(s.get("name") or s.get("type") or f"Step {i + 1}")))
         edges.append(_edge(f"n_edge_{i}", prev, nid))
         prev = nid
+    from .graph_layout import _layout
+    _layout(nodes, edges)
     return {"nodes": nodes, "edges": edges}
 
 
 QUEUE_DEFAULTS = {"max_size": 20, "max_wait_seconds": 300}
 
 
-async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
+async def build_system(db, spec: dict, *, owner_id: str | None,
+                       default_llm_credential_id: str | None = None) -> dict:
     """Compose the spec into real primitives and bind them into a RUNNING
     Py8nSystem. The caller owns the commit. Returns built refs + notes."""
     import pandas as pd
 
     from ..engine.runner import validate_graph_document
     from ..models import Py8nSystem, SystemComponent, Workflow
+    from . import apps as app_svc
     from . import datasets as ds_svc
     from . import system_events as events_svc
     from . import voice_agents as va_svc
@@ -601,10 +904,11 @@ async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
     spec = validate_spec(spec)
     notes = list(spec.get("notes") or [])
     built: dict = {"datasets": [], "workflows": [], "voice_agents": [],
-                   "meeting_rooms": [], "queues": [], "system": None}
+                   "meeting_rooms": [], "queues": [], "apps": [], "system": None}
 
     # ---- 1) datasets first (knowledge bindings and writes land on them) ---
     ds_by_name: dict[str, dict] = {}
+    ds_rows_by_name: dict[str, object] = {}
     for c in spec["components"]:
         if c.get("kind") != "dataset":
             continue
@@ -618,8 +922,32 @@ async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
             description=str(c.get("description") or "")[:500],
             owner_id=owner_id)
         ds_by_name[name] = {"id": ds.id, "name": ds.name}
+        ds_rows_by_name[name] = ds
         built["datasets"].append({"id": ds.id, "name": ds.name,
                                   "columns": cols, "rows": len(rows)})
+
+    # ---- 1b) apps (forms + records + rules + Excel export, over a dataset
+    # built above) - the exact same App primitive the Apps builder UI
+    # creates, via the shared compose_app() helper.
+    app_rows: list[dict] = []
+    for c in spec["components"]:
+        if c.get("kind") != "app":
+            continue
+        name = str(c.get("name")).strip()
+        ds_name = str(c.get("dataset") or "").strip()
+        ds_row = ds_rows_by_name.get(ds_name)
+        if ds_row is None:
+            raise AIComposerError(f"app {name!r}: dataset {ds_name!r} did not build")
+        app_row = await app_svc.compose_app(
+            db, name, ds_row,
+            description=str(c.get("description") or "")[:500],
+            owner_id=owner_id,
+            publish=False,
+        )
+        row = {"id": app_row.id, "name": app_row.name, "slug": app_row.slug,
+               "dataset": ds_by_name[ds_name]["name"]}
+        app_rows.append(row)
+        built["apps"].append(row)
 
     # ---- 2) workflows (composed graphs, imported inactive - honest) -------
     # dataset names wired into step params are resolved to the BUILT names
@@ -663,7 +991,16 @@ async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
             continue
         name = str(c.get("name")).strip()
         brain = str(c.get("brain") or "scaffold").strip()
-        llm_cred = str(c.get("llm_credential_id") or "").strip()
+        # v111: fall back to the SAME credential the user picked to propose
+        # this spec (default_llm_credential_id, threaded in from /build and
+        # /generate) when the component itself doesn't name one. Before
+        # this, a brain=ai_agent voice_agent the LLM proposed - which
+        # cannot know the vault's credential ids, so it never sets this
+        # field itself - had NO path to build successfully: the frontend
+        # already sent the chosen credential_id on build, but BuildRequest
+        # had no field for it and FastAPI silently dropped it, so every
+        # ai_agent-brained voice agent 400'd with no way to fix it in the UI.
+        llm_cred = str(c.get("llm_credential_id") or "").strip() or (default_llm_credential_id or "")
         if brain == "ai_agent" and not llm_cred:
             raise AIComposerError(
                 f"voice_agent {name!r}: brain=ai_agent needs llm_credential_id "
@@ -771,16 +1108,25 @@ async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
     sys_row.owner_id = owner_id
     db.add(sys_row)
     await db.flush()
+    new_components = []
     for ds in built["datasets"]:
-        db.add(SystemComponent(system_id=sys_row.id, kind="dataset", ref_id=ds["id"]))
+        c = SystemComponent(system_id=sys_row.id, kind="dataset", ref_id=ds["id"])
+        db.add(c); new_components.append(c)
     for wf in built["workflows"]:
-        db.add(SystemComponent(system_id=sys_row.id, kind="workflow", ref_id=wf["id"]))
+        c = SystemComponent(system_id=sys_row.id, kind="workflow", ref_id=wf["id"])
+        db.add(c); new_components.append(c)
     for va in agent_rows:
-        db.add(SystemComponent(system_id=sys_row.id, kind="voice_agent", ref_id=va["id"]))
+        c = SystemComponent(system_id=sys_row.id, kind="voice_agent", ref_id=va["id"])
+        db.add(c); new_components.append(c)
     for room in room_by_name.values():
-        db.add(SystemComponent(system_id=sys_row.id, kind="meeting", ref_id=room["id"]))
+        c = SystemComponent(system_id=sys_row.id, kind="meeting", ref_id=room["id"])
+        db.add(c); new_components.append(c)
     for q in built["queues"]:
-        db.add(SystemComponent(system_id=sys_row.id, kind="queue", ref_id=q["id"]))
+        c = SystemComponent(system_id=sys_row.id, kind="queue", ref_id=q["id"])
+        db.add(c); new_components.append(c)
+    for app_row in app_rows:
+        c = SystemComponent(system_id=sys_row.id, kind="app", ref_id=app_row["id"])
+        db.add(c); new_components.append(c)
     await db.flush()
 
     op = await record_operation(
@@ -788,6 +1134,23 @@ async def build_system(db, spec: dict, *, owner_id: str | None) -> dict:
         detail={"mode": spec.get("mode"),
                 "components": {k: len(v) for k, v in built.items() if k != "system"},
                 "note": "composed by the AI system builder (v82)"})
+    # v113 fix: the aggregate "build" op above summarizes counts, but no
+    # individual component_added entries were ever written for these
+    # server-side binds - the Operations tab looked empty for every
+    # component the Composer itself attached, unlike the interactive
+    # POST /components door which always logs one row per bind. Write the
+    # matching per-component rows so the audit trail is complete.
+    for comp in new_components:
+        comp_op = await record_operation(
+            db, sys_row, "component_added", actor=owner_id or "composer",
+            detail={"kind": comp.kind, "ref_id": comp.ref_id, "component_id": comp.id,
+                    "via": "ai_system_composer"})
+        await events_svc.emit(
+            db, owner_id, "system.component_added", source="system",
+            actor=owner_id or "composer", target_type="system", target_id=sys_row.id,
+            payload={"operation_id": comp_op.id, "kind": comp.kind, "ref_id": comp.ref_id,
+                     "system_id": sys_row.id, "system_name": sys_row.name},
+            correlation_id=sys_row.id)
     await events_svc.emit(
         db, owner_id, "system.built", source="system",
         actor=owner_id or "composer", target_type="system", target_id=sys_row.id,

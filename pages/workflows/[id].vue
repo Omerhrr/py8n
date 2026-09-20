@@ -286,7 +286,14 @@ const schedulePill = computed(() => {
 // Load
 // ------------------------------------------------------------------
 onMounted(async () => {
-  await Promise.all([store.loadDefinitions(), store.loadCredentials()])
+  // v-editor-robustness: node definitions are load-bearing (the canvas
+  // cannot render nodes without them) but credentials are not - a single
+  // credential the vault can no longer decrypt (see docker-compose.yml's
+  // appdata volume note) must never take the whole editor down with it.
+  // Each call is isolated so one failure can't cascade into the others,
+  // and loading the workflow itself is never gated on either.
+  await store.loadDefinitions().catch((e) => { console.error('loadDefinitions failed:', e) })
+  store.loadCredentials().catch(() => {})
   store.loadEnvVars().catch(() => {}) // v19: expression autocomplete needs env keys
   await store.loadWorkflow(workflowId.value)
   graphToCanvas(store.workflow!.graph || { nodes: [], edges: [] })

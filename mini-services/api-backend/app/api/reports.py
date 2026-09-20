@@ -109,6 +109,15 @@ async def list_reports(user=Depends(get_optional_user), db: AsyncSession = Depen
     return await _resolved(db, visible)
 
 
+@router.get("/{report_id}")
+async def get_report(report_id: str, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
+    """v116: there was no single-item GET - only list/put/delete/run/runs/
+    deliveries - so fetching one report by id 405'd and every caller had to
+    list-and-filter (the exact workaround this fix makes unnecessary)."""
+    row = await _get_or_404(db, report_id, user)
+    return (await _resolved(db, [row]))[0]
+
+
 @router.post("", status_code=201)
 async def create_report(body: ReportCreate, user=Depends(get_optional_user), db: AsyncSession = Depends(get_db)):
     await _validate_body(db, source_type=body.source_type, source_id=body.source_id, fmt=body.fmt, cron=body.cron, delivery=body.delivery)

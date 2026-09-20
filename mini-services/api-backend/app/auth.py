@@ -31,7 +31,7 @@ import os
 import re
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import Depends, HTTPException, Request
@@ -199,9 +199,20 @@ async def get_optional_user(request: Request, db: AsyncSession = Depends(get_db)
             row = await resolve_system_key(db, api_key)
             if row is None:
                 return None
-            # sqlite stores naive datetimes - keep arithmetic in naive UTC (v38 GOTCHA)
-            now = datetime.utcnow()
-            if row.last_used_at is None or (now - row.last_used_at) > timedelta(seconds=60):
+            # Bug fix: this was naive-UTC arithmetic ("sqlite stores naive
+            # datetimes") but SystemKey.last_used_at is DateTime(timezone=True)
+            # and this stack runs Postgres, where asyncpg returns AWARE
+            # datetimes - (now - row.last_used_at) raised TypeError: can't
+            # subtract offset-naive and offset-aware datetimes on every
+            # request from a system key that had been used before (i.e.
+            # every request after the first). now is aware UTC; a
+            # defensively-naive last_used_at (a legacy/sqlite-era row) is
+            # treated as UTC too.
+            now = datetime.now(timezone.utc)
+            last_used = row.last_used_at
+            if last_used is not None and last_used.tzinfo is None:
+                last_used = last_used.replace(tzinfo=timezone.utc)
+            if last_used is None or (now - last_used) > timedelta(seconds=60):
                 row.last_used_at = now  # throttled touch
                 await db.commit()
             scopes = list(row.scopes) if row.scopes else ["read", "write"]
@@ -221,9 +232,15 @@ async def get_optional_user(request: Request, db: AsyncSession = Depends(get_db)
         ).scalar_one_or_none()
         if row is None:
             return None
-        # sqlite stores naive datetimes - keep arithmetic in naive UTC (v38 GOTCHA)
-        now = datetime.utcnow()
-        if row.last_used_at is None or (now - row.last_used_at) > timedelta(seconds=60):
+        # Bug fix: same naive/aware mismatch as the system-key branch above -
+        # ApiKey.last_used_at is DateTime(timezone=True) too (Postgres hands
+        # back aware datetimes), so this crashed on every request from an
+        # already-used API key.
+        now = datetime.now(timezone.utc)
+        last_used = row.last_used_at
+        if last_used is not None and last_used.tzinfo is None:
+            last_used = last_used.replace(tzinfo=timezone.utc)
+        if last_used is None or (now - last_used) > timedelta(seconds=60):
             row.last_used_at = now  # throttled touch
             await db.commit()
         if row.owner_id is None:

@@ -18,6 +18,8 @@ interface FormField {
   options?: (string | number | boolean)[] | null
   default?: string | number | boolean | null
   placeholder?: string | null
+  relation?: { dataset_id: string; display_column: string; value_column?: string | null } | null // v141
+  relation_options?: { value: string; label: string }[] | null // v141: resolved by the server
 }
 
 interface FormDesc {
@@ -171,7 +173,15 @@ function submitAnother() {
                 {{ f.label || f.name }}<span v-if="f.required" class="text-red-400"> *</span>
               </label>
               <select
-                v-if="f.options && f.options.length"
+                v-if="f.relation"
+                v-model="model[f.name]"
+                class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
+              >
+                <option value="" disabled>choose…</option>
+                <option v-for="o in f.relation_options || []" :key="o.value" :value="o.value">{{ o.label }}</option>
+              </select>
+              <select
+                v-else-if="f.options && f.options.length"
                 v-model="model[f.name]"
                 class="mt-1 w-full rounded-xl border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-sm outline-none focus:border-violet-500/60"
               >

@@ -777,9 +777,18 @@ function ackAge(title: string, until: string): string {
   return `snoozed ${m >= 60 ? `${Math.floor(m / 60)}h` : `${m}m`} more - ${title}`
 }
 
+const route = useRoute()
+
 onMounted(async () => {
   await Promise.all([loadSystems(), loadTemplates(), loadDeps(), loadHealth()])
   loading.value = false
+  // v-composer-link: the AI Composer's "Open the system" link lands here
+  // with ?id=<system_id> since there is no /systems/[id] route - open the
+  // detail drawer for it directly instead of leaving the user on the list.
+  const qid = route.query.id
+  if (typeof qid === 'string' && qid) {
+    openDetail(qid)
+  }
 })
 </script>
 
@@ -911,7 +920,7 @@ onMounted(async () => {
             <div v-for="t in templates" :key="t.slug" class="flex flex-col rounded-2xl border border-zinc-800/80 bg-zinc-900/50 p-4">
               <div class="flex items-start gap-2.5">
                 <div class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg" :style="{ background: `linear-gradient(135deg, ${t.color}, ${t.color}55)` }">
-                  <Boxes class="h-4 w-4 text-zinc-950" />
+                  <Boxes class="h-4 w-4 text-black" />
                 </div>
                 <div class="min-w-0">
                   <p class="text-xs font-bold leading-tight">{{ t.name }}</p>
@@ -944,7 +953,7 @@ onMounted(async () => {
           >
             <div class="flex items-start gap-3">
               <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" :style="{ background: `linear-gradient(135deg, ${s.color}, ${s.color}55)` }">
-                <Boxes class="h-5 w-5 text-zinc-950" />
+                <Boxes class="h-5 w-5 text-black" />
               </div>
               <div class="min-w-0 flex-1">
                 <p class="text-sm font-bold leading-tight">{{ s.name }}</p>
@@ -1047,7 +1056,7 @@ onMounted(async () => {
               <X class="h-4 w-4" />
             </button>
             <div class="flex h-10 w-10 items-center justify-center rounded-xl" :style="{ background: `linear-gradient(135deg, ${detail.color}, ${detail.color}55)` }">
-              <Boxes class="h-5 w-5 text-zinc-950" />
+              <Boxes class="h-5 w-5 text-black" />
             </div>
             <div class="min-w-0 flex-1">
               <h2 class="text-base font-bold">{{ detail.name }}</h2>
@@ -1073,13 +1082,13 @@ onMounted(async () => {
               <span class="text-[10px] text-zinc-500">the gate holds this system's workflows on events, schedules and webhooks when it is not running</span>
               <div class="ml-auto flex flex-wrap items-center gap-1.5">
                 <template v-if="canEdit">
-                  <button v-if="detail.lifecycle === 'stopped'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('start')">
+                  <button v-if="detail.lifecycle === 'stopped'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('start')">
                     <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Play class="h-3 w-3" /> Start
                   </button>
                   <button v-if="detail.lifecycle === 'stopped'" class="flex items-center gap-1 rounded-xl border border-emerald-500/40 px-3 py-1.5 text-[11px] font-bold text-emerald-300 transition hover:bg-emerald-500/10 disabled:opacity-50" :disabled="lifecycleBusy" title="Start AND flip every bound workflow's is_active ON - the loud boot for pack installs" @click="lifecycle('start', true)">
                     <Rocket class="h-3 w-3" /> Boot (activate workflows)
                   </button>
-                  <button v-if="detail.lifecycle === 'paused'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('resume')">
+                  <button v-if="detail.lifecycle === 'paused'" class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('resume')">
                     <Loader2 v-if="lifecycleBusy" class="h-3 w-3 animate-spin" /><Play class="h-3 w-3" /> Resume
                   </button>
                   <button v-if="detail.lifecycle === 'running'" class="flex items-center gap-1 rounded-xl border border-amber-500/40 px-3 py-1.5 text-[11px] font-bold text-amber-300 transition hover:bg-amber-500/10 disabled:opacity-50" :disabled="lifecycleBusy" @click="lifecycle('pause')">
@@ -1189,11 +1198,11 @@ onMounted(async () => {
 
             <div class="mt-3 flex flex-wrap items-center gap-2">
               <template v-if="canEdit">
-                <button class="flex items-center gap-1 rounded-xl bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-sky-400 disabled:opacity-50" :disabled="deployBusy" @click="saveDeployment">
+                <button class="flex items-center gap-1 rounded-xl bg-sky-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-sky-400 disabled:opacity-50" :disabled="deployBusy" @click="saveDeployment">
                   <Loader2 v-if="deployBusy" class="h-3 w-3 animate-spin" /> <Server class="h-3 w-3" /> Save identity
                 </button>
                 <button v-if="!deployment || deployment.status === 'offline' || deployment.status === 'paused'"
-                  class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('deploy')">
+                  class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="deployBusy" @click="deploymentVerb('deploy')">
                   <Rocket class="h-3 w-3" /> Deploy
                 </button>
                 <button v-if="deployment?.status === 'live'"
@@ -1260,7 +1269,7 @@ onMounted(async () => {
                 <input v-model="keyReadOnly" type="checkbox" class="h-3 w-3 accent-amber-500" />
                 read-only
               </label>
-              <button class="flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-amber-400 disabled:opacity-50" :disabled="keyBusy || !keyName.trim()" @click="mintKey">
+              <button class="flex items-center gap-1 rounded-xl bg-amber-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-amber-400 disabled:opacity-50" :disabled="keyBusy || !keyName.trim()" @click="mintKey">
                 <Loader2 v-if="keyBusy" class="h-3 w-3 animate-spin" /> <KeyRound v-else class="h-3 w-3" /> Mint key
               </button>
             </div>
@@ -1310,7 +1319,7 @@ onMounted(async () => {
                 </span>
               </div>
               <div v-if="canEdit" class="mt-2 flex gap-2">
-                <button class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="updateBusy" @click="ruleOnUpdate('accept')">
+                <button class="flex items-center gap-1 rounded-xl bg-emerald-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="updateBusy" @click="ruleOnUpdate('accept')">
                   <CheckCheck class="h-3 w-3" /> Accept
                 </button>
                 <button class="flex items-center gap-1 rounded-xl border border-rose-500/40 px-3 py-1.5 text-[11px] font-bold text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-50" :disabled="updateBusy" title="unbind exactly what the upgrade bound - the imported objects stay in the estate, unbound">

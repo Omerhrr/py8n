@@ -455,6 +455,13 @@ onMounted(async () => {
                 >
                   {{ usage[cred.id].workflow_count }} workflow{{ usage[cred.id].workflow_count === 1 ? '' : 's' }}
                 </span>
+                <span
+                  v-if="cred.decrypt_error"
+                  class="rounded-md bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-400"
+                  title="Its encryption key was rotated (e.g. an api/worker rebuild without a persistent appdata volume) - the payload is unrecoverable. Delete and recreate it."
+                >
+                  needs rotation - undecryptable
+                </span>
               </div>
               <div class="mt-0.5 flex flex-wrap items-center gap-2 text-[11px] text-zinc-500">
                 <span class="font-mono">{{ cred.masked_hint }}</span>
@@ -693,7 +700,7 @@ onMounted(async () => {
               Cancel
             </button>
             <button
-              class="flex items-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-2 text-sm font-semibold text-zinc-950 shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 disabled:opacity-50"
+              class="flex items-center gap-1.5 rounded-xl bg-amber-500 px-3.5 py-2 text-sm font-semibold text-black shadow-lg shadow-amber-500/20 transition hover:bg-amber-400 disabled:opacity-50"
               :disabled="rotateSaving"
               @click="submitRotate"
             >

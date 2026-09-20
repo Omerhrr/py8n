@@ -616,7 +616,7 @@ const saveMeta = () => govAct(
               <ListChecks class="h-3.5 w-3.5" /> check current data
             </button>
             <button
-              class="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-bold text-zinc-950 shadow-lg shadow-amber-500/20 transition hover:brightness-110 disabled:opacity-50"
+              class="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-xs font-bold text-black shadow-lg shadow-amber-500/20 transition hover:brightness-110 disabled:opacity-50"
               :disabled="cSaving || !cCols.length"
               @click="saveContract"
             >

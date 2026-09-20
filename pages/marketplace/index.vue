@@ -249,7 +249,7 @@ onMounted(async () => {
             >
               <div class="flex items-start gap-3">
                 <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-lg" :style="{ background: `linear-gradient(135deg, ${op.color}, ${op.color}55)`, boxShadow: `0 8px 20px ${op.color}22` }">
-                  <component :is="opIcon(op.icon)" class="h-5 w-5 text-zinc-950" />
+                  <component :is="opIcon(op.icon)" class="h-5 w-5 text-black" />
                 </div>
                 <div class="min-w-0 flex-1">
                   <p class="text-sm font-bold leading-tight">{{ op.name }}</p>
@@ -313,7 +313,7 @@ onMounted(async () => {
 
               <button
                 v-if="!opResults[op.slug]"
-                class="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50"
+                class="mt-2 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-500 px-4 py-2 text-sm font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50"
                 :disabled="installingOp === op.slug"
                 @click="installOperator(op.slug)"
               >
@@ -338,7 +338,7 @@ onMounted(async () => {
         >
           <div class="flex items-start gap-3">
             <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl shadow-lg" :style="{ background: `linear-gradient(135deg, ${s.color}, ${s.color}55)`, boxShadow: `0 8px 20px ${s.color}22` }">
-              <PackageOpen class="h-5 w-5 text-zinc-950" />
+              <PackageOpen class="h-5 w-5 text-black" />
             </div>
             <div class="min-w-0 flex-1">
               <p class="text-sm font-bold leading-tight">{{ s.name }}</p>
@@ -378,7 +378,7 @@ onMounted(async () => {
             <div class="min-w-0 flex-1">
               <div class="flex items-center gap-2">
                 <div class="flex h-8 w-8 items-center justify-center rounded-lg" :style="{ background: `linear-gradient(135deg, ${detail?.color || '#22d3ee'}, ${detail?.color || '#22d3ee'}55)` }">
-                  <PackageOpen class="h-4 w-4 text-zinc-950" />
+                  <PackageOpen class="h-4 w-4 text-black" />
                 </div>
                 <h3 class="text-sm font-bold">{{ detail?.name }}</h3>
                 <span v-if="detail?.curated" class="rounded-full bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-bold text-cyan-300">curated</span>
@@ -455,7 +455,7 @@ onMounted(async () => {
           <div class="border-t border-zinc-800 px-5 py-3">
             <div v-if="!installResult" class="space-y-2">
             <button
-              class="flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+              class="flex w-full items-center justify-center gap-2 rounded-xl bg-cyan-500 px-4 py-2.5 text-sm font-bold text-black transition hover:bg-cyan-400 disabled:opacity-50"
               :disabled="installing"
               @click="install('plain')"
             >

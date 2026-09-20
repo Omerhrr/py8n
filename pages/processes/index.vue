@@ -987,7 +987,7 @@ async function removeChainReport() {
               <input v-model="attAckNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
               <input v-model="attAckSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
               <input v-model="attAckReschedule" type="number" min="0" step="5" placeholder="reschedule in min" class="w-32 rounded-lg border border-fuchsia-500/30 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-fuchsia-500/60" title="v96: re-knock the door at an EXPLICIT moment - now + N minutes (the human picks the time; leave empty if you set snooze hrs - one clock per receipt)" />
-              <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="attAcking || !attAckBy.trim()" @click="ackFromAttention(row)">
+              <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="attAcking || !attAckBy.trim()" @click="ackFromAttention(row)">
                 <Loader2 v-if="attAcking" class="h-3 w-3 animate-spin" /> Acknowledge
               </button>
               <p v-if="attAckError" class="w-full text-[10px] text-rose-300">{{ attAckError }}</p>
@@ -1171,7 +1171,7 @@ async function removeChainReport() {
             <input v-if="crForm.cadence === 'custom'" v-model="crForm.cadence_minutes" type="number" min="5" step="5" placeholder="cadence (min)"
               class="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-cyan-500/60"
               title="how often the file rides the wire, in minutes (floor 5 - a file dispatch is a minutes concern)" />
-            <button v-else class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+            <button v-else class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-cyan-400 disabled:opacity-50"
               :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
               <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
             </button>
@@ -1188,7 +1188,7 @@ async function removeChainReport() {
             </button>
           </div>
           <div v-if="crForm.cadence === 'custom'" class="mt-2">
-            <button class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-zinc-950 transition hover:bg-cyan-400 disabled:opacity-50"
+            <button class="rounded-lg bg-cyan-500 px-3 py-1.5 text-[11px] font-bold text-black transition hover:bg-cyan-400 disabled:opacity-50"
               :disabled="crBusy || !crForm.to.trim()" @click="saveChainReport">
               <Loader2 v-if="crBusy" class="h-3 w-3 animate-spin" /> Save
             </button>
@@ -1358,7 +1358,7 @@ async function removeChainReport() {
               </div>
               <div class="mt-2 flex flex-wrap items-center gap-2">
                 <input v-model="polTemplate" placeholder="custom message template ({process}, {ref}, {state}, {overdue_minutes}, {attempt})" class="min-w-64 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-indigo-500/60" />
-                <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="requestPolicySave">
+                <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-black transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="requestPolicySave">
                   <Loader2 v-if="policySaving" class="h-3 w-3 animate-spin" /> Save policy
                 </button>
                 <button v-if="selected.escalation_policy" class="rounded-lg border border-rose-500/40 bg-rose-500/10 px-2.5 py-1 text-[10px] font-bold text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-50" :disabled="policySaving" title="remove the policy - the machine falls back to one knock per stint, event-only" @click="requestPolicyRemove">
@@ -1383,7 +1383,7 @@ async function removeChainReport() {
                   </div>
                 </div>
                 <div class="mt-2 flex items-center gap-2">
-                  <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="confirmPolicyReview">
+                  <button class="flex items-center gap-1 rounded-lg bg-indigo-500/90 px-3 py-1 text-[10px] font-bold text-black transition hover:bg-indigo-400 disabled:opacity-50" :disabled="policySaving" @click="confirmPolicyReview">
                     <Loader2 v-if="policySaving" class="h-3 w-3 animate-spin" />
                     {{ policyReview.after ? `Confirm save (${policyReview.rows.length})` : 'Confirm remove' }}
                   </button>
@@ -1471,7 +1471,7 @@ async function removeChainReport() {
               <input v-model="newStateRef" placeholder="ref (LEAD-1042, +1555...)" class="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-emerald-500/60" />
               <input v-model="newStateTitle" placeholder="title (Globex - Dana)" class="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-emerald-500/60" />
               <input v-model="newStateDue" type="number" min="1" placeholder="SLA seconds" class="rounded-xl border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs text-zinc-200 outline-none focus:border-emerald-500/60" />
-              <button class="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="starting || !newStateRef.trim()" @click="startInstance">
+              <button class="flex items-center justify-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="starting || !newStateRef.trim()" @click="startInstance">
                 <Loader2 v-if="starting" class="h-3.5 w-3.5 animate-spin" />
                 <Flag v-else class="h-3.5 w-3.5" /> Start in {{ selected.initial }}
               </button>
@@ -1514,7 +1514,7 @@ async function removeChainReport() {
                         <option v-for="t in allowedFrom(inst.state)" :key="t.name" :value="t.name">{{ t.name }} -> {{ t.to }}</option>
                       </select>
                       <input v-model="advanceNote" placeholder="note" class="w-40 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
-                      <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="advancing || !advanceTransition" @click="advance(inst)">
+                      <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="advancing || !advanceTransition" @click="advance(inst)">
                         <Loader2 v-if="advancing" class="h-3 w-3 animate-spin" /> Advance
                       </button>
                     </template>
@@ -1536,7 +1536,7 @@ async function removeChainReport() {
                   <input v-model="annKey" placeholder="key (budget, address...)" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
                   <input v-model="annValue" placeholder="value (json or text)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
                   <input v-model="annNote" placeholder="note" class="w-36 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-violet-500/60" />
-                  <button class="rounded-lg bg-violet-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-violet-400 disabled:opacity-50" :disabled="annotating || !annKey.trim()" @click="annotate(inst)">
+                  <button class="rounded-lg bg-violet-500/90 px-2.5 py-1 text-[10px] font-bold text-black transition hover:bg-violet-400 disabled:opacity-50" :disabled="annotating || !annKey.trim()" @click="annotate(inst)">
                     <Loader2 v-if="annotating" class="h-3 w-3 animate-spin" /> Remember
                   </button>
                   <p v-if="annotateError" class="w-full text-[10px] text-rose-300">{{ annotateError }}</p>
@@ -1547,7 +1547,7 @@ async function removeChainReport() {
                   <input v-model="ackNote" placeholder="note (on it, calling now...)" class="w-44 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" />
                   <input v-model="ackSnooze" type="number" min="0" step="0.5" placeholder="snooze hrs" class="w-24 rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-emerald-500/60" title="hold the door quiet for N hours, then it re-knocks (empty = owns the rest of the stint)" />
                   <input v-model="ackReschedule" type="number" min="0" step="5" placeholder="reschedule in min" class="w-32 rounded-lg border border-fuchsia-500/30 bg-zinc-950 px-2 py-1 text-[10px] text-zinc-300 outline-none focus:border-fuchsia-500/60" title="v98: re-knock the door at an EXPLICIT moment - now + N minutes (the human picks the time; leave empty if you set snooze hrs - one clock per receipt)" />
-                  <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-zinc-950 transition hover:bg-emerald-400 disabled:opacity-50" :disabled="acking || !ackBy.trim()" @click="ackEscalation(inst)">
+                  <button class="rounded-lg bg-emerald-500/90 px-2.5 py-1 text-[10px] font-bold text-black transition hover:bg-emerald-400 disabled:opacity-50" :disabled="acking || !ackBy.trim()" @click="ackEscalation(inst)">
                     <Loader2 v-if="acking" class="h-3 w-3 animate-spin" /> Acknowledge
                   </button>
                   <p v-if="ackError" class="w-full text-[10px] text-rose-300">{{ ackError }}</p>

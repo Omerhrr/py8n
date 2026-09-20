@@ -118,6 +118,7 @@ from .api.ops import router as ops_router  # noqa: E402 (v57)
 from .api.packs import router as packs_router  # noqa: E402 (v39)
 from .api.registries import router as registries_router  # noqa: E402 (v43)
 from .api.ai_composer import router as ai_composer_router  # noqa: E402 (v82)
+from .api.db_connect import router as db_connect_router  # noqa: E402 (v148: connect your database wizard)
 from .api.operators import router as operators_router  # noqa: E402 (v83 operators)
 from .api.processes import router as processes_router  # noqa: E402 (v84 business processes)
 from .api.erp import router as erp_router  # noqa: E402 (v114 the ERP reports - the books speak)
@@ -192,6 +193,7 @@ app.include_router(events_router, prefix=API, dependencies=ENFORCED)  # v80: the
 app.include_router(event_stream_router, prefix=API)  # v80: the live tail - token-auth inside the handler (ws.py pattern)
 app.include_router(media_router, prefix=API, dependencies=ENFORCED)  # v80: the media runtime
 app.include_router(ai_composer_router, prefix=API, dependencies=ENFORCED)  # v82: the AI system composer
+app.include_router(db_connect_router, prefix=API, dependencies=ENFORCED)  # v148: connect your database wizard
 app.include_router(operators_router, prefix=API, dependencies=ENFORCED)  # v83: the business operators
 app.include_router(processes_router, prefix=API, dependencies=ENFORCED)  # v84: the business state machines
 app.include_router(erp_router, prefix=API, dependencies=ENFORCED)  # v114: the ERP reports - the books speak

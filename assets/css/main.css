@@ -2,11 +2,48 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ---- Py8n dark editor base ---- */
+/* ---- Py8n theme tokens (v-theme) ----
+   The whole app is built directly on Tailwind's `zinc` scale rather than
+   `dark:` variants, so instead of touching every call site, `zinc` itself
+   is redefined (see tailwind.config.ts) to read these CSS variables. The
+   default (no class on <html>) is dark and matches the app exactly as it
+   looked before theming existed - these numbers ARE the stock Tailwind
+   zinc palette, as "R G B" channels for the rgb(var(..) / <alpha>) form.
+   `<html class="light">` (set by composables/useTheme.ts) swaps in a light,
+   legible scale below. */
 :root {
+  --zinc-50: 250 250 250;
+  --zinc-100: 244 244 245;
+  --zinc-200: 228 228 231;
+  --zinc-300: 212 212 216;
+  --zinc-400: 161 161 170;
+  --zinc-500: 113 113 122;
+  --zinc-600: 82 82 91;
+  --zinc-700: 63 63 70;
+  --zinc-800: 39 39 42;
+  --zinc-900: 24 24 27;
+  --zinc-950: 9 9 11;
+
   --py8n-bg: #0c0d10;
   --py8n-panel: #14161b;
   --py8n-border: #23262e;
+}
+
+:root.light {
+  /* roughly the dark scale mirrored (50<->950) and hand-tuned so text
+     shades stay legible on a white page instead of a literal mirror,
+     which would wash out the faintest grays (zinc-600) to near-white. */
+  --zinc-50: 9 9 11;
+  --zinc-100: 24 24 27;
+  --zinc-200: 39 39 42;
+  --zinc-300: 63 63 70;
+  --zinc-400: 82 82 91;
+  --zinc-500: 113 113 122;
+  --zinc-600: 138 138 147;
+  --zinc-700: 161 161 170;
+  --zinc-800: 212 212 216;
+  --zinc-900: 240 240 242;
+  --zinc-950: 255 255 255;
 }
 
 html,
@@ -18,6 +55,7 @@ body,
 body {
   @apply bg-zinc-950 text-zinc-100 antialiased;
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', sans-serif;
+  transition: background-color 0.15s ease, color 0.15s ease;
 }
 
 /* slim scrollbars for panels */
@@ -87,4 +125,78 @@ body {
 }
 .vue-flow__controls-button:hover {
   background: #1c1e24;
+}
+
+/* ---- native form control defaults (v-theme) ----
+   Bug fix: lots of <input>/<select>/<textarea> across the app never got
+   an explicit bg-, text- or border-color utility, so the browser rendered its
+   own default control chrome - white, regardless of the app's theme
+   (that's the "white search bar / dropdown" bug). Rather than hand-edit
+   every one of the ~300 such elements, this @layer base rule gives every
+   native form control a themed default; any element that DOES carry an
+   explicit Tailwind color utility still wins, because Tailwind's own
+   utilities layer is declared after (and so beats) the base layer. */
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  html.light {
+    color-scheme: light;
+  }
+
+  input,
+  select,
+  textarea {
+    background-color: rgb(var(--zinc-900));
+    color: rgb(var(--zinc-100));
+    border-color: rgb(var(--zinc-700));
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: rgb(var(--zinc-600));
+  }
+
+  select option {
+    background-color: rgb(var(--zinc-900));
+    color: rgb(var(--zinc-100));
+  }
+
+  input[type='checkbox'],
+  input[type='radio'] {
+    accent-color: #f97316;
+  }
+}
+
+/* ---- shared .btn / .input component classes (v-redesign) ----
+   pages/channels/index.vue uses these class names throughout (btn,
+   btn-primary, btn-ghost, btn-xs, input, input-xs) but nothing in the
+   app ever defined them - they rendered with zero padding, no border
+   radius, no button color, just bare native form-control chrome. That
+   was the biggest single reason that page looked broken next to the
+   rest of the app, which spells out its own utility classes per
+   element. Defining them once here fixes every one of those ~160 call
+   sites, themed and consistent with the rest of the app. */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent px-3.5 py-2 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-primary {
+    @apply border-orange-500 bg-orange-500 text-white hover:bg-orange-400 hover:border-orange-400;
+  }
+  .btn-ghost {
+    @apply border-zinc-700 bg-zinc-900 text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100;
+  }
+  .btn-danger {
+    @apply border-rose-600 bg-rose-600 text-white hover:bg-rose-500 hover:border-rose-500;
+  }
+  .btn-xs {
+    @apply gap-1 rounded-md px-2 py-1 text-xs;
+  }
+  .input {
+    @apply w-full rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none transition placeholder:text-zinc-500 focus:border-orange-500/60;
+  }
+  .input-xs {
+    @apply rounded-md px-2 py-1 text-xs;
+  }
 }

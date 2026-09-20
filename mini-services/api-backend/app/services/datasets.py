@@ -129,6 +129,18 @@ def stage_local(path: Path) -> Path:
     """
     backend = get_backend()
     if backend.kind == "local":
+        # v148 fix: this used to return `path` unconditionally, so a dataset
+        # created empty (0 columns -> create_from_df never writes a parquet
+        # at all, per its own "empty schemas stay fileless" comment) still
+        # passed this check silently. run_sql's own missing-blob handling
+        # (its `except FileNotFoundError: continue`) never fired, so DuckDB's
+        # LAZY `read_parquet()` view only blew up later, INSIDE the actual
+        # query execution - which is not caught there and kills every query
+        # on the account, not just the one dataset with no file. Checking
+        # existence here restores the intended "skip datasets with no blob
+        # yet" contract for local deployments, the common case.
+        if not path.exists():
+            raise FileNotFoundError(str(path))
         return path
     tmp = datasets_dir() / f".staging-{uuid.uuid4().hex[:10]}.parquet"
     tmp.write_bytes(read_file_bytes(path))
@@ -617,18 +629,288 @@ EXPORT_CONTENT_TYPES = {
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "json": "application/json",
     "parquet": "application/octet-stream",
+    "pdf": "application/pdf",  # v115: real PDF export (reportlab), not a csv substitution
 }
+
+# a table PDF stops being usable well before MAX_EXPORT_ROWS (200k) - render
+# only the head and say so, rather than producing a multi-thousand-page file
+MAX_PDF_EXPORT_ROWS = 2000
+
+
+def _dataset_pdf_bytes(ds: Dataset, df: pd.DataFrame) -> bytes:
+    """v115: render a dataset as a simple tabular PDF report (reportlab).
+
+    Column widths are distributed evenly across a landscape letter page and
+    cell text is wrapped/truncated so wide datasets stay readable instead of
+    overflowing the page. Rows beyond MAX_PDF_EXPORT_ROWS are dropped with a
+    note - a PDF is a print artifact, not a warehouse export.
+    """
+    import io
+
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import landscape, letter
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import inch
+    from reportlab.platypus import (
+        Paragraph,
+        SimpleDocTemplate,
+        Spacer,
+        Table,
+        TableStyle,
+    )
+
+    styles = getSampleStyleSheet()
+    cell_style = styles["BodyText"]
+    cell_style.fontSize = 7
+    cell_style.leading = 9
+
+    truncated = len(df) > MAX_PDF_EXPORT_ROWS
+    view = df.head(MAX_PDF_EXPORT_ROWS)
+    rows = jsonable_rows(view)
+    columns = [str(c) for c in df.columns]
+
+    def _cell(v) -> Paragraph:
+        text = "" if v is None else str(v)
+        if len(text) > 400:
+            text = text[:400] + "…"
+        # Paragraph, not a bare string: reportlab's Table wraps long cell
+        # text onto multiple lines instead of blowing out the page width
+        return Paragraph(text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"), cell_style)
+
+    header = [Paragraph(f"<b>{c}</b>", cell_style) for c in columns]
+    table_data = [header] + [[_cell(r.get(c)) for c in columns] for r in rows]
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=landscape(letter),
+        leftMargin=0.4 * inch, rightMargin=0.4 * inch,
+        topMargin=0.5 * inch, bottomMargin=0.5 * inch,
+    )
+    page_width = landscape(letter)[0] - 0.8 * inch
+    col_count = max(1, len(columns))
+    col_width = page_width / col_count
+
+    elements = [Paragraph(f"<b>{ds.name}</b>", styles["Title"]), Spacer(1, 0.15 * inch)]
+    if not columns or not rows:
+        elements.append(Paragraph("No rows.", styles["BodyText"]))
+    else:
+        table = Table(table_data, colWidths=[col_width] * col_count, repeatRows=1)
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f97316")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d1d5db")),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f9fafb")]),
+        ]))
+        elements.append(table)
+    if truncated:
+        elements.append(Spacer(1, 0.15 * inch))
+        elements.append(Paragraph(
+            f"Showing the first {MAX_PDF_EXPORT_ROWS:,} of {len(df):,} rows - "
+            "use csv/xlsx/parquet for the full export.", styles["BodyText"]))
+    doc.build(elements)
+    return buf.getvalue()
+
+
+_XLSX_ACCENT = "F97316"  # same brand orange as the PDF export header
+_XLSX_INK = "1F2937"
+_XLSX_MUTED = "6B7280"
+_XLSX_WHITE = "FFFFFF"
+_XLSX_TILE_COLORS = ["F97316", "0EA5E9", "22C55E", "A855F7", "EF4444", "0D9488"]
+_XLSX_MAX_CHART_CATEGORIES = 12
+
+
+def _xlsx_fmt_num(v: float) -> str:
+    if v != v:  # NaN
+        return "-"
+    if abs(v) >= 1000:
+        return f"{v:,.0f}"
+    if float(v).is_integer():
+        return f"{int(v):,}"
+    return f"{v:,.2f}"
+
+
+def _xlsx_kpi_tile(ws, col0: int, row0: int, width: int, label: str, value: str, fill: str) -> None:
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+
+    c0 = get_column_letter(col0)
+    c1 = get_column_letter(col0 + width - 1)
+    ws.merge_cells(f"{c0}{row0}:{c1}{row0 + 1}")
+    vcell = ws[f"{c0}{row0}"]
+    vcell.value = value
+    vcell.font = Font(size=20, bold=True, color=_XLSX_WHITE)
+    vcell.alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells(f"{c0}{row0 + 2}:{c1}{row0 + 2}")
+    lcell = ws[f"{c0}{row0 + 2}"]
+    lcell.value = label
+    lcell.font = Font(size=10, bold=True, color=_XLSX_WHITE)
+    lcell.alignment = Alignment(horizontal="center", vertical="center")
+    for r in (row0, row0 + 1, row0 + 2):
+        for c in range(col0, col0 + width):
+            ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=fill)
+
+
+def _dataset_dashboard_xlsx_bytes(ds: Dataset, df: pd.DataFrame) -> bytes:
+    """v133: a real, colored dashboard workbook - not a bare data dump.
+
+    Sheet 1 ("Data") is the full dataset as a banded Excel Table (native
+    filter dropdowns + striping, styled header in the app's brand orange).
+    Sheet 2 ("Dashboard", opened first) carries KPI tiles and NATIVE Excel
+    charts (openpyxl chart objects, not embedded images) built generically
+    from whatever columns the dataset has - a low-cardinality text column
+    drives a bar + pie breakdown; an all-numeric dataset falls back to a
+    per-column summary chart. Both sheets stay fully interactive/functional
+    once downloaded and opened in real Excel (sort/filter the table, resize
+    or edit the charts, recolor tiles) - no dependency on the py8n app.
+    """
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.chart import BarChart, PieChart, Reference
+    from openpyxl.chart.label import DataLabelList
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.table import Table, TableStyleInfo
+
+    columns = [str(c) for c in df.columns]
+    rows = jsonable_rows(df)
+
+    wb = Workbook()
+    data_ws = wb.active
+    data_ws.title = "Data"
+    data_ws.append(columns)
+    for r in rows:
+        data_ws.append([r.get(c) for c in columns])
+
+    header_font = Font(bold=True, color=_XLSX_WHITE)
+    header_fill = PatternFill("solid", fgColor=_XLSX_ACCENT)
+    for cell in data_ws[1]:
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    n_rows, n_cols = len(rows) + 1, len(columns)
+    if n_rows > 1 and n_cols > 0:
+        last_col = get_column_letter(n_cols)
+        table = Table(displayName="DatasetTable", ref=f"A1:{last_col}{n_rows}")
+        table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
+        data_ws.add_table(table)
+    data_ws.freeze_panes = "A2"
+    for i, col in enumerate(columns, start=1):
+        sample = [len(str(r.get(col, ""))) for r in rows[:200]]
+        width = max(10, min(40, max([len(str(col))] + sample) + 2))
+        data_ws.column_dimensions[get_column_letter(i)].width = width
+
+    # ---- Dashboard sheet (placed first so it's what a user sees on open) --
+    dash = wb.create_sheet("Dashboard", 0)
+    wb.active = 0
+    dash.sheet_view.showGridLines = False
+    dash.column_dimensions["A"].width = 2
+
+    dash["B2"] = ds.name or "Dataset"
+    dash["B2"].font = Font(size=18, bold=True, color=_XLSX_INK)
+    dash["B3"] = f"{len(df):,} rows  •  {len(columns)} columns"
+    dash["B3"].font = Font(size=11, color=_XLSX_MUTED)
+
+    numeric_cols = [c for c in columns if pd.api.types.is_numeric_dtype(df[c])]
+    non_numeric = [c for c in columns if c not in numeric_cols]
+
+    tiles = [("Rows", f"{len(df):,}"), ("Columns", f"{len(columns):,}")]
+    for c in numeric_cols[:3]:
+        tiles.append((f"Sum of {c}"[:24], _xlsx_fmt_num(df[c].sum())))
+    col0, row0, width = 2, 5, 3
+    for i, (label, value) in enumerate(tiles[:5]):
+        _xlsx_kpi_tile(dash, col0 + i * (width + 1), row0, width, label, value, _XLSX_TILE_COLORS[i % len(_XLSX_TILE_COLORS)])
+
+    chart_row = row0 + 5
+    helper_col = 20  # far right, hidden helper columns backing the charts
+
+    def cardinality_ok(col: str) -> bool:
+        n = df[col].nunique(dropna=True)
+        return 2 <= n <= _XLSX_MAX_CHART_CATEGORIES
+
+    chart_cat_col = next((c for c in non_numeric if cardinality_ok(c)), None)
+
+    if chart_cat_col:
+        if numeric_cols:
+            agg = df.groupby(chart_cat_col)[numeric_cols[0]].sum().sort_values(ascending=False)
+            metric_label = f"sum of {numeric_cols[0]}"
+        else:
+            agg = df[chart_cat_col].value_counts()
+            metric_label = "count"
+        agg = agg.head(_XLSX_MAX_CHART_CATEGORIES)
+
+        hc = helper_col
+        dash.cell(row=1, column=hc, value=chart_cat_col)
+        dash.cell(row=1, column=hc + 1, value=metric_label)
+        for i, (k, v) in enumerate(agg.items(), start=2):
+            dash.cell(row=i, column=hc, value=str(k))
+            dash.cell(row=i, column=hc + 1, value=float(v))
+        dash.column_dimensions[get_column_letter(hc)].hidden = True
+        dash.column_dimensions[get_column_letter(hc + 1)].hidden = True
+
+        bar = BarChart()
+        bar.type = "col"
+        bar.title = f"{metric_label} by {chart_cat_col}"
+        bar.y_axis.title = metric_label
+        bar.x_axis.title = chart_cat_col
+        data_ref = Reference(dash, min_col=hc + 1, min_row=1, max_row=len(agg) + 1)
+        cats_ref = Reference(dash, min_col=hc, min_row=2, max_row=len(agg) + 1)
+        bar.add_data(data_ref, titles_from_data=True)
+        bar.set_categories(cats_ref)
+        bar.height, bar.width = 9, 16
+        dash.add_chart(bar, f"B{chart_row}")
+
+        if len(agg) >= 2:
+            pie = PieChart()
+            pie.title = f"{metric_label} share by {chart_cat_col}"
+            pie.add_data(data_ref, titles_from_data=True)
+            pie.set_categories(cats_ref)
+            pie.dataLabels = DataLabelList()
+            pie.dataLabels.showPercent = True
+            pie.height, pie.width = 9, 12
+            dash.add_chart(pie, f"J{chart_row}")
+    elif numeric_cols:
+        # no usable low-cardinality text column: chart per-column stats instead
+        hc = helper_col
+        dash.cell(row=1, column=hc, value="column")
+        for j, s in enumerate(("sum", "mean", "max")):
+            dash.cell(row=1, column=hc + 1 + j, value=s)
+        use_cols = numeric_cols[:8]
+        for i, c in enumerate(use_cols, start=2):
+            dash.cell(row=i, column=hc, value=c)
+            col_data = df[c].dropna()
+            dash.cell(row=i, column=hc + 1, value=float(col_data.sum()) if len(col_data) else 0.0)
+            dash.cell(row=i, column=hc + 2, value=float(col_data.mean()) if len(col_data) else 0.0)
+            dash.cell(row=i, column=hc + 3, value=float(col_data.max()) if len(col_data) else 0.0)
+        for j in range(4):
+            dash.column_dimensions[get_column_letter(hc + j)].hidden = True
+        bar = BarChart()
+        bar.type = "col"
+        bar.title = "Numeric column summary"
+        data_ref = Reference(dash, min_col=hc + 1, max_col=hc + 3, min_row=1, max_row=len(use_cols) + 1)
+        cats_ref = Reference(dash, min_col=hc, min_row=2, max_row=len(use_cols) + 1)
+        bar.add_data(data_ref, titles_from_data=True)
+        bar.set_categories(cats_ref)
+        bar.height, bar.width = 9, 18
+        dash.add_chart(bar, f"B{chart_row}")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
     """Serialize a dataset for download (v45) - (bytes, content_type, ext).
 
     csv is written with a BOM so Excel opens it UTF-8-clean; json is the
-    record array; parquet streams the stored file back verbatim.
+    record array; parquet streams the stored file back verbatim; pdf (v115)
+    renders a simple tabular report via reportlab.
     """
     fmt = (fmt or "csv").strip().lower()
     if fmt not in EXPORT_CONTENT_TYPES:
-        raise ValueError(f"unsupported export format {fmt!r} (use csv|xlsx|json|parquet)")
+        raise ValueError(f"unsupported export format {fmt!r} (use csv|xlsx|json|parquet|pdf)")
     path = parquet_path(ds.id)
     if ds.row_count and ds.row_count > MAX_EXPORT_ROWS:
         raise ValueError(f"dataset has {ds.row_count} rows - export cap is {MAX_EXPORT_ROWS}")
@@ -639,8 +921,22 @@ def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
         except FileNotFoundError:
             blob = b""
         return blob, EXPORT_CONTENT_TYPES["parquet"], "parquet"
+    if fmt == "pdf":
+        # pdf renders its own "no rows" page, unlike the other formats'
+        # empty-bytes shortcut below - an empty PDF byte string isn't a PDF
+        return _dataset_pdf_bytes(ds, df), EXPORT_CONTENT_TYPES["pdf"], "pdf"
+    if fmt == "xlsx":
+        # v133: was a bare df.to_excel() dump - no styling, no charts, and
+        # for a zero-row dataset it fell into the empty-bytes shortcut below,
+        # which for xlsx produced a 0-byte file Excel can't even open (the
+        # csv/json empty shortcuts are still valid empty files; xlsx has no
+        # such thing as an "empty but valid" byte string). Now it always
+        # goes through the real workbook builder - a proper file every time,
+        # with a colored Dashboard sheet (KPI tiles + native charts) plus the
+        # full data as a banded, filterable Excel Table.
+        return _dataset_dashboard_xlsx_bytes(ds, df), EXPORT_CONTENT_TYPES["xlsx"], "xlsx"
     if len(df) == 0:
-        empty = {"csv": b"", "xlsx": b"", "json": b"[]"}[fmt]
+        empty = {"csv": b"", "json": b"[]"}[fmt]
         return empty, EXPORT_CONTENT_TYPES[fmt], fmt
     if fmt == "csv":
         return (
@@ -648,13 +944,6 @@ def export_dataset_bytes(ds: Dataset, fmt: str) -> tuple[bytes, str, str]:
             EXPORT_CONTENT_TYPES["csv"],
             "csv",
         )
-    if fmt == "xlsx":
-        import io
-
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine="openpyxl") as writer:  # type: ignore[assignment]
-            df.to_excel(writer, index=False, sheet_name="data")
-        return buf.getvalue(), EXPORT_CONTENT_TYPES["xlsx"], "xlsx"
     return (
         json.dumps(jsonable_rows(df), ensure_ascii=False, default=str).encode("utf-8"),
         EXPORT_CONTENT_TYPES["json"],

@@ -22,6 +22,7 @@ from ..auth import get_optional_user, own_or_404
 from ..db import get_db
 from ..models import SystemDraft
 from ..services.scheduler import resync_report_jobs, resync_workflow_jobs
+from ..services import system_runtime
 from ..services.system_builder import (
     apply_answers,
     build_system,
@@ -211,6 +212,7 @@ async def build_system_draft(draft_id: str, body: BuildRequest | None = None, us
         sys_row.owner_id = draft.owner_id
         db.add(sys_row)
         built = {**built, "system_id": sys_row.id}  # sys_row.id is uuid-generated client-side
+        new_components = []
         for kind, ref in (
             ("workflow", built.get("workflow_id")),
             ("dataset", built.get("dataset_id")),
@@ -220,8 +222,26 @@ async def build_system_draft(draft_id: str, body: BuildRequest | None = None, us
             ("report", built.get("report_id")),
         ):
             if ref:
-                db.add(SystemComponent(system_id=sys_row.id, kind=kind, ref_id=ref))
+                comp = SystemComponent(system_id=sys_row.id, kind=kind, ref_id=ref)
+                db.add(comp)
+                new_components.append(comp)
         messages.append({"role": "system", "kind": "system_created", "ref": sys_row.id, "ts": _ts()})
+        # v113 fix: server-side binds during as_system builds never wrote to
+        # the Operations log - the audit trail silently skipped every
+        # component the Builder itself attached, unlike the interactive
+        # POST /components door which always logs. Flush so components have
+        # ids, then record one component_added op per bind (same shape as
+        # the interactive attach) so the audit trail is complete either way.
+        await db.flush()
+        actor = draft.owner_id or "system"
+        for comp in new_components:
+            op = await system_runtime.record_operation(
+                db, sys_row, "component_added", actor,
+                {"kind": comp.kind, "ref_id": comp.ref_id, "component_id": comp.id,
+                 "via": "ai_system_builder"})
+            await system_runtime._emit_system_event(
+                db, sys_row, "system.component_added",
+                {"operation_id": op.id, "kind": comp.kind, "ref_id": comp.ref_id})
     draft.built_json = built
     draft.messages_json = messages
     await db.commit()

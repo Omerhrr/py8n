@@ -66,9 +66,10 @@ async def register_model(
     reference_stats: dict | None = None,
 ) -> TrainedModel:
     """Create the next version of ``name``; first version auto-activates."""
+    version = await next_version(db, name)
     row = TrainedModel(
         name=name,
-        version=await next_version(db, name),
+        version=version,
         algorithm=algorithm,
         task=task,
         target=target,
@@ -80,10 +81,22 @@ async def register_model(
         row_count=row_count,
         owner_id=owner_id,
     )
-    row.active = True  # first version of a name is active by definition
+    # Bug fix: this used to set `row.active = True` unconditionally for every
+    # registration, ignoring the `activate` argument entirely. Every current
+    # caller happens to pass activate=True so it was never observed, but any
+    # future caller that registers a version WITHOUT activating it (e.g. "train
+    # a candidate model without promoting it yet") would still get an active
+    # row here, and deactivate_others() below would be skipped - leaving TWO
+    # active versions for the same name, breaking the "only one active version
+    # per name" invariant this module's docstring (and model_predict's
+    # resolve_model lookup) depends on. The first version of a name must still
+    # auto-activate (otherwise a name could end up with zero active versions),
+    # so activate OR "this is the first version" decides row.active, and
+    # deactivate_others() only runs when this row actually became active.
+    row.active = bool(activate) or version == 1
     db.add(row)
     await db.flush()
-    if activate:
+    if row.active:
         await deactivate_others(db, name, keep_id=row.id)
     return row
 

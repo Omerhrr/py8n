@@ -33,15 +33,26 @@ class IfConditionNode(BaseNode):
                 "widget": "select",
                 "options": [
                     "equals", "not_equals", "contains", "not_contains",
-                    "greater_than", "less_than", "is_empty", "is_true", "regex",
+                    "greater_than", "less_than", "is_empty", "not_empty", "is_true", "regex",
                 ],
             },
         )
-        right_value: Any = Field(default="", description="Right operand (ignored by is_empty/is_true)")
+        right_value: Any = Field(default="", description="Right operand (ignored by is_empty/not_empty/is_true)")
 
     def _compare(self, left: Any, op: str, right: Any) -> bool:
         if op == "is_empty":
             return left in (None, "", [], {})
+        if op == "not_empty":
+            # Bug fix: FilterNode.ParamsModel lists "not_empty" as a valid
+            # operator AND its own DEFAULT value (data.py) - but this
+            # method, which both If Condition and Filter delegate every
+            # comparison to, never implemented it. Every Filter node left
+            # at its default configuration (i.e. never touched the
+            # operator dropdown) crashed at runtime with
+            # NodeExecutionError: Unknown operator 'not_empty' - not a
+            # composer/LLM issue, a platform-wide one hit by any user who
+            # drags a Filter node onto any canvas and runs it as-is.
+            return left not in (None, "", [], {})
         if op == "is_true":
             return bool(left)
         if op in ("greater_than", "less_than"):

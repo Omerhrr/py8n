@@ -309,7 +309,7 @@ onMounted(async () => {
           >
             <div class="flex items-start gap-3">
               <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl" :style="{ background: `linear-gradient(135deg, ${s.color}, ${s.color}55)` }">
-                <BrainCircuit class="h-5 w-5 text-zinc-950" />
+                <BrainCircuit class="h-5 w-5 text-black" />
               </div>
               <div class="min-w-0 flex-1">
                 <p class="text-sm font-bold leading-tight">{{ s.name }}</p>
@@ -337,7 +337,7 @@ onMounted(async () => {
               <X class="h-4 w-4" />
             </button>
             <div class="flex h-10 w-10 items-center justify-center rounded-xl" :style="{ background: `linear-gradient(135deg, ${detail.color}, ${detail.color}55)` }">
-              <BrainCircuit class="h-5 w-5 text-zinc-950" />
+              <BrainCircuit class="h-5 w-5 text-black" />
             </div>
             <div class="min-w-0 flex-1">
               <h2 class="text-base font-bold">{{ detail.name }}</h2>
