@@ -381,4 +381,4 @@ def test_v92_operator_detail_chains():
 
 
 def test_v92_version():
-    assert settings.version == "1.114.0"
+    assert settings.version == "1.115.0"

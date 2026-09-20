@@ -14,7 +14,9 @@ from __future__ import annotations
 from ._shared import Base, JSONVariant, _now, _uuid
 from .core import User, ApiKey
 from .workflows import Workflow, ExecutionLog, WorkflowVersion, NotificationRule, PackRegistry
-from .resources import Credential, CredentialEvent, EnvVariable, AppSetting, Folder, AgentMemory
+from .resources import (Credential, CredentialEvent, EnvVariable, AppSetting,
+                        Folder, AgentMemory, AgentModule, HarnessSession,
+                        HarnessTurn, HarnessApproval, HarnessPatrol)
 from .datasets import Dataset, DatasetVersion, DatasetContract, IngestionState, DatasetContractRevision
 from .apps import Artifact, TrainedModel, App, Dashboard, AppShareGrant, GrantAuditEvent, DashboardAuditEvent
 from .reports import ScheduledReport, ReportDeliveryEvent, ChainReportSchedule
@@ -38,7 +40,8 @@ __all__ = [
     "EnvVariable",
     "AppSetting",
     "Folder",
-    "AgentMemory",
+    "AgentMemory", "AgentModule",
+    "HarnessSession", "HarnessTurn", "HarnessApproval", "HarnessPatrol",
     "Dataset",
     "DatasetVersion",
     "DatasetContract",

@@ -188,7 +188,13 @@ async def advance_instance(db: AsyncSession, instance_id: str, *, owner_id: str 
         payload={"process_id": p.id, "process_name": p.name,
                  "instance_id": row.id, "ref": row.ref, "title": row.title,
                  "from": current, "to": chosen["to"],
-                 "transition": chosen["name"], "note": (note or "")[:200]},
+                 "transition": chosen["name"], "note": (note or "")[:200],
+                 # v113: the move carries the entity's memory - reactive
+                 # workflows (the ERP's ledger poster, the stock pick
+                 # ledger) read the total / the sku straight off the wire
+                 # instead of guessing from titles (restored after the
+                 # package split dropped it - v115)
+                 "context": dict(new_ctx)},
         correlation_id=row.id)
     journey = await instance_journey(db, row.id)
     out = instance_out(row, definition=definition, journey=journey)
@@ -244,6 +250,24 @@ def _render_journey_template(template: str, fields: dict) -> str:
         return ""
 
 
+def _render_memory(memory, fields: dict) -> dict:
+    """v115: a journey leg's memory STRING values render from the source
+    instance's fields - a leg hands its facts forward ({sku} {unit_cost}
+    {qty} riding the replenishment walk to the vendor's bill). A template
+    naming a key the source does not carry renders empty - the fact does
+    not exist on this walk, and an empty string says so honestly (the
+    books' posters read the empty value and skip the financial pair).
+    Non-string values pass through untouched; literal strings without
+    placeholders format to themselves."""
+    out: dict = {}
+    for k, v in dict(memory or {}).items():
+        if isinstance(v, str) and v:
+            out[k] = _render_journey_template(v, fields)
+        else:
+            out[k] = v
+    return out
+
+
 async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
                         process: BusinessProcess, definition: dict, *,
                         to_state: str, actor: str,
@@ -253,7 +277,8 @@ async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
     Every journey keyed on to_state opens an instance on its target
     machine (resolved by name/id, owner-scoped): the ref/title render
     from the source's fields, the opened context carries the spec's
-    memory plus the journey link (from_process / from_instance /
+    memory (string values rendering from the source's fields, v115) plus
+    the journey link (from_process / from_instance /
     from_ref / from_state), and the leg is on the record BOTH ways -
     business.journey_opened on the source's correlation thread, and an
     honest business.journey_skipped when the target machine does not
@@ -272,8 +297,12 @@ async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
     for j in journeys:
         spec = j["open"]
         entry: dict = {"on_state": to_state, "target_process": spec["process"]}
-        fields = {"ref": row.ref, "title": row.title, "state": to_state,
-                  "process": process.name}
+        # v115: the source's own memory joins the template fields - a leg
+        # can read the facts its source carries ({cost} off a seeded row).
+        # The canonical keys always win over whatever the memory holds.
+        fields = dict(getattr(row, "context", None) or {})
+        fields.update({"ref": row.ref, "title": row.title,
+                       "state": to_state, "process": process.name})
         ref = _render_journey_template(spec.get("ref_template"), fields) or row.ref
         title = _render_journey_template(spec.get("title_template"), fields) or row.title
         entry["ref"] = ref
@@ -315,7 +344,7 @@ async def fire_journeys(db: AsyncSession, row: BusinessProcessInstance,
                 correlation_id=row.id)
             out.append(entry)
             continue
-        context = dict(spec.get("memory") or {})
+        context = _render_memory(spec.get("memory"), fields)
         context["journey"] = {"from_process": process.name,
                               "from_instance": row.id,
                               "from_ref": row.ref,

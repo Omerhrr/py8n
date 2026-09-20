@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -115,3 +115,195 @@ class AgentMemory(Base):
     messages: Mapped[list] = mapped_column(JSONVariant, default=list)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
 
+
+class AgentModule(Base):
+    """A first-class agent module (v108).
+
+    Until now an agent only existed INSIDE a workflow graph (the ai_agent
+    node) and the /agents console was a read-only inventory of those nodes.
+    A module is the agent as its own resource: a system prompt, a provider
+    (sandbox bridge or an OpenAI-compatible credential), a tool kit (the
+    SAME ToolSpec shape the node speaks) and session memory - runnable
+    directly over the API without building a graph first.
+
+    The runtime reuses the node's proven machinery (wire protocol, tool
+    execution, sandbox, read-only dataset SQL); the module only owns the
+    persistent identity and its configuration.
+    """
+
+    __tablename__ = "agent_modules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    system_prompt: Mapped[str] = mapped_column(
+        Text, default="You are a precise operations agent. Use the tools when they help, then answer.",
+        nullable=False)
+    # sandbox_bridge | openai_compatible - same transports the node speaks
+    provider: Mapped[str] = mapped_column(String(30), default="sandbox_bridge", nullable=False)
+    model: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.4, nullable=False)
+    max_iterations: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    # none | buffer - the node's session-memory modes
+    memory: Mapped[str] = mapped_column(String(10), default="none", nullable=False)
+    max_history_turns: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    # list of ToolSpec-shaped dicts (kind/name/description/...)
+    tools: Mapped[list] = mapped_column(JSONVariant, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessSession(Base):
+    """A harness session (v109) - the system's own agentic runtime.
+
+    Where an agent module (v108) speaks the ENGINE's toolchest
+    (workflow / http / knowledge / dataset / code), a harness session
+    speaks PY8N ITSELF: the estate overview, the machines and their
+    instances, the escalation door, the chain map, the data platform -
+    with harness-grade discipline the node loop does not have: guard
+    rails (repeat / budget / wall-clock), fail-closed approvals on
+    every sensitive move, and a persistent turn state machine that can
+    pause for a human decision and resume.
+
+    The brain is the SAME transport the node and the modules speak
+    (sandbox_bridge or an OpenAI-compatible credential) - zero new LLM
+    machinery; the harness owns the discipline, not the wire.
+    """
+
+    __tablename__ = "harness_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    system_prompt: Mapped[str] = mapped_column(
+        Text,
+        default="You are the operations harness. You can read the whole estate "
+                "and you may move the business, but every sensitive move waits "
+                "for a human decision first. Answer with what the tools returned.",
+        nullable=False)
+    # the SAME providers the ai_agent node and the modules speak
+    provider: Mapped[str] = mapped_column(String(30), default="sandbox_bridge", nullable=False)
+    model: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    credential_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    temperature: Mapped[float] = mapped_column(Float, default=0.4, nullable=False)
+    # none | buffer - completed turns are injected as history on the next turn
+    memory: Mapped[str] = mapped_column(String(10), default="buffer", nullable=False)
+    max_history_turns: Mapped[int] = mapped_column(Integer, default=5, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessTurn(Base):
+    """One harness turn - the persistent state machine of one request.
+
+    status walks: running -> (waiting_approval ->)* completed
+                                     |-> exhausted (budget) | failed | refused
+    ``wire`` holds the EXACT chat message list at the pause moment, so an
+    approval decision can resume the loop where it stopped - even after a
+    server restart. ``trace`` holds the loop frames (iteration / reply /
+    tool_call / tool_result / guard / approval_requested / answer) for the
+    console and the API transcript.
+    """
+
+    __tablename__ = "harness_turns"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_message: Mapped[str] = mapped_column(Text, nullable=False)
+    # running | waiting_approval | completed | exhausted | failed | refused
+    status: Mapped[str] = mapped_column(String(20), default="running", nullable=False, index=True)
+    reply: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    iterations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    guard_blocks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    tool_calls: Mapped[list] = mapped_column(JSONVariant, default=list)
+    trace: Mapped[list] = mapped_column(JSONVariant, default=list)
+    # resume state: the message list at the approval pause
+    wire: Mapped[list] = mapped_column(JSONVariant, default=list)
+    error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # v111: set when the SYSTEM fired this round (a patrol), NULL for a
+    # human-initiated turn - the patrol receipt points here
+    patrol_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class HarnessApproval(Base):
+    """A fail-closed approval gate (v109).
+
+    When the model calls a SENSITIVE tool (advance / ack / start - the
+    moves that change the estate), the turn pauses and one of these rows
+    is the decision slip. Silence expires (fail-closed: ttl > 0 turns a
+    pending slip into ``expired`` and the turn refuses); only an explicit
+    approve runs the tool - at decision time, so the move happens when the
+    human said yes, not when the model asked.
+    """
+
+    __tablename__ = "harness_approvals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    turn_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    tool: Mapped[str] = mapped_column(String(80), nullable=False)
+    arguments: Mapped[dict] = mapped_column(JSONVariant, default=dict)
+    # pending | approved | rejected | expired
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # v110: the receipt - WHO decided (user id; NULL = system/expired or an
+    # unauthenticated door on a trust-the-wire install)
+    decided_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
+
+
+class HarnessPatrol(Base):
+    """A harness patrol (v111) - the harness scheduling its OWN rounds.
+
+    Until now the harness only ever answered: a human typed, the loop ran.
+    A patrol flips that - the OWNER writes a mission once ("check the
+    attention feed every morning", "walk anything stuck on the front
+    desk"), binds it to a session and a rhythm (interval_seconds), and
+    the SYSTEM fires the rounds itself. Every round is a REAL harness
+    turn through the SAME start_turn path - the same loop, the same
+    guard rails, the same fail-closed gate - so a patrol that wants to
+    move the business still parks a slip for a human. Nothing about the
+    discipline changes when nobody is watching; that is the point.
+
+    The row is the receipt board: run_count, last_run_at, last_status
+    (the turn's terminal state), last_run_turn_id (the full trace one
+    hop away), last_error. The receipt is stamped BEFORE the round runs
+    (the rhythm stays honest even across a crash) and the terminal
+    status lands after.
+    """
+
+    __tablename__ = "harness_patrols"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    # the message the patrol sends on every round - the mission
+    mission: Mapped[str] = mapped_column(Text, nullable=False)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=3600, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # the receipt board
+    run_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # completed | exhausted | failed | refused | waiting_approval
+    last_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_run_turn_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_error: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    # v112 - THE DISPATCH: the round's outcome walks OUT of py8n over the
+    # report envelope's own email discipline. Empty recipients = quiet.
+    dispatch_to: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    last_dispatch_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # ok | error | skipped (None = never dispatched)
+    last_dispatch_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_dispatch_detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)

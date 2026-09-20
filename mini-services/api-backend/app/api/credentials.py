@@ -182,9 +182,11 @@ async def update_credential(
         raise HTTPException(status_code=404, detail="Credential not found")
     own_or_404(cred.owner_id, user)  # v37
 
-    # v108: only decrypt when a data merge actually needs the old payload -
-    # a rename-only update must succeed even on an undecryptable credential.
-    data = _safe_decrypt(cred) if body.data is not None else {}
+    # v108: the payload decrypts best-effort - a rename-only update must
+    # succeed even on an undecryptable credential (the {} degrade), but a
+    # HEALTHY credential's rename keeps speaking its stored hint (the
+    # response's masked hint follows the secret the row still holds).
+    data = _safe_decrypt(cred)
     if body.name is not None:
         name = body.name.strip()
         if not name:

@@ -507,14 +507,19 @@ def test_v81_solution_install_binds_a_running_system():
             detail = res.json()
             assert detail["source_solution_slug"] == "support-line-system"
 
-            # the install is on the record: an operation + the system.installed event
+            # the install is on the record: the aggregate "installed" op +
+            # the system.installed event, and (since the v121 fix) one
+            # "component_added" op per attached object - the Operations tab
+            # can show WHAT got attached, not just that something did
             res = await client.get(f"/systems/{sid}/operations", headers=h)
             ops = res.json()["operations"]
-            assert ops and ops[-1]["verb"] == "installed"
-            assert ops[-1]["actor"] == user["id"]
-            assert ops[-1]["detail"]["solution"] == "support-line-system"
+            installed = next(op for op in ops if op["verb"] == "installed")
+            assert installed["actor"] == user["id"]
+            assert installed["detail"]["solution"] == "support-line-system"
+            assert any(op["verb"] == "component_added" for op in ops)
             res = await client.get(f"/systems/{sid}/events", headers=h)
             assert any(e["type"] == "system.installed" for e in res.json()["events"])
+            assert any(e["type"] == "system.component_added" for e in res.json()["events"])
 
             # the pack pipeline honesty: workflows land INACTIVE, the gate open
             res = await client.get(f"/systems/{sid}/state", headers=h)
@@ -670,4 +675,4 @@ def test_v81_metrics_and_events_view():
 def test_v81_version():
     from app.config import settings
 
-    assert settings.version == "1.114.0"
+    assert settings.version == "1.115.0"

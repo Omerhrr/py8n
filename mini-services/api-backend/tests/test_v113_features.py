@@ -148,7 +148,7 @@ def test_v113_erp_installs_the_backbone():
             assert built["system"]["lifecycle"] == "running"
             assert built["system"]["components"]["dataset"] == 7
             assert built["system"]["components"]["process"] == 4
-            assert built["system"]["components"]["workflow"] == 7  # 3 reactive + 3 onboarding loops + the clerk's handler
+            assert built["system"]["components"]["workflow"] == 8  # 4 reactive + 3 onboarding loops + the clerk's handler
             assert built["system"]["components"]["voice_agent"] == 1
             assert built["system"]["components"]["meeting"] == 1
             assert built["system"]["components"]["queue"] == 1
@@ -175,6 +175,7 @@ def test_v113_erp_installs_the_backbone():
             assert all(w["active"] is False for w in built["workflows"])
             wf_names = {w["name"] for w in built["workflows"]}
             assert {"Order ledger poster", "Stock pick ledger", "Payroll poster",
+                    "Purchase ledger poster",
                     "Sales order lifecycle onboarding",
                     "Inventory replenishment onboarding",
                     "Payroll lifecycle onboarding"} <= wf_names
@@ -185,6 +186,7 @@ def test_v113_erp_installs_the_backbone():
             assert reactive["Order ledger poster"] == "business.state_changed"
             assert reactive["Stock pick ledger"] == "business.state_changed"
             assert reactive["Payroll poster"] == "business.state_changed"
+            assert reactive["Purchase ledger poster"] == "business.state_changed"
             assert reactive["Sales order lifecycle onboarding"] == ""
             assert reactive["Inventory replenishment onboarding"] == ""
             assert reactive["Payroll lifecycle onboarding"] == ""
@@ -454,4 +456,4 @@ def test_v113_the_books_post_themselves():
 # ---------------------------------------------------------------------------
 
 def test_v113_version_pin():
-    assert settings.version == "1.114.0"
+    assert settings.version == "1.115.0"

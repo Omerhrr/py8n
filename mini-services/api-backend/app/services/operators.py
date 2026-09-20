@@ -87,7 +87,8 @@ _ERP_OPERATOR = {
         "Stock movements + GL entries datasets - the ERP's own ledgers",
         "Order ledger poster: every order move posts BALANCED journal lines - receivable AND revenue on the ship, cash AND the clearing on the payment (reactive, double-entry)",
         "Payroll poster: a paid payroll run posts salary expense debit + cash credit (reactive, balanced)",
-        "Stock pick ledger: every pick lands a movement row (reactive)",
+        "Purchase ledger poster: the Supply chain's vendor bill posts Inventory / Accounts payable on the match and Accounts payable / Cash on the payment - the company's spending hits the books (reactive, balanced, v115)",
+        "Stock pick ledger: every pick lands a movement row and a restock lands the goods coming in (reactive)",
         "ORDER-TO-CASH journey: a shipped order opens the Finance operator's invoice by itself",
         "REPLENISHMENT journey: a reorder opens the Procurement operator's purchase order",
         "ERP clerk grounded in the ERP policy + the ERP review room",
@@ -96,20 +97,27 @@ _ERP_OPERATOR = {
     "datasets": [
         {"name": "Products",
          "description": "The catalog and the stock room - one row per SKU; the "
-                        "replenishment machine watches each one from install",
-         "columns": ["sku", "name", "price", "stock", "reorder_point",
-                     "stock_status"],
+                        "replenishment machine watches each one from install, "
+                        "and cost + reorder_qty are what the buy side posts "
+                        "from (the journey hands them to the vendor's bill)",
+         "columns": ["sku", "name", "price", "cost", "stock", "reorder_point",
+                     "reorder_qty", "stock_status"],
          "rows": [
              {"sku": "SKU-1001", "name": "Steel shelf", "price": "120.00",
-              "stock": "42", "reorder_point": "10", "stock_status": "healthy"},
+              "cost": "72.00", "stock": "42", "reorder_point": "10",
+              "reorder_qty": "10", "stock_status": "healthy"},
              {"sku": "SKU-1002", "name": "Pallet jack", "price": "480.00",
-              "stock": "7", "reorder_point": "5", "stock_status": "healthy"},
+              "cost": "288.00", "stock": "7", "reorder_point": "5",
+              "reorder_qty": "5", "stock_status": "healthy"},
              {"sku": "SKU-1003", "name": "Safety gloves", "price": "9.50",
-              "stock": "14", "reorder_point": "20", "stock_status": "low"},
+              "cost": "5.10", "stock": "14", "reorder_point": "20",
+              "reorder_qty": "30", "stock_status": "low"},
              {"sku": "SKU-1004", "name": "LED work lamp", "price": "34.00",
-              "stock": "61", "reorder_point": "15", "stock_status": "healthy"},
+              "cost": "19.00", "stock": "61", "reorder_point": "15",
+              "reorder_qty": "20", "stock_status": "healthy"},
              {"sku": "SKU-1005", "name": "Cordless drill", "price": "89.00",
-              "stock": "3", "reorder_point": "8", "stock_status": "low"},
+              "cost": "51.00", "stock": "3", "reorder_point": "8",
+              "reorder_qty": "12", "stock_status": "low"},
          ]},
         {"name": "Sales orders",
          "description": "The order desk - one row per order; the onboarding loop "
@@ -139,9 +147,11 @@ _ERP_OPERATOR = {
          "rows": []},
         {"name": "GL entries",
          "description": "The books - BALANCED journal lines posted by the "
-                        "reactive posters (orders, stock, payroll); the "
-                        "month-end close reconciles from here and the trial "
-                        "balance reads from here",
+                        "reactive posters (orders, stock, payroll, and since "
+                        "v115 the PURCHASES - the vendor bill the Supply chain "
+                        "opened posts its own pairs); the month-end close "
+                        "reconciles from here and the trial balance reads "
+                        "from here",
          "columns": ["ref", "account", "debit", "credit", "memo", "at"],
          "rows": []},
         {"name": "Employees",
@@ -182,6 +192,8 @@ _ERP_OPERATOR = {
               "answer": "GL entries carries BALANCED journal lines - the posters pair every debit with a credit (receivable and revenue on the ship, cash and the clearing on the payment) - and Stock movements one row per pick; nothing is typed twice."},
              {"question": "How does payroll run",
               "answer": "Run it on the People tab: a payroll run row opens a tracked instance on the Payroll lifecycle machine - calculate, approve, then pay - and paying posts the balanced pair to the books (salary expense debited, cash credited)."},
+             {"question": "When do purchases hit the books",
+              "answer": "The buy side posts itself since v115: a stock dip walks the Supply chain and the vendor bill it opens carries cost*qty in the journey's own memory - the bill landing on matched debits Inventory and credits Accounts payable, paying it debits Accounts payable and credits Cash. The restock lands the goods on the Stock movements ledger. Receivables stay the order poster's side; the books balance either way."},
          ]},
     ],
     "workflows": [
@@ -234,8 +246,11 @@ _ERP_OPERATOR = {
         {"name": "Stock pick ledger",
          "description": "business.state_changed -> shape -> Stock movements: an "
                         "order landing on 'picked' lands its movement row (delta "
-                        "= -qty, the sku and qty riding the event's context) - "
-                        "the stock room's truth appends itself.",
+                        "= -qty, the sku and qty riding the event's context) and "
+                        "a replenishment landing on 'replenished' lands the "
+                        "restock (+reorder_qty - the goods the Supply chain "
+                        "walked in are on the shelf, v115). Stock on-hand truth "
+                        "is seed + the deltas, never a column typed twice.",
          "trigger": {"type": "event_trigger",
                      "params": {"event_type": "business.state_changed"}},
          "steps": [
@@ -244,8 +259,9 @@ _ERP_OPERATOR = {
                   "r = df.iloc[0] if len(df) else {}\n"
                   "pl = r.get('payload') or {}\n"
                   "rows = []\n"
-                  "if ((pl.get('process_name') or '') == 'Sales order lifecycle'\n"
-                  "        and str(pl.get('to') or '') == 'picked'):\n"
+                  "pname = pl.get('process_name') or ''\n"
+                  "if pname == 'Sales order lifecycle' \\\n"
+                  "        and str(pl.get('to') or '') == 'picked':\n"
                   "    ctx = pl.get('context') or {}\n"
                   "    try:\n"
                   "        delta = -abs(int(float(ctx.get('qty') or 0)))\n"
@@ -253,6 +269,16 @@ _ERP_OPERATOR = {
                   "        delta = 0\n"
                   "    rows = [{'sku': str(ctx.get('sku') or ''), 'delta': str(delta), "
                   "'reason': 'picked for ' + str(pl.get('ref') or ''), "
+                  "'at': r.get('triggered_at', '')}]\n"
+                  "elif pname == 'Inventory replenishment' \\\n"
+                  "        and str(pl.get('to') or '') == 'replenished':\n"
+                  "    ctx = pl.get('context') or {}\n"
+                  "    try:\n"
+                  "        delta = abs(int(float(ctx.get('reorder_qty') or 0)))\n"
+                  "    except (TypeError, ValueError):\n"
+                  "        delta = 0\n"
+                  "    rows = [{'sku': str(ctx.get('sku') or ''), 'delta': str(delta), "
+                  "'reason': 'replenished ' + str(pl.get('ref') or ''), "
                   "'at': r.get('triggered_at', '')}]\n"
                   "result = rows")}},
              {"type": "dataset_write", "name": "Land the movement",
@@ -289,6 +315,60 @@ _ERP_OPERATOR = {
                   "'at': r.get('triggered_at', '')}]\n"
                   "result = rows")}},
              {"type": "dataset_write", "name": "Post the payroll",
+              "params": {"dataset": "GL entries", "mode": "append"}},
+         ]},
+        {"name": "Purchase ledger poster",
+         "description": "business.state_changed -> shape -> GL entries: the "
+                        "vendor bill the Supply chain opened (via='delivered "
+                        "journey', the replenishment walk's own tail) posts "
+                        "its BALANCED pairs - landing on 'matched' debits "
+                        "Inventory AND credits Accounts payable (the goods "
+                        "are in, the liability recognized), landing on 'paid' "
+                        "debits Accounts payable AND credits Cash (the bill "
+                        "settled) - the bill's cost*qty riding the journey's "
+                        "own memory. Moves the books cannot value, and every "
+                        "bill that is NOT the supply path (receivables are "
+                        "the order poster's side), skip honestly. (v115: the "
+                        "company's SPENDING finally hits the books.)",
+         "trigger": {"type": "event_trigger",
+                     "params": {"event_type": "business.state_changed"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the purchase pair",
+              "params": {"code": (
+                  "r = df.iloc[0] if len(df) else {}\n"
+                  "pl = r.get('payload') or {}\n"
+                  "rows = []\n"
+                  "if (pl.get('process_name') or '') == 'Invoice lifecycle':\n"
+                  "    ctx = pl.get('context') or {}\n"
+                  "    if (ctx.get('via') or '') == 'delivered journey':\n"
+                  "        try:\n"
+                  "            amount = round(abs(float(ctx.get('unit_cost') or 0))\n"
+                  "                           * abs(float(ctx.get('qty') or 0)), 2)\n"
+                  "        except (TypeError, ValueError):\n"
+                  "            amount = 0.0\n"
+                  "        ref = str(pl.get('ref') or '')\n"
+                  "        to = str(pl.get('to') or '')\n"
+                  "        ts = r.get('triggered_at', '')\n"
+                  "        if to == 'matched' and amount > 0:\n"
+                  "            rows = [{'ref': ref, 'account': 'Inventory', "
+                  "'debit': str(amount), 'credit': '', "
+                  "'memo': 'goods received + matched for ' + ref, 'at': ts},\n"
+                  "                    {'ref': ref, 'account': 'Accounts payable', "
+                  "'debit': '', 'credit': str(amount), "
+                  "'memo': 'bill owed on ' + ref, 'at': ts}]\n"
+                  "        elif to == 'paid' and amount > 0:\n"
+                  "            rows = [{'ref': ref, 'account': 'Accounts payable', "
+                  "'debit': str(amount), 'credit': '', "
+                  "'memo': 'bill paid on ' + ref, 'at': ts},\n"
+                  "                    {'ref': ref, 'account': 'Cash', "
+                  "'debit': '', 'credit': str(amount), "
+                  "'memo': 'bill paid on ' + ref, 'at': ts}]\n"
+                  "        else:\n"
+                  "            rows = [{'ref': ref, 'account': 'Vendor desk', "
+                  "'debit': '', 'credit': '', "
+                  "'memo': ref + ' moved to ' + to, 'at': ts}]\n"
+                  "result = rows")}},
+             {"type": "dataset_write", "name": "Post the purchase",
               "params": {"dataset": "GL entries", "mode": "append"}},
          ]},
     ],
@@ -439,11 +519,15 @@ _ERP_OPERATOR = {
         "The workflows install INACTIVE - boot the system (activate_workflows) "
         "to open the reactive path; the onboarding loops track every new row "
         "the order desk or an import lands in the datasets.",
-        "The books are DOUBLE-ENTRY since v114: the posters pair every debit "
+        "The books are DOUBLE-ENTRY since v114 and speak BOTH SIDES since "
+        "v115: the posters pair every debit "
         "with a credit (receivable + revenue on the ship, cash + the clearing "
-        "on the payment, salary expense + cash on payroll), so GET "
+        "on the payment, salary expense + cash on payroll, inventory + "
+        "accounts payable on the vendor bill's match, accounts payable + "
+        "cash on its payment), so GET "
         "/erp/trial-balance over the GL entries dataset balances and speaks - "
-        "revenue, expenses, net income, the cash position.",
+        "revenue, expenses, net income, the cash position, and now the "
+        "liabilities too.",
         "The journeys resolve by name at fire time: install the ERP alone and "
         "a shipped order names the missing invoice machine in an honest skip; "
         "install Finance (and Procurement for the buy side) and the handoffs "
@@ -546,7 +630,10 @@ _JOURNEYS: dict[str, list[dict]] = {
                   "title_template": "Delivery - {title}",
                   "ref_template": "{ref}",
                   "memory": {"via": "ordered journey",
-                             "source_operator": "procurement"},
+                             "source_operator": "procurement",
+                             "sku": "{sku}",
+                             "unit_cost": "{unit_cost}",
+                             "qty": "{qty}"},
                   "due_in_seconds": 2 * 24 * 3600}},
     ],
     "Delivery pipeline": [
@@ -555,7 +642,10 @@ _JOURNEYS: dict[str, list[dict]] = {
                   "title_template": "Bill - {title}",
                   "ref_template": "{ref}",
                   "memory": {"via": "delivered journey",
-                             "source_operator": "logistics"},
+                             "source_operator": "logistics",
+                             "sku": "{sku}",
+                             "unit_cost": "{unit_cost}",
+                             "qty": "{qty}"},
                   "due_in_seconds": 5 * 24 * 3600}},
     ],
     "Appointment journey": [
@@ -588,7 +678,10 @@ _JOURNEYS: dict[str, list[dict]] = {
                   "title_template": "Reorder - {title}",
                   "ref_template": "{ref}",
                   "memory": {"via": "reorder journey",
-                             "source_operator": "erp"},
+                             "source_operator": "erp",
+                             "sku": "{sku}",
+                             "unit_cost": "{cost}",
+                             "qty": "{reorder_qty}"},
                   "due_in_seconds": 2 * 24 * 3600}},
     ],
 }
@@ -674,16 +767,7 @@ def _onboarding_loop(pspec: dict) -> dict | None:
     }
 
 
-<<<<<<< HEAD
-OPERATORS: list[dict] = list(_CATALOG)
-=======
-OPERATORS: list[dict] = [
-    _MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR,
-    _SUPPORT_OPERATOR, _OPERATIONS_OPERATOR, _HR_OPERATOR,
-    _FINANCE_OPERATOR, _PROCUREMENT_OPERATOR, _LOGISTICS_OPERATOR,
-    _ERP_OPERATOR,  # v113: the backbone that composes the departments
-]
->>>>>>> babe6a0f5b81da15c6443a829095df1fe0ed9da1
+OPERATORS: list[dict] = [*list(_CATALOG), _ERP_OPERATOR]  # the nine departments + v113's backbone
 OPERATORS_BY_SLUG = {op["slug"]: op for op in OPERATORS}
 
 # v88: BROADENING THE DEPARTMENT ONBOARDING LOOPS - every machine gets its

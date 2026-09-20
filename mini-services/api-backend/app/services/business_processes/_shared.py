@@ -51,6 +51,9 @@ CHAIN_NAMES: dict[tuple[str, str], str] = {
     ("Lead pipeline", "won"): "Revenue chain",
     ("Purchase lifecycle", "ordered"): "Supply chain",
     ("Appointment journey", "billed"): "Care chain",
+    # v113: the ERP core's walks - the backbone composing the company
+    ("Sales order lifecycle", "shipped"): "Order to Cash chain",
+    ("Inventory replenishment", "reorder_placed"): "Replenishment chain",
 }
 
 

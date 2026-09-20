@@ -247,7 +247,7 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.114.0", version
+            assert version == "1.115.0", version
 
             systems = company_install_check(c)
             print(f"[1] THE COMPANY INSTALLS OK - four operators landed "

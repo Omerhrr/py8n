@@ -821,8 +821,8 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.114.0", version
-            print(f"=== AUDIT E2E v107 on {API} (server 1.114.0, sink :{sink.port}) ===")
+            assert version == "1.115.0", version
+            print(f"=== AUDIT E2E v107 on {API} (server 1.115.0, sink :{sink.port}) ===")
 
             h = phase_identity(c)
             r = c.post("/systems", headers=h["oh"],

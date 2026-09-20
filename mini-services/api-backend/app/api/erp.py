@@ -6,10 +6,15 @@ reads:
 
 * the TRIAL BALANCE - one row per account with its total debits, total
   credits and its balance (debit-normal for assets and expenses,
-  credit-normal for the rest), plus the grand totals and the ``balanced``
-  flag that proves the posters kept their side of the bargain;
+  credit-normal for liabilities and the rest), plus the grand totals and
+  the ``balanced`` flag that proves the posters kept their side of the
+  bargain;
 * the INCOME summary - revenue accounts vs expense accounts = the net
   income the books currently speak.
+
+v115: the PURCHASE side joined the ledger, so the kinds map carries
+Inventory (asset) and Accounts payable (liability) - the trial balance
+now shows what the company OWES, not just what it owns and earned.
 
 The dataset is the caller's to name: the console passes the GL entries
 id it already holds, an agent or a dashboard names it (id or
@@ -34,9 +39,12 @@ router = APIRouter(prefix="/erp", tags=["erp"])
 _ACCOUNT_KINDS: dict[str, str] = {
     "accounts receivable": "asset",
     "cash": "asset",
+    "inventory": "asset",
+    "accounts payable": "liability",
     "revenue": "revenue",
     "salary expense": "expense",
     "order desk": "memo",
+    "vendor desk": "memo",
 }
 _DEBIT_NORMAL = {"asset", "expense"}
 
