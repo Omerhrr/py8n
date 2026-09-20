@@ -4,7 +4,7 @@ import {
   PanelLeftClose, PanelLeftOpen, X, KeyRound, Search, Variable, Database, Image as ImageIcon,
   LayoutGrid, Gauge, FileText, Bot, LogOut, KeySquare, CloudDownload, BellRing, Network,
   FileBarChart, BookOpen, Radio, Wand2, Store, Boxes, Trash2, Unlink, BrainCircuit,
-  Globe, Rocket, MessagesSquare, Webhook, Video, Zap, Sparkles as ComposerIcon, GitBranch,
+  Globe, Rocket, MessagesSquare, Webhook, Video, Zap, Sparkles as ComposerIcon, GitBranch, Gavel, Factory,
 } from 'lucide-vue-next'
 import { useSidebar } from '~/composables/useSidebar'
 import { usePalette } from '~/composables/usePalette'
@@ -48,6 +48,8 @@ const nav = [
   { to: '/meetings', label: 'Meetings', icon: Video, match: ['/meetings'] },  // v79 the browser meeting client - join from the app
   { to: '/events', label: 'Events', icon: Zap, match: ['/events'] },  // v80 the real-time event system - live tail
   { to: '/processes', label: 'Processes', icon: GitBranch, match: ['/processes'] },  // v84 business state machines - long-running autonomy
+  { to: '/harness', label: 'Harness', icon: Gavel, match: ['/harness'] },  // v109 the system's own agentic runtime - reads the estate, moves it on a human's word
+  { to: '/erp', label: 'ERP', icon: Factory, match: ['/erp'] },  // v113 the company backbone - order desk, stock room, books
   { to: '/documents', label: 'Documents', icon: FileText, match: ['/documents'] },
   { to: '/apps', label: 'Apps', icon: LayoutGrid, match: ['/apps'] },
   { to: '/dashboards', label: 'Dashboards', icon: Gauge, match: ['/dashboards'] },
@@ -214,7 +216,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         >⌘K</kbd>
       </button>
       <div class="flex items-center justify-between gap-2 text-[10px] text-zinc-600" :class="collapsed && 'lg:justify-center'">
-        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.107 · 68 node types</span>
+        <span class="truncate" :class="collapsed && 'lg:hidden'">v1.114 · 68 node types</span>
       </div>
     </div>
   </aside>

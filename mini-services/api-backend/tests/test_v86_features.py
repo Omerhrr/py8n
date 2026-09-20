@@ -97,7 +97,8 @@ async def _run_to_end(client: httpx.AsyncClient, h: dict, wf_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 1. the shelf: nine operators, each declaring its topology honestly
+# 1. the shelf: ten operators since v113 (the ERP core joined), each
+#    declaring its topology honestly
 # ---------------------------------------------------------------------------
 
 def test_v86_catalog_shows_nine_operators():
@@ -109,10 +110,10 @@ def test_v86_catalog_shows_nine_operators():
             res = await client.get("/operators", headers=h)
             assert res.status_code == 200, res.text
             ops = {o["slug"]: o for o in res.json()["operators"]}
-            assert len(ops) == 9
+            assert len(ops) == 10
             assert {"support-operator", "operations-operator", "hr-operator",
                     "finance-operator", "procurement-operator",
-                    "logistics-operator"} <= set(ops)
+                    "logistics-operator", "erp-operator"} <= set(ops)
 
             # the topology counts are the truth of what an install builds
             assert ops["support-operator"]["topology"]["processes"] == 1
@@ -456,4 +457,4 @@ def test_v86_scheduler_door_escalates_the_new_machines():
 # ---------------------------------------------------------------------------
 
 def test_v86_version_pin():
-    assert settings.version == "1.107.0"
+    assert settings.version == "1.114.0"

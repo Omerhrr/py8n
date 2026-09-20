@@ -71,6 +71,10 @@ function kindClass(kind: string) {
 
 const agents = ref<AgentSummary[]>([])
 const loading = ref(true)
+// v108: two consoles - the graph inventory (agents living inside workflows)
+// and the modules workspace (first-class agents with their own prompt,
+// tools and sessions)
+const tab = ref<'graph' | 'modules'>('graph')
 const selected = ref<AgentSummary | null>(null)
 const sessionId = ref('playground')
 const draft = ref('')
@@ -232,13 +236,26 @@ onMounted(() => loadAgents(false))
           </div>
         </div>
         <div class="flex items-center gap-2 text-[11px] text-zinc-500">
+          <div class="flex rounded-lg border border-zinc-800 bg-zinc-900 p-0.5">
+            <button
+              class="rounded-md px-2.5 py-1 text-[11px] font-semibold transition"
+              :class="tab === 'graph' ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-500 hover:text-zinc-300'"
+              @click="tab = 'graph'"
+            >Graph agents</button>
+            <button
+              class="rounded-md px-2.5 py-1 text-[11px] font-semibold transition"
+              :class="tab === 'modules' ? 'bg-violet-500/20 text-violet-300' : 'text-zinc-500 hover:text-zinc-300'"
+              @click="tab = 'modules'"
+            >Modules</button>
+          </div>
           <Wrench class="h-3.5 w-3.5" />
           tool calls this session: <span class="font-mono text-zinc-300">{{ toolChipTotal }}</span>
         </div>
       </div>
     </header>
 
-    <main class="mx-auto grid w-full max-w-7xl flex-1 grid-cols-1 gap-4 overflow-hidden px-4 py-4 sm:px-6 lg:grid-cols-[20rem_1fr]">
+    <main class="mx-auto w-full max-w-7xl flex-1 overflow-hidden px-4 py-4 sm:px-6">
+      <div v-show="tab === 'graph'" class="grid h-full grid-cols-1 gap-4 lg:grid-cols-[20rem_1fr]">
       <!-- agent list -->
       <aside class="flex min-h-0 flex-col gap-2 overflow-y-auto pr-1">
         <div v-if="loading" class="flex items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-sm text-zinc-500">
@@ -458,6 +475,10 @@ onMounted(() => loadAgents(false))
           <Loader2 class="h-5 w-5 animate-spin text-zinc-600" />
         </div>
       </section>
+      </div>
+      <div v-show="tab === 'modules'" class="h-full">
+        <AgentModules />
+      </div>
     </main>
   </div>
 </template>

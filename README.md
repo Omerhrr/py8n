@@ -53,6 +53,7 @@ The full arc, in order:
 | Workflows | 68 node types, generated config forms, expressions, sandboxed Python, error workflows, pinned test outputs |
 | Datasets | Parquet-backed tables, contracts + revisions, profiling, freshness/volume/quality health scores |
 | Business machines | State machines with SLAs (`due_at`), transition audit logs, overdue-attention feed, ack/snooze/reschedule |
+| The Harness | The system's own agentic runtime: a 14-tool chest that reads, moves AND builds the estate (the composer's real build path + the operator shelf behind the gate), guard rails (repeat/budget/clock + preflight), fail-closed human approvals with decided-by receipts - and patrols that fire their own rounds AND write home: the dispatch mails every round's outcome (or its refusal) to the humans over the report envelope's own SMTP path, failures as receipts never wedges |
 | Escalations | Per-machine policies (channel + repeat), knock or digest modes, on-call rotation, real email/SMS/Slack delivery |
 | Systems | The operating unit: components, lifecycle gate (start/pause/stop), operations log, events, roles |
 | Operators & marketplace | Pre-wired business operators, marketplace solutions that install as systems, chain views with live counts |

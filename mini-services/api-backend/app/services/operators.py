@@ -50,6 +50,420 @@ class OperatorError(ValueError):
 
 
 # ---------------------------------------------------------------------------
+# v113: the ERP CORE - the tenth operator, the backbone that composes the
+# departments into a COMPANY. The shelf already hires departments (sales,
+# finance, procurement, logistics); what it lacked is the order desk, the
+# stock room and the books that tie them together. This operator ships the
+# classic ERP spine as native primitives:
+#
+#   ORDER-TO-CASH:  Sales order lifecycle --shipped--> Invoice lifecycle
+#     (the Finance operator's machine opens the receivable by itself)
+#   REPLENISHMENT:  Inventory replenishment --reorder_placed--> Purchase
+#     lifecycle --ordered--> Delivery pipeline --delivered--> Invoice
+#     (a stock dip walks three departments to the vendor's bill)
+#   THE BOOKS:      every order move posts to GL entries; every pick lands
+#     a stock movement - the ledger is a WORKFLOW, not a report
+#
+# The journeys resolve by name at fire time, so the ERP installs standalone
+# (the legs skip honestly naming the missing department) and COMPOSES when
+# the departments are in - one click each and the company runs end to end.
+# ---------------------------------------------------------------------------
+_ERP_OPERATOR = {
+    "slug": "erp-operator",
+    "name": "ERP Core",
+    "tagline": ("The company backbone in one click: the order desk, the stock "
+                "room and the books - sales orders that ship themselves into "
+                "Finance's receivables, stock dips that walk the Supply chain "
+                "to the vendor's bill, and a ledger that posts every move."),
+    "category": "ERP",
+    "icon": "factory",
+    "color": "#f59e0b",
+    "outcomes": [
+        "Products + Sales orders datasets (catalog, order desk)",
+        "Sales order lifecycle business process (draft to paid, seeded from the order desk)",
+        "Inventory replenishment process (healthy / low / reorder - one tracked entity per SKU)",
+        "Month-end close process (open a period, reconcile, review, close)",
+        "Employees roster + Payroll runs datasets and the Payroll lifecycle machine (v114: the people get paid)",
+        "Stock movements + GL entries datasets - the ERP's own ledgers",
+        "Order ledger poster: every order move posts BALANCED journal lines - receivable AND revenue on the ship, cash AND the clearing on the payment (reactive, double-entry)",
+        "Payroll poster: a paid payroll run posts salary expense debit + cash credit (reactive, balanced)",
+        "Stock pick ledger: every pick lands a movement row (reactive)",
+        "ORDER-TO-CASH journey: a shipped order opens the Finance operator's invoice by itself",
+        "REPLENISHMENT journey: a reorder opens the Procurement operator's purchase order",
+        "ERP clerk grounded in the ERP policy + the ERP review room",
+        "Staff dashboard over the whole back office",
+    ],
+    "datasets": [
+        {"name": "Products",
+         "description": "The catalog and the stock room - one row per SKU; the "
+                        "replenishment machine watches each one from install",
+         "columns": ["sku", "name", "price", "stock", "reorder_point",
+                     "stock_status"],
+         "rows": [
+             {"sku": "SKU-1001", "name": "Steel shelf", "price": "120.00",
+              "stock": "42", "reorder_point": "10", "stock_status": "healthy"},
+             {"sku": "SKU-1002", "name": "Pallet jack", "price": "480.00",
+              "stock": "7", "reorder_point": "5", "stock_status": "healthy"},
+             {"sku": "SKU-1003", "name": "Safety gloves", "price": "9.50",
+              "stock": "14", "reorder_point": "20", "stock_status": "low"},
+             {"sku": "SKU-1004", "name": "LED work lamp", "price": "34.00",
+              "stock": "61", "reorder_point": "15", "stock_status": "healthy"},
+             {"sku": "SKU-1005", "name": "Cordless drill", "price": "89.00",
+              "stock": "3", "reorder_point": "8", "stock_status": "low"},
+         ]},
+        {"name": "Sales orders",
+         "description": "The order desk - one row per order; the onboarding loop "
+                        "tracks every row on the lifecycle machine at its own stage",
+         "columns": ["order", "customer", "sku", "qty", "total", "status"],
+         "rows": [
+             {"order": "SO-1042", "customer": "Meridian Builders",
+              "sku": "SKU-1001", "qty": "6", "total": "720.00",
+              "status": "draft"},
+             {"order": "SO-1039", "customer": "Harbor Works",
+              "sku": "SKU-1002", "qty": "2", "total": "960.00",
+              "status": "confirmed"},
+             {"order": "SO-1036", "customer": "Northline Garage",
+              "sku": "SKU-1004", "qty": "4", "total": "136.00",
+              "status": "picked"},
+             {"order": "SO-1031", "customer": "Crest Facilities",
+              "sku": "SKU-1005", "qty": "5", "total": "445.00",
+              "status": "invoiced"},
+             {"order": "SO-1028", "customer": "Beacon Labs",
+              "sku": "SKU-1001", "qty": "2", "total": "240.00",
+              "status": "paid"},
+         ]},
+        {"name": "Stock movements",
+         "description": "The stock room's ledger - one row per pick (the pick "
+                        "ledger appends every move); on-hand truth lives here",
+         "columns": ["sku", "delta", "reason", "at"],
+         "rows": []},
+        {"name": "GL entries",
+         "description": "The books - BALANCED journal lines posted by the "
+                        "reactive posters (orders, stock, payroll); the "
+                        "month-end close reconciles from here and the trial "
+                        "balance reads from here",
+         "columns": ["ref", "account", "debit", "credit", "memo", "at"],
+         "rows": []},
+        {"name": "Employees",
+         "description": "The roster - one row per person on payroll; the "
+                        "People tab reads it, the clerk answers from it",
+         "columns": ["emp", "name", "role", "salary", "status"],
+         "rows": [
+             {"emp": "E-01", "name": "Ada Mensah", "role": "Order desk",
+              "salary": "4200.00", "status": "active"},
+             {"emp": "E-02", "name": "Rio Tanaka", "role": "Stock room",
+              "salary": "3800.00", "status": "active"},
+             {"emp": "E-03", "name": "Mara Osei", "role": "Bookkeeper",
+              "salary": "5100.00", "status": "active"},
+             {"emp": "E-04", "name": "Kofi Adjei", "role": "Dispatcher",
+              "salary": "3600.00", "status": "active"},
+             {"emp": "E-05", "name": "Lena Vogt", "role": "Buyer",
+              "salary": "4700.00", "status": "on_leave"},
+         ]},
+        {"name": "Payroll runs",
+         "description": "The payroll calendar - one row per run (arrives "
+                        "empty: the period is the bookkeeper's to run); the "
+                        "onboarding loop tracks every new run on the machine",
+         "columns": ["ref", "period", "gross", "headcount", "status"],
+         "rows": []},
+        {"name": "ERP policy",
+         "description": "The clerk's knowledge - how the company runs",
+         "columns": ["question", "answer"],
+         "rows": [
+             {"question": "What are the order stages",
+              "answer": "Draft, confirmed, picked, shipped, invoiced, paid - the order desk confirms, the stock room picks, shipping moves it, and Finance's receivable opens itself on the ship."},
+             {"question": "When does an order get invoiced",
+              "answer": "On the ship: the shipped order journey opens the invoice on the Finance operator's machine with the same order ref, due in five days."},
+             {"question": "What happens when stock dips",
+              "answer": "A SKU below its reorder point moves to low; placing the reorder opens a purchase order on the Procurement operator's machine - the delivery and the vendor's bill follow the Supply chain."},
+             {"question": "How does the month-end close work",
+              "answer": "Open a period on the close machine, reconcile the GL entries against the ledgers, move to reviewed when the books agree, then close - the door watches the deadline."},
+             {"question": "Where do the books land",
+              "answer": "GL entries carries BALANCED journal lines - the posters pair every debit with a credit (receivable and revenue on the ship, cash and the clearing on the payment) - and Stock movements one row per pick; nothing is typed twice."},
+             {"question": "How does payroll run",
+              "answer": "Run it on the People tab: a payroll run row opens a tracked instance on the Payroll lifecycle machine - calculate, approve, then pay - and paying posts the balanced pair to the books (salary expense debited, cash credited)."},
+         ]},
+    ],
+    "workflows": [
+        {"name": "Order ledger poster",
+         "description": "business.state_changed -> shape -> GL entries: the "
+                        "order's moves post BALANCED journal lines - shipped "
+                        "debits receivable AND credits revenue, paid debits "
+                        "cash AND clears the receivable, the order's total "
+                        "riding the event's own context. Every other move "
+                        "lands a zero-value trail line; every other machine "
+                        "skips honestly. (v114: the books became "
+                        "double-entry - a trial balance off this ledger "
+                        "actually balances and speaks.)",
+         "trigger": {"type": "event_trigger",
+                     "params": {"event_type": "business.state_changed"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the journal lines",
+              "params": {"code": (
+                  "r = df.iloc[0] if len(df) else {}\n"
+                  "pl = r.get('payload') or {}\n"
+                  "rows = []\n"
+                  "if (pl.get('process_name') or '') == 'Sales order lifecycle':\n"
+                  "    ctx = pl.get('context') or {}\n"
+                  "    total = str(ctx.get('total') or '')\n"
+                  "    to = str(pl.get('to') or '')\n"
+                  "    ref = str(pl.get('ref') or '')\n"
+                  "    ts = r.get('triggered_at', '')\n"
+                  "    if to == 'shipped' and total:\n"
+                  "        rows = [{'ref': ref, 'account': 'Accounts receivable', "
+                  "'debit': total, 'credit': '', "
+                  "'memo': ref + ' moved to ' + to, 'at': ts},\n"
+                  "                {'ref': ref, 'account': 'Revenue', "
+                  "'debit': '', 'credit': total, "
+                  "'memo': 'revenue recognized on ' + ref, 'at': ts}]\n"
+                  "    elif to == 'paid' and total:\n"
+                  "        rows = [{'ref': ref, 'account': 'Cash', "
+                  "'debit': total, 'credit': '', "
+                  "'memo': 'payment received on ' + ref, 'at': ts},\n"
+                  "                {'ref': ref, 'account': 'Accounts receivable', "
+                  "'debit': '', 'credit': total, "
+                  "'memo': ref + ' settled', 'at': ts}]\n"
+                  "    else:\n"
+                  "        rows = [{'ref': ref, 'account': 'Order desk', "
+                  "'debit': '', 'credit': '', "
+                  "'memo': ref + ' moved to ' + to, 'at': ts}]\n"
+                  "result = rows")}},
+             {"type": "dataset_write", "name": "Post to the books",
+              "params": {"dataset": "GL entries", "mode": "append"}},
+         ]},
+        {"name": "Stock pick ledger",
+         "description": "business.state_changed -> shape -> Stock movements: an "
+                        "order landing on 'picked' lands its movement row (delta "
+                        "= -qty, the sku and qty riding the event's context) - "
+                        "the stock room's truth appends itself.",
+         "trigger": {"type": "event_trigger",
+                     "params": {"event_type": "business.state_changed"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the movement",
+              "params": {"code": (
+                  "r = df.iloc[0] if len(df) else {}\n"
+                  "pl = r.get('payload') or {}\n"
+                  "rows = []\n"
+                  "if ((pl.get('process_name') or '') == 'Sales order lifecycle'\n"
+                  "        and str(pl.get('to') or '') == 'picked'):\n"
+                  "    ctx = pl.get('context') or {}\n"
+                  "    try:\n"
+                  "        delta = -abs(int(float(ctx.get('qty') or 0)))\n"
+                  "    except (TypeError, ValueError):\n"
+                  "        delta = 0\n"
+                  "    rows = [{'sku': str(ctx.get('sku') or ''), 'delta': str(delta), "
+                  "'reason': 'picked for ' + str(pl.get('ref') or ''), "
+                  "'at': r.get('triggered_at', '')}]\n"
+                  "result = rows")}},
+             {"type": "dataset_write", "name": "Land the movement",
+              "params": {"dataset": "Stock movements", "mode": "append"}},
+         ]},
+        {"name": "Payroll poster",
+         "description": "business.state_changed -> shape -> GL entries: a "
+                        "payroll run landing on 'paid' posts its BALANCED "
+                        "pair - salary expense debited, cash credited, the "
+                        "run's gross riding the event's context. The people "
+                        "get paid AND the books see it. Every other machine's "
+                        "move skips honestly.",
+         "trigger": {"type": "event_trigger",
+                     "params": {"event_type": "business.state_changed"}},
+         "steps": [
+             {"type": "python_transform", "name": "Shape the payroll pair",
+              "params": {"code": (
+                  "r = df.iloc[0] if len(df) else {}\n"
+                  "pl = r.get('payload') or {}\n"
+                  "rows = []\n"
+                  "if ((pl.get('process_name') or '') == 'Payroll lifecycle'\n"
+                  "        and str(pl.get('to') or '') == 'paid'):\n"
+                  "    ctx = pl.get('context') or {}\n"
+                  "    gross = str(ctx.get('gross') or '')\n"
+                  "    ref = str(pl.get('ref') or '')\n"
+                  "    if gross:\n"
+                  "        rows = [{'ref': ref, 'account': 'Salary expense', "
+                  "'debit': gross, 'credit': '', "
+                  "'memo': 'payroll ' + ref + ' paid', "
+                  "'at': r.get('triggered_at', '')},\n"
+                  "                {'ref': ref, 'account': 'Cash', "
+                  "'debit': '', 'credit': gross, "
+                  "'memo': 'payroll ' + ref + ' paid', "
+                  "'at': r.get('triggered_at', '')}]\n"
+                  "result = rows")}},
+             {"type": "dataset_write", "name": "Post the payroll",
+              "params": {"dataset": "GL entries", "mode": "append"}},
+         ]},
+    ],
+    "agent": {"name": "ERP clerk",
+              "greeting": "ERP here - orders, stock, books - where do we dig in?",
+              "system_prompt": ("You are the ERP clerk. Answer from the knowledge "
+                                "matches in metadata.knowledge; never move an order "
+                                "past a stage the machine has not reached - walk the "
+                                "caller through the lifecycle instead, and point "
+                                "stock questions at the replenishment machine."),
+              "knowledge": {"dataset": "ERP policy", "text_column": "question",
+                            "answer_column": "answer", "top_k": 1}},
+    "rooms": [{"name": "ERP review room", "title": "ERP review room",
+               "modality": "video"}],
+    "queues": [{"name": "ERP order desk queue", "room": "ERP review room",
+                "bind_agent": True,
+                "config": {"max_size": 30, "max_wait_seconds": 300,
+                           "announce": {"enabled": True, "interval_seconds": 120},
+                           "sms": {"enabled": False, "channel_id": "", "template": ""},
+                           "callback": {"enabled": False, "endpoint_id": ""}}}],
+    # the ERP ships no dialer - collections is the Finance operator's
+    # campaign; the order desk needs none
+    "campaign": None,
+    "processes": [
+        {"name": "Sales order lifecycle",
+         "description": ("The order as a state machine - draft to paid with the "
+                         "cancel hatch; the desk confirms, the room picks, "
+                         "shipping moves it, Finance's receivable opens itself "
+                         "on the ship, and the door nudges an order that sits "
+                         "past its SLA."),
+         "definition": {
+             "states": ["draft", "confirmed", "picked", "shipped", "invoiced",
+                        "paid", "cancelled"],
+             "initial": "draft",
+             "transitions": [
+                 {"name": "confirm", "from": "draft", "to": "confirmed"},
+                 {"name": "pick", "from": "confirmed", "to": "picked"},
+                 {"name": "ship", "from": "picked", "to": "shipped"},
+                 {"name": "invoice", "from": "shipped", "to": "invoiced"},
+                 {"name": "pay", "from": "invoiced", "to": "paid"},
+                 {"name": "cancel", "from": "draft", "to": "cancelled"},
+                 {"name": "cancel", "from": "confirmed", "to": "cancelled"},
+                 {"name": "escalate", "from": "draft", "to": "draft",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "confirmed", "to": "confirmed",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "picked", "to": "picked",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "shipped", "to": "shipped",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "invoiced", "to": "invoiced",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Sales orders",
+         "ref_column": "order",
+         "title_from": ["order", "customer"],
+         "state_column": "status",
+         "due_in_seconds": 5 * 24 * 3600,
+        },
+        {"name": "Inventory replenishment",
+         "description": ("The stock position as a state machine - one tracked "
+                         "entity per SKU; healthy dips to low, placing the "
+                         "reorder opens the Procurement operator's purchase "
+                         "order by itself, the restock closes the loop, and "
+                         "the door watches a low SKU nobody reordered."),
+         "definition": {
+             "states": ["healthy", "low", "reorder_placed", "replenished"],
+             "initial": "healthy",
+             "transitions": [
+                 {"name": "dip", "from": "healthy", "to": "low"},
+                 {"name": "reorder", "from": "low", "to": "reorder_placed"},
+                 {"name": "restock", "from": "reorder_placed", "to": "replenished"},
+                 {"name": "reset", "from": "replenished", "to": "healthy"},
+                 {"name": "escalate", "from": "healthy", "to": "healthy",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "low", "to": "low",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "reorder_placed",
+                  "to": "reorder_placed",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Products",
+         "ref_column": "sku",
+         "title_from": ["sku", "name"],
+         "state_column": "stock_status",
+         "due_in_seconds": 2 * 24 * 3600,
+        },
+        {"name": "Month-end close",
+         "description": ("The period as a state machine - open it when the "
+                         "month ends, reconcile the books, review, close; the "
+                         "door watches the close deadline (arrives empty: the "
+                         "calendar is the accountant's to open)."),
+         "definition": {
+             "states": ["open", "reconciling", "reviewed", "closed"],
+             "initial": "open",
+             "transitions": [
+                 {"name": "begin_close", "from": "open", "to": "reconciling"},
+                 {"name": "review", "from": "reconciling", "to": "reviewed"},
+                 {"name": "close", "from": "reviewed", "to": "closed"},
+                 {"name": "reopen", "from": "closed", "to": "open"},
+                 {"name": "escalate", "from": "open", "to": "open",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "reconciling", "to": "reconciling",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "reviewed", "to": "reviewed",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "due_in_seconds": 7 * 24 * 3600,
+        },
+        {"name": "Payroll lifecycle",
+         "description": ("The pay run as a state machine - draft it, "
+                         "calculate it, approve it, pay it; paying posts the "
+                         "balanced pair to the books (salary expense / "
+                         "cash) and the door nudges a run nobody approved "
+                         "(arrives empty: the period is the bookkeeper's to "
+                         "run)."),
+         "definition": {
+             "states": ["draft", "calculated", "approved", "paid"],
+             "initial": "draft",
+             "transitions": [
+                 {"name": "calculate", "from": "draft", "to": "calculated"},
+                 {"name": "approve", "from": "calculated", "to": "approved"},
+                 {"name": "pay", "from": "approved", "to": "paid"},
+                 {"name": "recalculate", "from": "calculated", "to": "draft",
+                  "description": "the numbers were wrong - back to draft"},
+                 {"name": "escalate", "from": "draft", "to": "draft",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "calculated", "to": "calculated",
+                  "description": "SLA breach nudge - the door's move"},
+                 {"name": "escalate", "from": "approved", "to": "approved",
+                  "description": "SLA breach nudge - the door's move"},
+             ],
+         },
+         "seed_from_dataset": "Payroll runs",
+         "ref_column": "ref",
+         "title_from": ["ref", "period"],
+         "state_column": "status",
+         "due_in_seconds": 3 * 24 * 3600,
+        },
+    ],
+    "dashboard": {"name": "ERP Console Board",
+                  "description": "The company at a glance - orders by stage, the "
+                                 "stock room, the ledgers, the close."},
+    "notes": [
+        "The workflows install INACTIVE - boot the system (activate_workflows) "
+        "to open the reactive path; the onboarding loops track every new row "
+        "the order desk or an import lands in the datasets.",
+        "The books are DOUBLE-ENTRY since v114: the posters pair every debit "
+        "with a credit (receivable + revenue on the ship, cash + the clearing "
+        "on the payment, salary expense + cash on payroll), so GET "
+        "/erp/trial-balance over the GL entries dataset balances and speaks - "
+        "revenue, expenses, net income, the cash position.",
+        "The journeys resolve by name at fire time: install the ERP alone and "
+        "a shipped order names the missing invoice machine in an honest skip; "
+        "install Finance (and Procurement for the buy side) and the handoffs "
+        "become real - the chains page draws the walks.",
+        "The machine moves carry the entity's memory: the event payload "
+        "includes the instance context, so the ledger poster reads the order's "
+        "total, the pick ledger the sku/qty and the payroll poster the run's "
+        "gross straight off the wire.",
+        "Stock on-hand truth is the Stock movements ledger (seed stock + the "
+        "appended deltas), never a column typed twice.",
+        "The close machine and the payroll calendar arrive EMPTY on purpose - "
+        "open a period when the month ends, run payroll when it is due; the "
+        "door watches both deadlines from birth.",
+        "The policy dataset is the clerk's knowledge - edit it and the answers "
+        "follow, no redeploy.",
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
 # v87: the escalation POLICY per operator machine - the door's channel +
 # repeat dimension. The machines above define the escalate move (the door
 # takes it); these policies say WHO GETS TOLD (the channel, through the
@@ -79,6 +493,16 @@ _ESCALATION_POLICIES: dict[str, dict] = {
     "Purchase lifecycle":  {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
     "Delivery pipeline":   {"channel": "sms",   "to": "", "repeat_every_seconds": 21600, "max_repeats": 3},
     "Customer onboarding": {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
+    # v113: the ERP core's machines - the order desk knocks every 4h, a low
+    # SKU gets half a day, and the close deadline speaks in a DAILY digest
+    # (the books' rhythm, not N knocks per period)
+    "Sales order lifecycle":  {"channel": "email", "to": "", "repeat_every_seconds": 14400, "max_repeats": 3},
+    "Inventory replenishment": {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
+    "Month-end close":        {"channel": "email", "to": "", "mode": "digest",
+                               "digest_every_seconds": 86400, "max_repeats": 2},
+    # v114: payroll has its own clock - a run nobody approved knocks every
+    # 12h (people waiting on pay should not wait on a quiet door)
+    "Payroll lifecycle":      {"channel": "email", "to": "", "repeat_every_seconds": 43200, "max_repeats": 3},
 }
 
 
@@ -142,6 +566,30 @@ _JOURNEYS: dict[str, list[dict]] = {
                   "memory": {"via": "billed visit journey",
                              "source_operator": "clinic"},
                   "due_in_seconds": 5 * 24 * 3600}},
+    ],
+    # v113: the ERP core's legs - the backbone composing the departments.
+    # The shipped order opens the receivable (ORDER-TO-CASH); the placed
+    # reorder opens the purchase order (REPLENISHMENT - and from there the
+    # Supply chain walks the delivery to the vendor's bill). Targets
+    # resolve by name at fire time: ERP standalone skips honestly,
+    # departments installed make the handoffs real.
+    "Sales order lifecycle": [
+        {"on_state": "shipped",
+         "open": {"process": "Invoice lifecycle",
+                  "title_template": "Invoice - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "shipped order journey",
+                             "source_operator": "erp"},
+                  "due_in_seconds": 5 * 24 * 3600}},
+    ],
+    "Inventory replenishment": [
+        {"on_state": "reorder_placed",
+         "open": {"process": "Purchase lifecycle",
+                  "title_template": "Reorder - {title}",
+                  "ref_template": "{ref}",
+                  "memory": {"via": "reorder journey",
+                             "source_operator": "erp"},
+                  "due_in_seconds": 2 * 24 * 3600}},
     ],
 }
 
@@ -226,7 +674,16 @@ def _onboarding_loop(pspec: dict) -> dict | None:
     }
 
 
+<<<<<<< HEAD
 OPERATORS: list[dict] = list(_CATALOG)
+=======
+OPERATORS: list[dict] = [
+    _MEETING_OPERATOR, _SALES_OPERATOR, _CLINIC_OPERATOR,
+    _SUPPORT_OPERATOR, _OPERATIONS_OPERATOR, _HR_OPERATOR,
+    _FINANCE_OPERATOR, _PROCUREMENT_OPERATOR, _LOGISTICS_OPERATOR,
+    _ERP_OPERATOR,  # v113: the backbone that composes the departments
+]
+>>>>>>> babe6a0f5b81da15c6443a829095df1fe0ed9da1
 OPERATORS_BY_SLUG = {op["slug"]: op for op in OPERATORS}
 
 # v88: BROADENING THE DEPARTMENT ONBOARDING LOOPS - every machine gets its
@@ -256,6 +713,16 @@ _CHAINS: list[dict] = [
     {"slug": "care", "name": "Care",
      "story": "a billed visit hands the money to finance",
      "path": [("Appointment journey", "billed")]},
+    # v113: the ERP core's walks - the backbone composing the company
+    {"slug": "order-to-cash", "name": "Order to Cash",
+     "story": "a confirmed order ships, and the shipping lands the invoice",
+     "path": [("Sales order lifecycle", "shipped")]},
+    {"slug": "replenishment", "name": "Replenishment",
+     "story": "stock dips below the reorder point, the reorder dispatches "
+              "the delivery, and the goods received land the bill",
+     "path": [("Inventory replenishment", "reorder_placed"),
+              ("Purchase lifecycle", "ordered"),
+              ("Delivery pipeline", "delivered")]},
 ]
 
 

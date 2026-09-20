@@ -387,10 +387,10 @@ def test_v87_prewired_meeting_clinic_processes():
             user = await _mk_user(client, "packs")
             h = _auth(user["token"])
 
-            # the shelf: nine operators, every one ships processes
+            # the shelf: ten operators since v98 (the ERP core joined), every one ships processes
             res = await client.get("/operators", headers=h)
             shelf = {o["slug"]: o for o in res.json()["operators"]}
-            assert len(shelf) == 9
+            assert len(shelf) == 10
             assert all(o["topology"]["processes"] >= 1 for o in shelf.values())
 
             # the install plan names the policy per machine
@@ -466,4 +466,4 @@ def test_v87_prewired_meeting_clinic_processes():
 # ---------------------------------------------------------------------------
 
 def test_v87_version_pin():
-    assert settings.version == "1.107.0"
+    assert settings.version == "1.114.0"

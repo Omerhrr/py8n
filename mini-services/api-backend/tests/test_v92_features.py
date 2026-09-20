@@ -313,7 +313,7 @@ def test_v92_operator_detail_chains():
             resolved = {(c["slug"], l["from_process"], l["on_state"]):
                         (l["opens"], l["due_in_seconds"])
                         for c in _RESOLVED_CHAINS for l in c["legs"]}
-            assert len(resolved) == 5, resolved  # 3 chains, 5 legs
+            assert len(resolved) == 9, resolved  # v113: 5 chains, 9 legs
             for (slug_, src, state), (opens, due) in resolved.items():
                 hits = [j for j in _JOURNEYS[src] if j["on_state"] == state]
                 assert len(hits) == 1
@@ -343,9 +343,13 @@ def test_v92_operator_detail_chains():
             # finance TERMINATES all three chains
             r = await client.get("/operators/finance-operator")
             fin = {c["slug"]: c for c in r.json()["chains"]}
-            assert set(fin) == {"revenue", "supply", "care"}
+            # v113: the ERP core's two walks land on finance too - it now
+            # TERMINATES five chains
+            assert set(fin) == {"revenue", "supply", "care",
+                                "order-to-cash", "replenishment"}
             assert [fin["revenue"]["position"], fin["supply"]["position"],
-                    fin["care"]["position"]] == [2, 2, 1]
+                    fin["care"]["position"], fin["order-to-cash"]["position"],
+                    fin["replenishment"]["position"]] == [2, 2, 1, 1, 3]
             assert all(c["operators"][-1]["slug"] == "finance-operator"
                        for c in fin.values())
 
@@ -361,11 +365,13 @@ def test_v92_operator_detail_chains():
             res = await client.get("/operators")
             ops = {o["slug"]: o for o in res.json()["operators"]}
             assert ops["finance-operator"]["chains"] == \
-                ["revenue", "supply", "care"]
+                ["revenue", "supply", "care", "order-to-cash", "replenishment"]
             assert ops["sales-operator"]["chains"] == ["revenue"]
             assert ops["meeting-operator"]["chains"] == []
+            assert ops["erp-operator"]["chains"] == \
+                ["order-to-cash", "replenishment"]  # the ERP starts both
             total = sum(len(o["journeys"]) for o in ops.values())
-            assert total == 10, total  # the v91 legs are untouched
+            assert total == 14, total  # 7 journeys, each carded out + in
 
             # unknown operators still refuse loud (no chains to give)
             r = await client.get("/operators/no-such-operator")
@@ -375,4 +381,4 @@ def test_v92_operator_detail_chains():
 
 
 def test_v92_version():
-    assert settings.version == "1.107.0"
+    assert settings.version == "1.114.0"

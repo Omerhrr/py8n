@@ -120,6 +120,8 @@ from .api.registries import router as registries_router  # noqa: E402 (v43)
 from .api.ai_composer import router as ai_composer_router  # noqa: E402 (v82)
 from .api.operators import router as operators_router  # noqa: E402 (v83 operators)
 from .api.processes import router as processes_router  # noqa: E402 (v84 business processes)
+from .api.erp import router as erp_router  # noqa: E402 (v114 the ERP reports - the books speak)
+from .api.harness import router as harness_router  # noqa: E402 (v109 the harness)
 from .api.scheduler import router as scheduler_router  # noqa: E402 (v85 scheduler doors)
 from .api.reports import router as reports_router  # noqa: E402 (v48)
 from .api.tags import router as tags_router  # noqa: E402 (v44)
@@ -192,6 +194,8 @@ app.include_router(media_router, prefix=API, dependencies=ENFORCED)  # v80: the 
 app.include_router(ai_composer_router, prefix=API, dependencies=ENFORCED)  # v82: the AI system composer
 app.include_router(operators_router, prefix=API, dependencies=ENFORCED)  # v83: the business operators
 app.include_router(processes_router, prefix=API, dependencies=ENFORCED)  # v84: the business state machines
+app.include_router(erp_router, prefix=API, dependencies=ENFORCED)  # v114: the ERP reports - the books speak
+app.include_router(harness_router, prefix=API, dependencies=ENFORCED)  # v109: the harness - the system's own agentic runtime
 app.include_router(ws_router)  # /ws/...
 
 

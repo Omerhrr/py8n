@@ -183,4 +183,32 @@ async def init_db() -> None:
                 if "last_ping_detail" not in dep_cols:
                     sync_conn.execute(text("ALTER TABLE system_deployments ADD COLUMN last_ping_detail VARCHAR(200)"))
 
+            # v110: the approval receipt - who decided the slip (fresh
+            # installs get the column from create_all; this is for upgrades)
+            if "harness_approvals" in insp.get_table_names():
+                ha_cols = {c["name"] for c in insp.get_columns("harness_approvals")}
+                if "decided_by" not in ha_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_approvals ADD COLUMN decided_by VARCHAR(36)"))
+
+            # v111: the patrol linkage - which patrol fired a turn (fresh
+            # installs get the column from create_all; this is for upgrades)
+            if "harness_turns" in insp.get_table_names():
+                ht_cols = {c["name"] for c in insp.get_columns("harness_turns")}
+                if "patrol_id" not in ht_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_turns ADD COLUMN patrol_id VARCHAR(36)"))
+
+            # v112: the dispatch - the patrol's recipients and the dispatch
+            # receipt columns (fresh installs get them from create_all;
+            # this is for upgrades)
+            if "harness_patrols" in insp.get_table_names():
+                hp_cols = {c["name"] for c in insp.get_columns("harness_patrols")}
+                if "dispatch_to" not in hp_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_patrols ADD COLUMN dispatch_to TEXT DEFAULT ''"))
+                if "last_dispatch_at" not in hp_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_patrols ADD COLUMN last_dispatch_at TIMESTAMP"))
+                if "last_dispatch_status" not in hp_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_patrols ADD COLUMN last_dispatch_status VARCHAR(20)"))
+                if "last_dispatch_detail" not in hp_cols:
+                    sync_conn.execute(text("ALTER TABLE harness_patrols ADD COLUMN last_dispatch_detail TEXT DEFAULT ''"))
+
         await conn.run_sync(_add_missing_columns)

@@ -120,7 +120,7 @@ def test_v83_catalog_and_detail():
             assert [o["slug"] for o in shelf[:3]] == ["meeting-operator",
                                                       "sales-operator",
                                                       "clinic-operator"]
-            assert len(shelf) == 9
+            assert len(shelf) == 10
             meeting = shelf[0]
             assert meeting["topology"] == {"datasets": 1, "workflows": 2, "agents": 1,
                                            "rooms": 1, "queues": 1, "campaign": 0,
@@ -419,4 +419,4 @@ def test_v83_install_refusals_and_double_install():
 # ---------------------------------------------------------------------------
 
 def test_v83_version_pin():
-    assert settings.version == "1.107.0"
+    assert settings.version == "1.114.0"

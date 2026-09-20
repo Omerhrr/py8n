@@ -453,4 +453,4 @@ def test_v107_per_machine_views_beneath_the_attention_list():
 # ---------------------------------------------------------------------------
 
 def test_v107_version_pin():
-    assert settings.version == "1.107.0"
+    assert settings.version == "1.114.0"
