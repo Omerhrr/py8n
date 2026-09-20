@@ -53,10 +53,12 @@ const instances = ref<Record<string, Instance[]>>({})
 const tables = ref<Record<string, Row[]>>({})
 const chains = ref<Chain[]>([])
 type TBRow = { account: string; kind: string; debits: number; credits: number; balance: number }
+type TBSummary = { kind: string; accounts: number; total: number }
 type TrialBalance = {
   rows: TBRow[]
   totals: { debits: number; credits: number; balanced: boolean }
   income: { revenue: number; expenses: number; net: number }
+  summary?: TBSummary[]
   line_count: number
 }
 const trialBalance = ref<TrialBalance | null>(null)
@@ -117,6 +119,72 @@ const STATE_COLORS: Record<string, string> = {
 function stateClass(state: string): string {
   return STATE_COLORS[state] || 'bg-zinc-700/60 text-zinc-300'
 }
+
+// v116: the books get a face - kind badges + the balance chart
+const KIND_COLORS: Record<string, string> = {
+  asset: '#34d399', liability: '#fb7185', equity: '#a78bfa',
+  revenue: '#38bdf8', expense: '#fbbf24', memo: '#8b8b94', other: '#a1a1aa',
+}
+const KIND_CLASSES: Record<string, string> = {
+  asset: 'bg-emerald-500/15 text-emerald-400',
+  liability: 'bg-rose-500/15 text-rose-400',
+  equity: 'bg-violet-500/15 text-violet-400',
+  revenue: 'bg-sky-500/15 text-sky-400',
+  expense: 'bg-amber-500/15 text-amber-400',
+  memo: 'bg-zinc-700/60 text-zinc-300',
+}
+function kindClass(kind: string): string {
+  return KIND_CLASSES[kind] || 'bg-zinc-700/60 text-zinc-400'
+}
+const KIND_LABELS: Record<string, string> = {
+  asset: 'assets', liability: 'liabilities', equity: 'equity',
+  revenue: 'revenue', expense: 'expenses', memo: 'memos', other: 'other',
+}
+
+const tbChartOption = computed(() => {
+  const tb = trialBalance.value
+  if (!tb?.rows?.length) return null
+  const rows = [...tb.rows].sort((a, b) => Math.abs(b.balance) - Math.abs(a.balance))
+  return {
+    backgroundColor: 'transparent',
+    grid: { left: 8, right: 56, top: 10, bottom: 10, containLabel: true },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: '#18181b', borderColor: '#3f3f46',
+      textStyle: { color: '#e4e4e7', fontSize: 11 },
+      valueFormatter: (v: any) => Number(v).toFixed(2),
+    },
+    xAxis: {
+      type: 'value',
+      axisLabel: { color: '#71717a', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(63,63,70,0.35)' } },
+    },
+    yAxis: {
+      type: 'category',
+      data: rows.map(r => r.account),
+      axisLabel: { color: '#a1a1aa', fontSize: 11 },
+      axisLine: { lineStyle: { color: '#3f3f46' } },
+      axisTick: { show: false },
+    },
+    series: [{
+      type: 'bar',
+      barMaxWidth: 14,
+      data: rows.map(r => ({
+        value: r.balance,
+        itemStyle: {
+          color: KIND_COLORS[r.kind] || KIND_COLORS.other,
+          borderRadius: [0, 3, 3, 0],
+        },
+      })),
+      label: {
+        show: true, position: 'right', color: '#d4d4d8', fontSize: 10,
+        formatter: (p: any) => Number(p.value).toFixed(2),
+      },
+    }],
+  }
+})
+const tbChartHeight = computed(() =>
+  Math.min(80 + (trialBalance.value?.rows.length || 0) * 26, 340))
 
 function allowedFrom(machine: ProcessDef, state: string) {
   return (machine.definition?.transitions || [])
@@ -753,6 +821,18 @@ useHead({ title: 'ERP - Py8n' })
             revenue {{ trialBalance.income.revenue.toFixed(2) }} · expenses {{ trialBalance.income.expenses.toFixed(2) }} ·
             net {{ trialBalance.income.net.toFixed(2) }}
           </p>
+          <!-- v116: the books get a face - the per-kind buckets, then the chart -->
+          <div v-if="trialBalance.summary?.length" class="mt-3 flex flex-wrap gap-1.5">
+            <span
+              v-for="s in trialBalance.summary.filter(b => b.accounts > 0)"
+              :key="s.kind"
+              class="rounded-md px-2 py-0.5 text-[10px] font-semibold"
+              :class="kindClass(s.kind)"
+            >{{ KIND_LABELS[s.kind] || s.kind }} {{ s.total.toFixed(2) }} <span class="font-normal opacity-70">({{ s.accounts }})</span></span>
+          </div>
+          <ClientOnly v-if="tbChartOption">
+            <EChart :option="tbChartOption" :height="tbChartHeight" class="mt-2" />
+          </ClientOnly>
           <table class="mt-3 w-full text-left text-xs">
             <thead class="text-zinc-500">
               <tr>
@@ -764,7 +844,7 @@ useHead({ title: 'ERP - Py8n' })
             <tbody class="divide-y divide-zinc-800/60">
               <tr v-for="r in trialBalance.rows" :key="r.account">
                 <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
-                <td class="py-1.5 text-zinc-600">{{ r.kind }}</td>
+                <td class="py-1.5"><span class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold" :class="kindClass(r.kind)">{{ r.kind }}</span></td>
                 <td class="py-1.5 text-right tabular-nums text-emerald-400">{{ r.debits ? r.debits.toFixed(2) : '' }}</td>
                 <td class="py-1.5 text-right tabular-nums text-sky-400">{{ r.credits ? r.credits.toFixed(2) : '' }}</td>
                 <td class="py-1.5 text-right tabular-nums" :class="r.balance >= 0 ? 'text-zinc-200' : 'text-rose-400'">{{ r.balance.toFixed(2) }}</td>

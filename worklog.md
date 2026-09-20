@@ -2148,3 +2148,40 @@ Stage Summary:
 **LIVE**: scripts/smoke_v114_erp.py boots the real server and walks it end to end - [1] ERP + Finance install with the payroll module riding the shelf; [2] THE BOOKS SPEAK: SO-1042 walks the desk while the receivable opens itself on Finance; the posters keep their pairs (AR debit + revenue credit on the ship, cash debit + the clearing on the payment) and the trial balance over the LIVE GL dataset reads balanced, net 720.00, cash up, receivable settled; [3] THE PEOPLE GET PAID: PR-2026-08 walks calculate -> approve -> pay, posts its balanced pair and the books STILL balance (net -20680.00). 3 checks green. smoke_v113_erp.py re-run green 4/4 on the amended semantics.
 
 **GATES**: pytest 624 passed + 7 deliberate skips (620 -> 624); `bun run build` green (1.95 MB); smoke v114 3/3 + smoke v113 4/4. 1.114.0.
+
+---
+
+## v115: the purchase side of the books - the company's SPENDING finally hits the ledger
+
+**THE ROUND**: the ERP's books were double-entry since v114 but they only spoke the SALES side - receivable + revenue + cash in, salary out. The company's spending never hit the ledger: no Inventory value, no Accounts payable, no vendor bills. v115 wires the buy side end to end, and the trial balance finally shows what the company OWES, not just what it owns and earned.
+
+**JOURNEY MEMORY RENDERS** (`fire_journeys` via `business_processes/instances.py`): a leg's memory STRING values now render from the source instance's fields - the leg hands its facts forward ({sku} {cost} {reorder_qty} ride the replenishment -> PO -> delivery -> vendor-bill walk; the canonical {ref}/{title}/{state}/{process} keys always win). A template naming a key the source lacks renders EMPTY - the fact does not exist on this walk, and the books' posters read the empty value and skip the financial pair (honest degradation, no guessed numbers).
+
+**THE SHELF** (`_ERP_OPERATOR` + the supply legs in `_JOURNEYS`): Products carries `cost` + `reorder_qty` (5 seeded SKUs, cost ~60% of price); the replenishment leg threads sku/unit_cost/qty into the PO, the Procurement and Logistics legs thread them onward, so the vendor bill lands on Finance's machine STILL carrying its own cost*qty. The PURCHASE LEDGER POSTER: the bill the Supply chain opened (via='delivered journey') posts its BALANCED pairs - matched debits Inventory AND credits Accounts payable (the three-way match IS the goods-received moment), paid debits Accounts payable AND credits Cash. Receivables (the order poster's side), clinic bills, and bills the books cannot value skip honestly. The Stock pick ledger lands the restock (+reorder_qty on 'replenished') - buys in, orders out, one movements ledger. Policy Q&A: "When do purchases hit the books".
+
+**THE TRIAL BALANCE DOOR** (`app/api/erp.py`): Inventory (asset) + Accounts payable (liability, credit-normal) + Vendor desk (memo) join the kinds map.
+
+**REBASE DISCIPLINE** (the upstream refactor sprint): origin moved babe6a0 -> 7ea0756 mid-round (models.py -> package, business_processes.py -> package, the operator catalog split, Alembic migrations, sandbox hardening, docker fixes, a WIP blob). The rebase surfaced THREE SPLIT LOSSES + one flatten, all restored:
+* the models split DROPPED 5 classes (AgentModule, HarnessSession/Turn/Approval/Patrol) - back in models/resources.py, wired through __init__;
+* the business_processes split dropped the v113 event-payload `context` (the wire carries the entity's memory) from advance_instance - without it EVERY financial pair degrades to a trail line; restored verbatim;
+* the split also dropped the v113 CHAIN_NAMES entries (Order to Cash / Replenishment chains) - restored in _shared.py;
+* the credentials PATCH flattened healthy rows to the '••••' hint on rename-only - now _safe_decrypt unconditionally: healthy rows keep their stored hint, undecryptable rows still degrade (the WIP's own goal);
+* the v81 solution-install test updated to the v121 per-component operation trail (component_added ops + system.component_added events BESIDE the aggregate installed op/event).
+
+**TESTS**: tests/test_v115_features.py (3) - the buy side ships (catalog cost data, the threading legs, the poster, the clerk's answer); the purchase side of the books (SKU-1003 walks the WHOLE supply chain on the live engine: PO/delivery/bill each carry unit_cost 5.10 + qty 30, the match posts Inventory/AP 153.0, the payment clears the payable, the finance seed INV-2041's move posts NOTHING (the via gate), the trial balance is BALANCED with Inventory 153.0 asset + AP 0.0 settled liability + net 0.0 - purchases are the balance sheet, not the income statement - and the restock lands +30); the pin. v113 install counts 7 -> 8 workflows. 43 pins -> 1.115.0; sidebar v1.115.
+
+**GATES**: pytest 630 passed + 7 deliberate skips (624 -> 630 on the reconciled tree); `bun run build` green (echarts restored via bun install - the sandbox's node_modules predated the WIP's package.json); smoke_v115_purchase.py 2/2 on the real server; smoke_v114_erp.py re-run 3/3 (the sales side untouched). 1.115.0.
+
+---
+
+## v116: the books get a face - the trial balance you can SEE
+
+**THE ROUND**: the trial balance door spoke per-account since v114 but the console read it as a flat table - the company's balance sheet lived in numbers, never in a picture. v116 gives the books their face: the door now carries a per-kind SUMMARY and the Ledger tab draws it.
+
+**THE DOOR** (`app/api/erp.py`): GET /erp/trial-balance carries a `summary` beside the rows - seven fixed buckets (asset / liability / equity / revenue / expense / memo / other), each with its account count and net total, ALWAYS all seven in reading order (empty buckets read 0/0.0 - the shape never moves, so charts and agents can rely on it). The balance sheet (assets, liabilities, equity) against the income statement (revenue, expenses), the desk memos and anything unclassified behind them. The per-account rows are untouched - v114's contract rides beside the new field. Unknown accounts still degrade into 'other' on the credit-normal side (the door's standing convention, now pinned by test).
+
+**THE FACE** (`pages/erp/index.vue`): the Ledger tab's trial balance section grows (1) the per-kind bucket chips - `assets 953.00 (2) · liabilities 153.00 (1) · revenue 1000.00 (1) · expenses 200.00 (1)` in their kind colors; (2) the BALANCE CHART - a horizontal bar per account sorted by |balance|, each bar in its kind's color (assets emerald, liabilities rose, revenue sky, expenses amber, equity violet, memos zinc), value labels at the bar's end, dark-themed tooltip, height scaled to the account count (capped at 340); (3) kind badges in the table rows replacing the plain gray text. ClientOnly-wrapped EChart (the v138 wrapper, echarts restored in v115) - SSR renders nothing it can't.
+
+**TESTS**: tests/test_v116_features.py (2) - the summary buckets: a hand-seeded BALANCED book (a sale, a payroll run, a vendor bill - 1353.0 both sides) reads asset 953.0 (2), liability 153.0 (1), equity 0.0 (0), revenue 1000.0 (1), expense 200.0 (1), memo 0.0 (0), other 0.0 (0) with the v114 per-account rows untouched; an odd book with a Goodwill lands it in 'other' at -10.0 (credit-normal); the pin. 37 pins -> 1.116.0; sidebar v1.116; both smoke scripts' version asserts ride the bump.
+
+**GATES**: pytest 632 passed + 7 deliberate skips (630 -> 632); `bun run build` green (1.96 MB); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the real server (the summary is additive - neither walk moved). 1.116.0.

@@ -325,4 +325,4 @@ def test_v108_agent_modules_ownership_and_the_old_inventory():
 # ---------------------------------------------------------------------------
 
 def test_v108_version_pin():
-    assert settings.version == "1.115.0"
+    assert settings.version == "1.116.0"

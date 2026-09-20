@@ -16,6 +16,12 @@ v115: the PURCHASE side joined the ledger, so the kinds map carries
 Inventory (asset) and Accounts payable (liability) - the trial balance
 now shows what the company OWES, not just what it owns and earned.
 
+v116: the books get a FACE - the response carries a per-kind ``summary``
+(asset / liability / equity / revenue / expense / memo / other buckets,
+each with its account count and net total, always all seven in a fixed
+order) so the console can draw the balance sheet against the income
+statement without re-deriving the kinds client-side.
+
 The dataset is the caller's to name: the console passes the GL entries
 id it already holds, an agent or a dashboard names it (id or
 case-insensitive name). Resolution honors ownership like every dataset
@@ -47,6 +53,13 @@ _ACCOUNT_KINDS: dict[str, str] = {
     "vendor desk": "memo",
 }
 _DEBIT_NORMAL = {"asset", "expense"}
+
+# the buckets the summary always carries, in reading order - the balance
+# sheet (assets, liabilities, equity) against the income statement
+# (revenue, expenses), then the desk memos and anything unclassified
+_KIND_ORDER = ("asset", "liability", "equity", "revenue", "expense",
+               "memo", "other")
+_KIND_SET = set(_KIND_ORDER)
 
 
 def _num(value) -> float:
@@ -90,6 +103,8 @@ async def trial_balance(
     out_rows = []
     tot_debits = tot_credits = 0.0
     revenue = expenses = 0.0
+    summary = {kind: {"accounts": 0, "total": 0.0}
+               for kind in _KIND_ORDER}
     for name in sorted(accounts):
         acc = accounts[name]
         kind = _ACCOUNT_KINDS.get(name.lower(), "other")
@@ -103,6 +118,9 @@ async def trial_balance(
             revenue = round(revenue + balance, 2)
         elif kind == "expense":
             expenses = round(expenses + balance, 2)
+        bucket = summary[kind]  # every kind the loop can produce is a bucket
+        bucket["accounts"] += 1
+        bucket["total"] = round(bucket["total"] + balance, 2)
         tot_debits = round(tot_debits + acc["debits"], 2)
         tot_credits = round(tot_credits + acc["credits"], 2)
         out_rows.append({
@@ -126,5 +144,10 @@ async def trial_balance(
             "expenses": expenses,
             "net": round(revenue - expenses, 2),
         },
+        "summary": [
+            {"kind": kind, "accounts": summary[kind]["accounts"],
+             "total": round(summary[kind]["total"], 2)}
+            for kind in _KIND_ORDER
+        ],
         "line_count": line_count,
     }
