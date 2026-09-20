@@ -54,6 +54,17 @@ const tables = ref<Record<string, Row[]>>({})
 const chains = ref<Chain[]>([])
 type TBRow = { account: string; kind: string; debits: number; credits: number; balance: number }
 type TBSummary = { kind: string; accounts: number; total: number }
+type TBLine = { account: string; balance: number }
+type Statements = {
+  income: { revenue: TBLine[]; expenses: TBLine[]
+            total_revenue: number; total_expenses: number; net: number }
+  balance: { assets: TBLine[]; liabilities: TBLine[]; equity: TBLine[]
+             memos: TBLine[]
+             total_assets: number; total_liabilities: number
+             total_equity: number; retained_earnings: number
+             equation_side: number; balanced: boolean }
+  line_count: number
+}
 type TrialBalance = {
   rows: TBRow[]
   totals: { debits: number; credits: number; balanced: boolean }
@@ -62,6 +73,7 @@ type TrialBalance = {
   line_count: number
 }
 const trialBalance = ref<TrialBalance | null>(null)
+const bookStatements = ref<Statements | null>(null)
 
 const ORDER_MACHINE = 'Sales order lifecycle'
 const STOCK_MACHINE = 'Inventory replenishment'
@@ -200,6 +212,15 @@ const lowSkus = computed(() =>
 const openReceivables = computed(() =>
   (instances.value['Invoice lifecycle'] || []).filter(i => !i.is_terminal))
 const glLines = computed(() => tables.value['GL entries'] || [])
+// v117: the books answer back - click an account, see its journal lines
+const drillAccount = ref('')
+function drill(account: string) {
+  drillAccount.value = drillAccount.value === account ? '' : account
+}
+const shownGlLines = computed(() =>
+  drillAccount.value
+    ? glLines.value.filter(r => String(r.account || '') === drillAccount.value)
+    : glLines.value)
 const stockMoves = computed(() => tables.value['Stock movements'] || [])
 const employees = computed(() => tables.value['Employees'] || [])
 const payrollRuns = computed(() =>
@@ -416,8 +437,15 @@ async function refresh() {
         trialBalance.value = await api.get<TrialBalance>(
           `/erp/trial-balance?dataset_id=${encodeURIComponent(glId)}`)
       } catch { trialBalance.value = null }
+      try {
+        // v117: the statements - the same book shaped into the two
+        // documents a company closes with (income + balance sheet)
+        bookStatements.value = await api.get<Statements>(
+          `/erp/statements?dataset_id=${encodeURIComponent(glId)}`)
+      } catch { bookStatements.value = null }
     } else {
       trialBalance.value = null
+      bookStatements.value = null
     }
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'the console could not reach the books'
@@ -842,7 +870,13 @@ useHead({ title: 'ERP - Py8n' })
               </tr>
             </thead>
             <tbody class="divide-y divide-zinc-800/60">
-              <tr v-for="r in trialBalance.rows" :key="r.account">
+              <tr
+                v-for="r in trialBalance.rows" :key="r.account"
+                class="cursor-pointer transition hover:bg-zinc-800/40"
+                :class="drillAccount === r.account && 'bg-amber-500/10'"
+                :title="`see the journal lines on ${r.account}`"
+                @click="drill(r.account)"
+              >
                 <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
                 <td class="py-1.5"><span class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold" :class="kindClass(r.kind)">{{ r.kind }}</span></td>
                 <td class="py-1.5 text-right tabular-nums text-emerald-400">{{ r.debits ? r.debits.toFixed(2) : '' }}</td>
@@ -860,11 +894,118 @@ useHead({ title: 'ERP - Py8n' })
             </tfoot>
           </table>
         </section>
+        <!-- v117: the statements speak - the two documents a company closes with -->
+        <section v-if="bookStatements" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+            <div class="flex items-baseline justify-between">
+              <h2 class="text-sm font-semibold">Income statement</h2>
+              <span class="text-[10px] uppercase tracking-wide text-zinc-600">revenue - expenses</span>
+            </div>
+            <p v-if="!bookStatements.income.revenue.length && !bookStatements.income.expenses.length" class="mt-3 rounded-xl border border-dashed border-zinc-700 px-4 py-6 text-center text-xs text-zinc-600">
+              No income on the books yet - ship an order and the revenue lands.
+            </p>
+            <table v-else class="mt-3 w-full text-left text-xs">
+              <tbody class="divide-y divide-zinc-800/60">
+                <tr
+                  v-for="r in bookStatements.income.revenue" :key="r.account"
+                  class="cursor-pointer transition hover:bg-zinc-800/40"
+                  :class="drillAccount === r.account && 'bg-amber-500/10'"
+                  :title="`see the journal lines on ${r.account}`"
+                  @click="drill(r.account)"
+                >
+                  <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-sky-400">{{ r.balance.toFixed(2) }}</td>
+                </tr>
+                <tr
+                  v-for="r in bookStatements.income.expenses" :key="r.account"
+                  class="cursor-pointer transition hover:bg-zinc-800/40"
+                  :class="drillAccount === r.account && 'bg-amber-500/10'"
+                  :title="`see the journal lines on ${r.account}`"
+                  @click="drill(r.account)"
+                >
+                  <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-amber-400">{{ r.balance.toFixed(2) }}</td>
+                </tr>
+              </tbody>
+              <tfoot class="border-t border-zinc-800">
+                <tr>
+                  <td class="pt-2 text-[10px] uppercase tracking-wide text-zinc-500">net income</td>
+                  <td class="pt-2 text-right text-sm font-semibold tabular-nums" :class="bookStatements.income.net >= 0 ? 'text-emerald-400' : 'text-rose-400'">{{ bookStatements.income.net.toFixed(2) }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+          <div class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <h2 class="text-sm font-semibold">Balance sheet</h2>
+              <span
+                class="rounded-md px-2 py-0.5 text-[10px] font-semibold uppercase"
+                :class="bookStatements.balance.balanced ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'"
+              >{{ bookStatements.balance.balanced ? 'the books tie out' : 'does not tie out' }}</span>
+            </div>
+            <table class="mt-3 w-full text-left text-xs">
+              <tbody class="divide-y divide-zinc-800/60">
+                <tr
+                  v-for="r in bookStatements.balance.assets" :key="r.account"
+                  class="cursor-pointer transition hover:bg-zinc-800/40"
+                  :class="drillAccount === r.account && 'bg-amber-500/10'"
+                  :title="`see the journal lines on ${r.account}`"
+                  @click="drill(r.account)"
+                >
+                  <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-emerald-400">{{ r.balance.toFixed(2) }}</td>
+                </tr>
+                <tr
+                  v-for="r in bookStatements.balance.liabilities" :key="r.account"
+                  class="cursor-pointer transition hover:bg-zinc-800/40"
+                  :class="drillAccount === r.account && 'bg-amber-500/10'"
+                  :title="`see the journal lines on ${r.account}`"
+                  @click="drill(r.account)"
+                >
+                  <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-rose-400">{{ r.balance.toFixed(2) }}</td>
+                </tr>
+                <tr
+                  v-for="r in bookStatements.balance.equity" :key="r.account"
+                  class="cursor-pointer transition hover:bg-zinc-800/40"
+                  :class="drillAccount === r.account && 'bg-amber-500/10'"
+                  :title="`see the journal lines on ${r.account}`"
+                  @click="drill(r.account)"
+                >
+                  <td class="py-1.5 text-zinc-300">{{ r.account }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-violet-400">{{ r.balance.toFixed(2) }}</td>
+                </tr>
+                <tr>
+                  <td class="py-1.5 text-zinc-500">retained earnings <span class="text-zinc-600">· the net, kept</span></td>
+                  <td class="py-1.5 text-right tabular-nums text-zinc-500">{{ bookStatements.balance.retained_earnings.toFixed(2) }}</td>
+                </tr>
+              </tbody>
+              <tfoot class="border-t border-zinc-800 text-zinc-400">
+                <tr>
+                  <td class="pt-2 text-[10px] uppercase tracking-wide text-zinc-500">assets</td>
+                  <td class="pt-2 text-right tabular-nums">{{ bookStatements.balance.total_assets.toFixed(2) }}</td>
+                </tr>
+                <tr>
+                  <td class="text-[10px] uppercase tracking-wide text-zinc-500">liabilities + equity + retained</td>
+                  <td class="text-right tabular-nums">{{ bookStatements.balance.equation_side.toFixed(2) }}</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </section>
         <section class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
-          <h2 class="text-sm font-semibold">GL entries</h2>
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold">GL entries</h2>
+            <button
+              v-if="drillAccount"
+              class="flex items-center gap-1.5 rounded-md bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-400 transition hover:bg-amber-500/25"
+              title="clear the account filter"
+              @click="drill(drillAccount)"
+            >{{ drillAccount }} · {{ shownGlLines.length }} line{{ shownGlLines.length === 1 ? '' : 's' }} ✕</button>
+          </div>
           <p class="mt-0.5 text-xs text-zinc-500">One journal line per move - the posters pair every debit with a credit (orders, stock, payroll).</p>
-          <div v-if="!glLines.length" class="mt-3 rounded-xl border border-dashed border-zinc-700 px-4 py-6 text-center text-xs text-zinc-600">
-            The books are blank - boot the ERP system (workflows active) and move an order.
+          <div v-if="!shownGlLines.length" class="mt-3 rounded-xl border border-dashed border-zinc-700 px-4 py-6 text-center text-xs text-zinc-600">
+            {{ drillAccount ? `No journal lines on ${drillAccount} yet.` : 'The books are blank - boot the ERP system (workflows active) and move an order.' }}
           </div>
           <table v-else class="mt-3 w-full text-left text-xs">
             <thead class="text-zinc-500">
@@ -875,7 +1016,7 @@ useHead({ title: 'ERP - Py8n' })
               </tr>
             </thead>
             <tbody class="divide-y divide-zinc-800/60">
-              <tr v-for="(r, i) in glLines" :key="i">
+              <tr v-for="(r, i) in shownGlLines" :key="i">
                 <td class="py-1.5 font-mono text-zinc-300">{{ r.ref }}</td>
                 <td class="py-1.5 text-zinc-400">{{ r.account }}</td>
                 <td class="py-1.5 text-right tabular-nums text-emerald-400">{{ r.debit }}</td>

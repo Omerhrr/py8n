@@ -163,4 +163,4 @@ def test_v116_the_trial_balance_summary_buckets():
 
 
 def test_v116_version_pin():
-    assert settings.version == "1.116.0"
+    assert settings.version == "1.117.0"

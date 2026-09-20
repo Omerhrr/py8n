@@ -303,4 +303,4 @@ def test_v115_the_purchase_side_of_the_books():
 # ---------------------------------------------------------------------------
 
 def test_v115_version_pin():
-    assert settings.version == "1.116.0"
+    assert settings.version == "1.117.0"
