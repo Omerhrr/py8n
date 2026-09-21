@@ -216,7 +216,7 @@ def main() -> int:
         with httpx.Client(base_url=API, timeout=300) as c:
             wait_health(c)
             version = c.get("/health").json().get("version", "?")
-            assert version == "1.120.0", version
+            assert version == "1.121.0", version
 
             inst = company_install_check(c)
             print(f"[1] THE COMPANY INSTALLS OK - ERP Core + Finance landed "

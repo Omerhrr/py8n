@@ -340,4 +340,4 @@ def test_v120_queue_mode_runs_deferred():
 
 
 def test_v120_version_pin():
-    assert settings.version == "1.120.0"
+    assert settings.version == "1.121.0"

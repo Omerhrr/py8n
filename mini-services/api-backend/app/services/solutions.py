@@ -299,6 +299,117 @@ VOICE_AGENT_HANDLER_GRAPH = {
                "sourceHandle": "main", "targetHandle": "main"}],
 }
 
+
+
+# ---- v121: two more deterministic shelf solutions (no LLM required) ----
+
+LEAD_TO_ORDER_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Lead Intake",
+         "position": {"x": 0, "y": 0},
+         "parameters": {"payload": {"lead": "Globex Corp", "contact": "purchasing@globex.example",
+                                    "need": "20 units/month", "budget": 48000.0}}},
+        {"id": "score", "type": "code", "name": "Qualify",
+         "position": {"x": 220, "y": 0},
+         "parameters": {"code": ("p = {{ nodes.intake.output.payload }}\n"
+                                 "reasons = []\n"
+                                 "if not str(p.get('contact', '')).strip():\n"
+                                 "    reasons.append('no contact')\n"
+                                 "if float(p.get('budget', 0)) < 10000:\n"
+                                 "    reasons.append('budget below floor')\n"
+                                 "if not str(p.get('need', '')).strip():\n"
+                                 "    reasons.append('need not stated')\n"
+                                 "result = {'lead': p, 'qualified': not reasons, 'reasons': reasons}")}},
+        {"id": "gate", "type": "if_condition", "name": "Qualified?",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"left_value": "{{ nodes.score.output.result.qualified }}",
+                        "operator": "is_true"}},
+        {"id": "shape_ok", "type": "set_variable", "name": "Qualified Row",
+         "position": {"x": 660, "y": -80},
+         "parameters": {"assignments": {
+             "lead": "{{ nodes.score.output.result.lead.lead }}",
+             "contact": "{{ nodes.score.output.result.lead.contact }}",
+             "budget": "{{ nodes.score.output.result.lead.budget }}",
+             "qualified": True}, "keep_input": False}},
+        {"id": "land", "type": "dataset_write", "name": "Qualified Leads",
+         "position": {"x": 880, "y": -80},
+         "parameters": {"dataset": "qualified_leads", "mode": "append"}},
+        {"id": "shape_bad", "type": "set_variable", "name": "Parked Row",
+         "position": {"x": 660, "y": 80},
+         "parameters": {"assignments": {
+             "lead": "{{ nodes.score.output.result.lead.lead }}",
+             "reasons": "{{ nodes.score.output.result.reasons }}",
+             "qualified": False}, "keep_input": False}},
+        {"id": "park", "type": "dataset_write", "name": "Parked Leads",
+         "position": {"x": 880, "y": 80},
+         "parameters": {"dataset": "parked_leads", "mode": "append"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "score"},
+        {"id": "e2", "source": "score", "target": "gate"},
+        {"id": "e3", "source": "gate", "target": "shape_ok", "sourceHandle": "true"},
+        {"id": "e4", "source": "shape_ok", "target": "land"},
+        {"id": "e5", "source": "gate", "target": "shape_bad", "sourceHandle": "false"},
+        {"id": "e6", "source": "shape_bad", "target": "park"},
+    ],
+}
+
+EXPENSE_APPROVAL_GRAPH = {
+    "nodes": [
+        {"id": "intake", "type": "manual_trigger", "name": "Expense Intake",
+         "position": {"x": 0, "y": 0},
+         "parameters": {"payload": {"employee": "dana", "category": "travel",
+                                    "amount": 412.50, "currency": "USD",
+                                    "memo": "client onsite"}}},
+        {"id": "policy", "type": "code", "name": "Policy Check",
+         "position": {"x": 220, "y": 0},
+         "parameters": {"code": ("p = {{ nodes.intake.output.payload }}\n"
+                                 "amount = float(p.get('amount', 0))\n"
+                                 "auto_limit = 500.0\n"
+                                 "errors = []\n"
+                                 "if amount <= 0:\n"
+                                 "    errors.append('amount must be positive')\n"
+                                 "if not str(p.get('employee', '')).strip():\n"
+                                 "    errors.append('employee missing')\n"
+                                 "if p.get('category') not in ('travel', 'meals', 'software', 'other'):\n"
+                                 "    errors.append('unknown category')\n"
+                                 "result = {'expense': p, 'auto_approve': amount <= auto_limit and not errors, "
+                                 "'errors': errors}")}},
+        {"id": "gate", "type": "if_condition", "name": "Auto-approve?",
+         "position": {"x": 440, "y": 0},
+         "parameters": {"left_value": "{{ nodes.policy.output.result.auto_approve }}",
+                        "operator": "is_true"}},
+        {"id": "shape_ok", "type": "set_variable", "name": "Approved Row",
+         "position": {"x": 660, "y": -80},
+         "parameters": {"assignments": {
+             "employee": "{{ nodes.policy.output.result.expense.employee }}",
+             "category": "{{ nodes.policy.output.result.expense.category }}",
+             "amount": "{{ nodes.policy.output.result.expense.amount }}",
+             "approved": True}, "keep_input": False}},
+        {"id": "land", "type": "dataset_write", "name": "Approved Expenses",
+         "position": {"x": 880, "y": -80},
+         "parameters": {"dataset": "approved_expenses", "mode": "append"}},
+        {"id": "shape_bad", "type": "set_variable", "name": "Review Row",
+         "position": {"x": 660, "y": 80},
+         "parameters": {"assignments": {
+             "employee": "{{ nodes.policy.output.result.expense.employee }}",
+             "amount": "{{ nodes.policy.output.result.expense.amount }}",
+             "errors": "{{ nodes.policy.output.result.errors }}",
+             "approved": False}, "keep_input": False}},
+        {"id": "review", "type": "dataset_write", "name": "Needs Review",
+         "position": {"x": 880, "y": 80},
+         "parameters": {"dataset": "expense_review_queue", "mode": "append"}},
+    ],
+    "edges": [
+        {"id": "e1", "source": "intake", "target": "policy"},
+        {"id": "e2", "source": "policy", "target": "gate"},
+        {"id": "e3", "source": "gate", "target": "shape_ok", "sourceHandle": "true"},
+        {"id": "e4", "source": "shape_ok", "target": "land"},
+        {"id": "e5", "source": "gate", "target": "shape_bad", "sourceHandle": "false"},
+        {"id": "e6", "source": "shape_bad", "target": "review"},
+    ],
+}
+
 CURATED_SOLUTIONS: list[dict] = [
     {
         "slug": "customer-support-automation",
@@ -683,6 +794,72 @@ CURATED_SOLUTIONS: list[dict] = [
                  "the room on the same or the callback call. POST /voice/queues/{id}/analytics "
                  "and /voice/meetings/{id}/analytics measure the line and the room."),
     },
+    {
+        "slug": "lead-to-order",
+        "name": "Lead to Order",
+        "tagline": "Leads in, qualified orders out - deterministic scoring, a budget floor and two ledgers (qualified vs parked).",
+        "category": "Sales",
+        "icon": "target",
+        "color": "#34d399",
+        "outcomes_json": [
+            "Lead intake",
+            "Qualification rules",
+            "Budget floor",
+            "Qualified-leads ledger",
+            "Parked-leads ledger",
+        ],
+        "pack_json": _pack(
+            [_wf("Lead Qualifier",
+                 "Intake -> qualification rules -> qualified or parked ledger.",
+                 LEAD_TO_ORDER_GRAPH)],
+            [_ds("qualified_leads", "Every lead that passed the floor",
+                 [{"name": "lead", "dtype": "text"}, {"name": "contact", "dtype": "text"},
+                  {"name": "budget", "dtype": "number"}, {"name": "qualified", "dtype": "boolean"}],
+                 [{"lead": "Globex Corp", "contact": "purchasing@globex.example",
+                   "budget": 48000.0, "qualified": True}]),
+             _ds("parked_leads", "Every lead that needs nurturing first",
+                 [{"name": "lead", "dtype": "text"}, {"name": "reasons", "dtype": "text"},
+                  {"name": "qualified", "dtype": "boolean"}],
+                 [{"lead": "Initech", "reasons": "['budget below floor']", "qualified": False}]),
+            ],
+        ),
+        "docs": ("Install, then open 'Lead Qualifier' and press Run - the sample lead is scored "
+                 "against the floor and lands in qualified_leads (or parked_leads with the reasons). "
+                 "Wire the Manual Trigger to your form/webhook for real intake. Runs fully offline."),
+    },
+    {
+        "slug": "expense-approval",
+        "name": "Expense Approval",
+        "tagline": "Expenses in, policy-checked verdicts out - the auto-approve floor keeps small spend moving and the rest queued for review.",
+        "category": "Finance",
+        "icon": "receipt",
+        "color": "#fbbf24",
+        "outcomes_json": [
+            "Expense intake",
+            "Policy check",
+            "Auto-approve floor",
+            "Approved-expenses ledger",
+            "Review queue",
+        ],
+        "pack_json": _pack(
+            [_wf("Expense Policy Gate",
+                 "Intake -> policy rules -> approved or review queue.",
+                 EXPENSE_APPROVAL_GRAPH)],
+            [_ds("approved_expenses", "Every expense that passed policy",
+                 [{"name": "employee", "dtype": "text"}, {"name": "category", "dtype": "text"},
+                  {"name": "amount", "dtype": "number"}, {"name": "approved", "dtype": "boolean"}],
+                 [{"employee": "dana", "category": "travel", "amount": 412.5, "approved": True}]),
+             _ds("expense_review_queue", "Everything a human must look at",
+                 [{"name": "employee", "dtype": "text"}, {"name": "amount", "dtype": "number"},
+                  {"name": "errors", "dtype": "text"}, {"name": "approved", "dtype": "boolean"}],
+                 [{"employee": "sam", "amount": 1200.0, "errors": "[]", "approved": False}]),
+            ],
+        ),
+        "docs": ("Install, then open 'Expense Policy Gate' and press Run - the sample expense is "
+                 "checked against the 500 auto-approve floor and lands in approved_expenses (or "
+                 "expense_review_queue). Tune the floor in the Policy Check node. Runs fully offline."),
+    },
+
 ]
 
 

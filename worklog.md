@@ -2363,3 +2363,47 @@ runs in tests) - fixed with the house's local-import pattern.
 build` green; smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the
 real server (after the startup fix); migration chain verified (alembic
 history: 6c4f2a9d1e75 head). 1.120.0.
+
+## v121: the shelf opens - the operator SDK, the bank connector, the solutions grow
+
+**THE ROUND**: the last package turns py8n from a product into a
+platform others can extend - and the books get their first inbound
+connector.
+
+**THE OPERATOR SDK** (`app/services/operator_sdk.py` + the operators
+doors + `sdk/README.md` + `scripts/py8n_new_operator.py`): a package is
+a directory with ``operator.json``; point ``PY8N_EXTRA_OPERATORS`` at
+its parent and it rides the SAME marketplace doors beside the compiled
+ten - catalog (with source="sdk"), install plan, install (the pack lands
+through the marketplace's OWN _import_pack_doc, workflows
+inactive-honest, datasets with rows, a Py8nSystem binds it unless
+bind_system=false). A broken manifest is skipped LOUDLY with its reason.
+The directory re-reads per catalog call: add a package = refresh the
+shelf, no restart. The scaffold script writes a working starter package.
+
+**THE BANK CONNECTOR** (`app/services/erp_books.py` + POST
+``/erp/import-csv``): raw CSV rows (one dict per line) land as REAL
+balanced journal pairs - cash takes the movement, the counterpart
+account (``default_account`` or per-row ``account_col``) takes the other
+side; ``dry_run=true`` (the default) previews every entry and appends
+NOTHING; a closed book refuses (the close locks); the books stay
+balanced BY CONSTRUCTION - the connector cannot unbalance them.
+
+**THE SHELF GROWS** (`app/services/solutions.py`): ``lead-to-order`` and
+``expense-approval`` join the solutions - deterministic, offline, no LLM
+required (qualification rules / the 500 auto-approve floor), each with
+two ledgers and a runnable sample row.
+
+**TESTS**: test_v121_features.py (4) - the shelf opens (no env = no
+extras, the valid package rides the catalog + install plan + install
+with its system bound and its sample rows real, the broken manifest is
+loudly skipped, the compiled slugs still ride compose); the bank
+connector (dry-run touches nothing, commit lands three balanced pairs,
+the books STILL balance - Cash 1637.5 vs Uncategorized 637.5 on the
+credit-normal 'other' side, the closed book refuses); the solutions grow
+(both slugs on the shelf, the expense gate installs inactive and RUNS
+offline to success); the pin.
+
+**GATES**: pytest 651 passed + 7 deliberate skips (647 -> 651); `bun run
+build` green; smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the
+real server. 1.121.0.

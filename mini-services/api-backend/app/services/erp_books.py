@@ -581,3 +581,88 @@ async def close_book(db: AsyncSession, ds, period: str = "",
         "locked": True,
         "lines": entries,
     }
+
+
+# ---------------------------------------------------------------------------
+# v121: the bank connector - a CSV statement lands as REAL balanced entries
+# ---------------------------------------------------------------------------
+
+async def import_bank_rows(db: AsyncSession, ds, rows, mapping,
+                           dry_run: bool = True,
+                           now: datetime | None = None) -> dict:
+    """The bank statement connector: raw CSV rows (one dict per line) land
+    as balanced journal pairs - the cash account takes the movement, the
+    counterpart account (``default_account``, or per-row via
+    ``account_col``) takes the other side, and the books stay balanced by
+    construction. ``dry_run=True`` (the default) previews every entry and
+    appends NOTHING; a closed book refuses loudly (the close locks)."""
+    now = now or datetime.now(timezone.utc)
+    if await is_closed(db, ds):
+        raise BookError("the book is closed - the period is locked; "
+                        "import into a fresh open book")
+
+    if not isinstance(rows, list) or not rows:
+        raise BookError("pass the statement as a list of row objects", 400)
+
+    mapping = mapping or {}
+    amount_col = str(mapping.get("amount_col") or "amount")
+    date_col = str(mapping.get("date_col") or "")
+    description_col = str(mapping.get("description_col") or "")
+    ref_col = str(mapping.get("ref_col") or "")
+    account_col = str(mapping.get("account_col") or "")
+    cash_account = str(mapping.get("cash_account") or "Cash").strip() or "Cash"
+    default_account = str(mapping.get("default_account") or "Uncategorized").strip() \
+        or "Uncategorized"
+
+    stamp = now.isoformat()
+    entries: list[dict] = []
+    skipped: list[dict] = []
+    cash_net = 0.0
+    counterpart_totals: dict[str, float] = {}
+    for i, raw in enumerate(rows):
+        if not isinstance(raw, dict):
+            skipped.append({"row": i, "reason": "not an object"})
+            continue
+        amount = round(num(raw.get(amount_col)), 2)
+        if abs(amount) < 0.005:
+            skipped.append({"row": i, "reason": f"no usable {amount_col!r} value"})
+            continue
+        ref = str(raw.get(ref_col) or "").strip() or f"BANK-{i + 1:04d}"
+        memo = str(raw.get(description_col) or "").strip() or "bank import"
+        at = str(raw.get(date_col) or "").strip() or stamp
+        counterpart = str(raw.get(account_col) or "").strip() or default_account
+        side = "in" if amount > 0 else "out"
+        pair = [
+            {"ref": ref, "account": cash_account,
+             "debit": f"{amount:.2f}" if amount > 0 else "",
+             "credit": "" if amount > 0 else f"{abs(amount):.2f}",
+             "memo": f"{memo} ({side})", "at": at},
+            {"ref": ref, "account": counterpart,
+             "debit": "" if amount > 0 else f"{abs(amount):.2f}",
+             "credit": f"{amount:.2f}" if amount > 0 else "",
+             "memo": f"{memo} ({side})", "at": at},
+        ]
+        entries.extend(pair)
+        cash_net = round(cash_net + amount, 2)
+        counterpart_totals[counterpart] = round(
+            counterpart_totals.get(counterpart, 0.0) + amount, 2)
+
+    appended = False
+    if not dry_run and entries:
+        await ds_svc.append_rows(db, ds, entries)
+        appended = True
+
+    return {
+        "dataset": {"id": ds.id, "name": ds.name},
+        "dry_run": dry_run,
+        "rows_in": len(rows),
+        "imported": len(rows) - len(skipped),
+        "skipped": skipped,
+        "entries": len(entries),
+        "cash_net": cash_net,
+        "counterpart_totals": counterpart_totals,
+        "cash_account": cash_account,
+        "default_account": default_account,
+        "entries_preview": entries[:10],
+        "appended": appended,
+    }

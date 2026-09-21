@@ -132,6 +132,34 @@ class CloseIn(BaseModel):
     period: str = ""
 
 
+class BankCsvIn(BaseModel):
+    """The bank statement connector's body (v121) - raw CSV rows (one dict
+    per line) plus the column mapping; dry_run previews by default."""
+    dataset_id: str
+    rows: list[dict] = []
+    mapping: dict = {}
+    dry_run: bool = True
+
+
+@router.post("/import-csv")
+async def import_bank_csv(
+    body: BankCsvIn,
+    user=Depends(get_optional_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """The bank statement connector (v121): land a CSV statement as REAL
+    balanced journal pairs (cash takes the movement, the counterpart
+    account the other side). ``dry_run=true`` (the default) previews every
+    entry and appends nothing; a closed book refuses (the close locks);
+    the books stay balanced by construction."""
+    ds = await _book(body.dataset_id, user, db)
+    try:
+        return await books.import_bank_rows(
+            db, ds, body.rows, body.mapping, dry_run=body.dry_run)
+    except books.BookError as exc:
+        raise _book_error(exc) from exc
+
+
 @router.post("/close")
 async def close_period(
     body: CloseIn | None = None,

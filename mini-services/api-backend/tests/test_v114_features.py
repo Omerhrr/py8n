@@ -328,4 +328,4 @@ def test_v114_payroll_runs_and_posts():
 # ---------------------------------------------------------------------------
 
 def test_v114_version_pin():
-    assert settings.version == "1.120.0"
+    assert settings.version == "1.121.0"
