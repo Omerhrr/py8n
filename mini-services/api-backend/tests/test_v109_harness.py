@@ -132,17 +132,18 @@ def test_v109_toolchest_and_a_real_read_turn():
             user = await _mk_user(client, "read")
             headers = _auth(user["token"])
 
-            # the catalog: fourteen tools since v110 (the builder), five gated
+            # the catalog: twenty-one tools since v119 (the books joined), six gated
             r = await client.get("/harness/tools", headers=headers)
             assert r.status_code == 200, r.text
             catalog = r.json()
             names = [t["name"] for t in catalog]
-            assert len(names) == 14, names
+            # twenty-one tools since v119 (the books joined the chest)
+            assert len(names) == 21, names
             assert {"start_instance", "advance_instance",
                     "acknowledge_escalation"} <= set(names)
             assert {t["name"] for t in catalog if t["sensitive"]} == {
-                "start_instance", "advance_instance", "acknowledge_escalation",
-                "build_machine", "install_operator"}
+                "start_instance", "advance_instance", "erp_close",
+                "acknowledge_escalation", "build_machine", "install_operator"}
 
             # a machine exists; the harness reads it through the REAL service
             machine = await _mk_machine(client, headers, "read")
@@ -443,4 +444,4 @@ def test_v109_ownership_and_version_pin():
 
 
 def test_v109_version_pin():
-    assert settings.version == "1.118.0"
+    assert settings.version == "1.119.0"

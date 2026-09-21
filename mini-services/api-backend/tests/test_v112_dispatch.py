@@ -513,4 +513,4 @@ def test_v112_validation_and_the_dispatch_door():
 # ---------------------------------------------------------------------------
 
 def test_v112_pin():
-    assert settings.version == "1.118.0"
+    assert settings.version == "1.119.0"

@@ -2263,3 +2263,45 @@ line were invisible) and fixed with the honest two-pass reader.
 requirements.txt); `bun run build` green (1.96 MB, echarts restored via
 bun install); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the
 real server. 1.118.0.
+
+## v119: the agent reads the books - the ERP joins the harness toolchest
+
+**THE ROUND**: the harness had fourteen tools for the ESTATE; the books
+lived behind the /erp doors alone. v119 hands the agent the same ledger -
+seven tools, every one riding the SAME erp_books service the doors serve
+(zero parallel book paths), so the agent's numbers and the console's
+numbers can never disagree.
+
+**THE TOOLCHEST** (`app/services/harness/tools.py`, 14 -> 21 tools, 5 -> 6
+gated): READS - `erp_books` (list datasets, flag the ones with an
+'account' column), `erp_statements` (trial balance + income statement +
+balance sheet + the equation check), `erp_gl` (journal lines newest-first,
+filtered to account/ref), `erp_aging` (the AR/AP buckets), `erp_cash_flow`
+(the direct-method sections), `erp_health` (THE BOOKS PATROL CHECK:
+imbalance, unclassified money, overdrawn cash, receivables past 90 -
+healthy=true means nothing to raise; unknown book degrades to an info
+finding, not a 500). SENSITIVE - `erp_close`: the period close behind the
+fail-closed gate (moves="posts the period close and LOCKS the book",
+preflight bounces a dataset-less call as tool feedback so no human is
+paused for syntax). Book resolution is the doors' own owner-scoped
+id-or-name path; a stranger's book is a loud tool refusal.
+
+**THE PATROL STORY**: a patrol whose mission says "run erp_health on the
+GL entries book every morning and mail what it finds" now works with ZERO
+new machinery - the tool is in the chest, the gate still applies to any
+sensitive call the mission provokes, and v112's dispatch mails the round's
+outcome home.
+
+**TESTS**: test_v119_features.py (3) - the chest reads the books (listing
+flagged, statements to the cent - net 800, balanced; the GL drill to
+Cash's two lines; the cash-flow sections; erp_health on an UNBALANCED
+book raising DO NOT balance + unclassified; a stranger's book refused);
+THE GATE (preflight bounce, NOTHING closed while unwatched, the slip
+waiting with its exact arguments, the decision-time close landing net 800
+and LOCKING the book, twice-decide 409); the pin. test_v109's toolchest
+pin rides 14 -> 21 with erp_close in the gated set. Results ride the wire
+as truncated text - the tests parse them.
+
+**GATES**: pytest 642 passed + 7 deliberate skips (638 -> 642); `bun run
+build` green (1.96 MB); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py
+2/2 on the real server. 1.119.0.

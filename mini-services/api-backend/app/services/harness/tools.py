@@ -24,8 +24,9 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...models import BusinessProcess, BusinessProcessInstance
+from ...models import BusinessProcess, BusinessProcessInstance, Dataset
 from .. import business_processes as bp
+from .. import erp_books
 from .. import py8n_systems
 
 # the read tools hand the model bounded answers (the loop also truncates)
@@ -144,6 +145,146 @@ async def _query_data(db: AsyncSession, owner_id: str | None, args: dict) -> dic
     rows = out["rows"][:TOOL_MAX_ROWS]
     return {"columns": out["columns"], "rows": rows,
             "row_count": out["row_count"], "returned_rows": len(rows)}
+
+
+# ---------------------------------------------------------------------------
+# the books (v119) - the ERP ledger as the model sees it. Every tool rides
+# the SAME erp_books service the /erp doors serve, so the agent's numbers
+# and the console's numbers can never disagree.
+# ---------------------------------------------------------------------------
+
+async def _resolve_book(db: AsyncSession, want: str, owner_id: str | None):
+    """The book's dataset by id or case-insensitive name, owner-scoped -
+    the same resolution the doors use, refusals as tool feedback."""
+    from types import SimpleNamespace
+    try:
+        return await erp_books.book_dataset(
+            db, want, SimpleNamespace(id=owner_id) if owner_id else None)
+    except erp_books.BookNotFound as exc:
+        raise HarnessToolError(str(exc)) from exc
+
+
+async def _erp_books(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    rows = (await db.execute(
+        select(Dataset).order_by(Dataset.created_at.desc()).limit(50))).scalars().all()
+    out = []
+    for d in rows:
+        if owner_id is not None and d.owner_id not in (owner_id, None):
+            continue
+        schema = d.schema_json if isinstance(d.schema_json, list) else []
+        cols = {str(c.get("name") or "") for c in schema}
+        out.append({"id": d.id, "name": d.name, "row_count": d.row_count,
+                    "looks_like_book": "account" in cols})
+    out.sort(key=lambda x: (not x["looks_like_book"], -(x["row_count"] or 0)))
+    return {"datasets": out[:TOOL_MAX_ROWS], "count": len(out)}
+
+
+async def _erp_statements(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    ds = await _resolve_book(db, str(args.get("dataset", "")), owner_id)
+    tb = erp_books.trial_balance_payload(ds)
+    st = erp_books.statements_payload(ds)
+    return {
+        "dataset": st["dataset"],
+        "trial_balance": {"balanced": tb["totals"]["balanced"],
+                          "summary": tb["summary"],
+                          "income": tb["income"]},
+        "income_statement": st["income"],
+        "balance_sheet": st["balance"],
+    }
+
+
+async def _erp_gl(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    ds = await _resolve_book(db, str(args.get("dataset", "")), owner_id)
+    account = str(args.get("account") or "").strip().lower()
+    ref = str(args.get("ref") or "").strip().lower()
+    out = []
+    for r in reversed(erp_books.raw_rows(ds)):  # the newest lines first
+        if account and str(r.get("account") or "").strip().lower() != account:
+            continue
+        if ref and str(r.get("ref") or "").strip().lower() != ref:
+            continue
+        out.append(r)
+        if len(out) >= TOOL_MAX_ROWS:
+            break
+    return {"dataset": {"id": ds.id, "name": ds.name}, "lines": out,
+            "returned_lines": len(out),
+            "filter": {"account": account or None, "ref": ref or None}}
+
+
+async def _erp_aging(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    ds = await _resolve_book(db, str(args.get("dataset", "")), owner_id)
+    aging = erp_books.aging_payload(ds)
+    for side in ("receivables", "payables"):
+        aging[side]["lines"] = aging[side]["lines"][:TOOL_MAX_ROWS]
+    return aging
+
+
+async def _erp_cash_flow(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    ds = await _resolve_book(db, str(args.get("dataset", "")), owner_id)
+    return erp_books.cash_flow_payload(ds)
+
+
+async def _erp_health(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    """THE BOOKS PATROL CHECK - the findings a patrol's round mails home:
+    imbalance, unclassified money, overdrawn cash, receivables past 90."""
+    want = str(args.get("dataset") or "").strip() or "GL entries"
+    try:
+        ds = await _resolve_book(db, want, owner_id)
+    except HarnessToolError:
+        return {"dataset": want, "healthy": False, "findings": [
+            {"severity": "info",
+             "finding": f"no dataset named {want!r} is visible - pass "
+                        "dataset=<name or id>, or install the ERP core"}]}
+
+    findings: list[dict] = []
+    tb = erp_books.trial_balance_payload(ds)
+    if not tb["totals"]["balanced"]:
+        findings.append({
+            "severity": "critical",
+            "finding": f"the books DO NOT balance (debits "
+                       f"{tb['totals']['debits']:.2f} vs credits "
+                       f"{tb['totals']['credits']:.2f})"})
+    for r in tb["rows"]:
+        if r["kind"] == "other" and abs(r["balance"]) >= 0.005:
+            findings.append({
+                "severity": "warning",
+                "finding": f"account {r['account']!r} is unclassified - "
+                           f"its {r['balance']:.2f} sits unplaced"})
+    for c in tb["rows"]:
+        name = c["account"].lower()
+        if erp_books.kind_of(name) == "asset" and ("cash" in name or "bank" in name) \
+                and c["balance"] < 0:
+            findings.append({
+                "severity": "critical",
+                "finding": f"{c['account']} is OVERDRAWN at {c['balance']:.2f}"})
+    aging = erp_books.aging_payload(ds)
+    for b in aging["receivables"]["buckets"]:
+        if b["bucket"] == "d90_plus" and b["total"] > 0:
+            findings.append({
+                "severity": "warning",
+                "finding": f"receivables past 90 days: {b['total']:.2f} - "
+                           "the collection desk should call"})
+    return {"dataset": {"id": ds.id, "name": ds.name},
+            "healthy": not findings,
+            "closed": await erp_books.is_closed(db, ds),
+            "balanced": tb["totals"]["balanced"],
+            "net_income": tb["income"]["net"],
+            "findings": findings}
+
+
+async def _erp_close(db: AsyncSession, owner_id: str | None, args: dict) -> dict:
+    ds = await _resolve_book(db, str(args.get("dataset", "")), owner_id)
+    try:
+        return await erp_books.close_book(db, ds,
+                                          period=str(args.get("period") or ""))
+    except erp_books.BookError as exc:
+        raise HarnessToolError(exc.detail) from exc
+
+
+def _preflight_erp_close(args: dict) -> str | None:
+    if not str(args.get("dataset") or "").strip():
+        return 'pass {"dataset": "<the book\'s name or id>"} - which book closes?'
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +526,63 @@ def build_registry() -> dict[str, ToolDef]:
             args=_schema({"sql": {"type": "string"}}),
             handler=_query_data),
         ToolDef(
+            name="erp_books",
+            description="List the estate's datasets (id, name, row count), "
+                        "flagging the ones that look like GL books (an "
+                        "'account' column). The erp_* tools take dataset = "
+                        "name or id; the shelf's standard book is 'GL "
+                        "entries'.",
+            args=_schema({}),
+            handler=_erp_books),
+        ToolDef(
+            name="erp_statements",
+            description="Read one book: the trial balance (balanced flag + "
+                        "per-kind buckets), the income statement and the "
+                        "balance sheet with the accounting-equation check. "
+                        "The 'how are the numbers' answer.",
+            args=_schema({"dataset": {"type": "string",
+                                      "description": "book name or id"}},
+                         required=["dataset"]),
+            handler=_erp_statements),
+        ToolDef(
+            name="erp_gl",
+            description="Read one book's journal lines, newest first - "
+                        "optionally filtered to one account or one ref. "
+                        "The drill behind every statement line.",
+            args=_schema({"dataset": {"type": "string"},
+                          "account": {"type": "string"},
+                          "ref": {"type": "string"},
+                          "limit": {"type": "integer",
+                                    "description": "default 25, max 25"}},
+                         required=["dataset"]),
+            handler=_erp_gl),
+        ToolDef(
+            name="erp_aging",
+            description="Read one book's AR/AP aging: open receivable and "
+                        "payable refs bucketed current / 31-60 / 61-90 / "
+                        "90+ / undated. Who owes the company, who it owes.",
+            args=_schema({"dataset": {"type": "string"}},
+                         required=["dataset"]),
+            handler=_erp_aging),
+        ToolDef(
+            name="erp_cash_flow",
+            description="Read one book's direct-method cash flow: inflows, "
+                        "outflows and net per section (operating / investing "
+                        "/ financing / other) - the sections' net IS the "
+                        "cash movement.",
+            args=_schema({"dataset": {"type": "string"}},
+                         required=["dataset"]),
+            handler=_erp_cash_flow),
+        ToolDef(
+            name="erp_health",
+            description="THE BOOKS PATROL CHECK: the findings worth mailing "
+                        "home - imbalance, unclassified money, overdrawn "
+                        "cash, receivables past 90 days. healthy=true means "
+                        "nothing to raise.",
+            args=_schema({"dataset": {"type": "string",
+                                      "description": "default 'GL entries'"}}),
+            handler=_erp_health),
+        ToolDef(
             name="start_instance",
             description="SENSITIVE - open a new entity on a machine (a new "
                         "case, lead, invoice). Needs the process and an "
@@ -412,6 +610,21 @@ def build_registry() -> dict[str, ToolDef]:
             }, required=["instance_id"]),
             handler=_advance_instance, sensitive=True,
             moves="moves an entity to its next state"),
+        ToolDef(
+            name="erp_close",
+            description="SENSITIVE - close the period on one book: real "
+                        "closing entries sweep revenue and expense through "
+                        "Income summary into Retained earnings and the book "
+                        "LOCKS (a second close refuses). Waits for human "
+                        "approval.",
+            args=_schema({"dataset": {"type": "string",
+                                      "description": "book name or id"},
+                          "period": {"type": "string",
+                                     "description": "optional label, e.g. 2026-08"}},
+                         required=["dataset"]),
+            handler=_erp_close, sensitive=True,
+            preflight=_preflight_erp_close,
+            moves="posts the period close and LOCKS the book"),
         ToolDef(
             name="acknowledge_escalation",
             description="SENSITIVE - a human takes an escalation: the door "

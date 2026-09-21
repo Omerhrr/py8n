@@ -486,4 +486,4 @@ def test_v111_patrol_sweep_registration_and_pin():
         else:
             os.environ["PY8N_PATROL_TICK_SECONDS"] = old
 
-    assert settings.version == "1.118.0"
+    assert settings.version == "1.119.0"

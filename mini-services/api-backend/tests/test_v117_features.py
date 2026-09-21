@@ -190,4 +190,4 @@ def test_v117_the_statements_speak():
 
 
 def test_v117_version_pin():
-    assert settings.version == "1.118.0"
+    assert settings.version == "1.119.0"
