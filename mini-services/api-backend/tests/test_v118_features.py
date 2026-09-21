@@ -402,4 +402,4 @@ def test_v118_the_cash_flow_sections():
 
 
 def test_v118_version_pin():
-    assert settings.version == "1.119.0"
+    assert settings.version == "1.120.0"

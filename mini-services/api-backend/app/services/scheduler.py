@@ -33,6 +33,7 @@ def start_scheduler() -> AsyncIOScheduler:
         scheduler.start()
         _register_escalation_sweep(scheduler)
         _register_patrol_sweep(scheduler)
+        _register_queue_sweep(scheduler)
         logger.info("APScheduler started")
     return scheduler
 
@@ -85,6 +86,40 @@ def _register_patrol_sweep(sched: AsyncIOScheduler) -> None:
         misfire_grace_time=30,
     )
     logger.info("Registered harness patrol sweep (every %ss)", seconds)
+
+
+def _register_queue_sweep(sched: AsyncIOScheduler) -> None:
+    """v120: the deferred execution lane's tick - claims queued rows and
+    runs them through the executor. PY8N_QUEUE_TICK_SECONDS (default 5,
+    floor 1, <=0 disables)."""
+    import os
+
+    try:
+        seconds = int(os.environ.get("PY8N_QUEUE_TICK_SECONDS") or 5)
+    except (TypeError, ValueError):
+        seconds = 5
+    if seconds <= 0:
+        logger.info("queue sweep disabled (PY8N_QUEUE_TICK_SECONDS<=0)")
+        return
+    seconds = max(seconds, 1)
+    from . import executor
+
+    async def _tick_queue():
+        try:
+            ran = await executor.run_due_queue()
+            if ran:
+                logger.info("queue tick ran %d deferred execution(s)", len(ran))
+        except Exception:  # noqa: BLE001 - a failed tick never wedges the house
+            logger.exception("queue tick failed")
+
+    sched.add_job(
+        _tick_queue,
+        trigger=IntervalTrigger(seconds=seconds),
+        id="executor:queue",
+        replace_existing=True,
+        misfire_grace_time=5,
+    )
+    logger.info("queue sweep every %ss", seconds)
 
 
 async def _tick_patrols() -> None:

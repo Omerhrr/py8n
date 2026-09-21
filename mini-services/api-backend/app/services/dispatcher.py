@@ -51,6 +51,32 @@ async def dispatch_execution(
         )
         return execution_id
 
+    if settings.execution_mode == "queue":
+        # v120: the DEFERRED lane - the row lands as 'queued' (the id still
+        # resolves immediately, no 404 window) and the house scheduler's
+        # queue tick (executor.run_due_queue, PY8N_QUEUE_TICK_SECONDS)
+        # claims and runs it one at a time. Single-process deployments get
+        # back-pressure relief without a broker; celery remains the
+        # distributed story.
+        from ..db import AsyncSessionLocal
+        from ..models import ExecutionLog
+
+        payload = dict(trigger_payload or {})
+        if trigger_node_id:
+            payload["_trigger_node_id"] = trigger_node_id
+        async with AsyncSessionLocal() as session:
+            session.add(
+                ExecutionLog(
+                    id=execution_id,
+                    workflow_id=workflow_id,
+                    status="queued",
+                    trigger_type=trigger_type,
+                    trigger_payload=payload,
+                )
+            )
+            await session.commit()
+        return execution_id
+
     # Sandbox / single-process mode: run inline on the event loop.
     from .executor import dispatch_inline
 

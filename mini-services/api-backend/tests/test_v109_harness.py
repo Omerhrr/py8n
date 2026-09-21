@@ -444,4 +444,4 @@ def test_v109_ownership_and_version_pin():
 
 
 def test_v109_version_pin():
-    assert settings.version == "1.119.0"
+    assert settings.version == "1.120.0"

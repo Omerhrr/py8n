@@ -30,6 +30,7 @@ import json
 import os
 import re
 import secrets
+import struct
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -131,13 +132,17 @@ def _b64url_decode(segment: str) -> bytes:
     return base64.urlsafe_b64decode(segment + pad)
 
 
-def make_token(user_id: str) -> str:
+def make_token(user_id: str, scope: str | None = None) -> str:
+    """Mint a JWT. v120: ``scope="mfa"`` mints a SHORT-LIVED (5 min)
+    two-factor challenge token - it carries the ``scope`` claim and
+    ``decode_token`` refuses it as a bearer, so a challenge can never
+    impersonate a session."""
     header = _b64url(json.dumps({"alg": "HS256", "typ": "JWT"}).encode())
-    payload = _b64url(
-        json.dumps(
-            {"sub": user_id, "exp": int(time.time()) + settings.token_ttl_seconds}
-        ).encode()
-    )
+    ttl = 300 if scope == "mfa" else settings.token_ttl_seconds
+    claims = {"sub": user_id, "exp": int(time.time()) + ttl}
+    if scope:
+        claims["scope"] = scope
+    payload = _b64url(json.dumps(claims).encode())
     signing_input = f"{header}.{payload}".encode()
     sig = hmac.new(_load_jwt_secret(), signing_input, hashlib.sha256).digest()
     return f"{header}.{payload}.{_b64url(sig)}"
@@ -155,10 +160,81 @@ def decode_token(token: str) -> str | None:
         claims = json.loads(_b64url_decode(payload))
         if int(claims.get("exp", 0)) < int(time.time()):
             return None
+        # v120: a two-factor challenge token is never a bearer token
+        if claims.get("scope") == "mfa":
+            return None
         sub = claims.get("sub")
         return str(sub) if sub else None
     except (ValueError, TypeError, json.JSONDecodeError):
         return None
+
+
+def decode_mfa_token(token: str) -> str | None:
+    """The mirror: return the user id ONLY for a valid, unexpired
+    two-factor challenge token (scope=mfa) - nothing else, ever."""
+    try:
+        header, payload, sig = token.split(".")
+        expected = hmac.new(
+            _load_jwt_secret(), f"{header}.{payload}".encode(), hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(expected, _b64url_decode(sig)):
+            return None
+        claims = json.loads(_b64url_decode(payload))
+        if int(claims.get("exp", 0)) < int(time.time()):
+            return None
+        if claims.get("scope") != "mfa":
+            return None
+        sub = claims.get("sub")
+        return str(sub) if sub else None
+    except (ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+# ----------------------------------------------------------------------
+# TOTP two-factor (v120) - RFC 6238 over the stdlib (base32 + hmac-sha1)
+# ----------------------------------------------------------------------
+_TOTP_STEP = 30
+_TOTP_DIGITS = 6
+
+
+def generate_totp_secret() -> str:
+    """20 random bytes, base32 - the authenticator-app enrollment secret."""
+    return base64.b32encode(secrets.token_bytes(20)).decode().rstrip("=")
+
+
+def _totp_at(secret: str, counter: int) -> str:
+    pad = "=" * (-len(secret) % 8)
+    key = base64.b32decode(secret.upper() + pad)
+    digest = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    code = (int.from_bytes(digest[offset:offset + 4], "big") & 0x7FFFFFFF) \
+        % (10 ** _TOTP_DIGITS)
+    return str(code).zfill(_TOTP_DIGITS)
+
+
+def totp_code(secret: str, at: float | None = None) -> str:
+    """The code a legitimate authenticator would show right now (or at the
+    given epoch second) - the same math the verifier runs."""
+    counter = int((at if at is not None else time.time()) // _TOTP_STEP)
+    return _totp_at(secret, counter)
+
+
+def verify_totp(secret: str, code: str, window: int = 1) -> bool:
+    """Accept the current step +- ``window`` steps of clock drift."""
+    code = str(code or "").strip()
+    if not secret or not code:
+        return False
+    now_counter = int(time.time() // _TOTP_STEP)
+    return any(
+        hmac.compare_digest(_totp_at(secret, now_counter + drift), code)
+        for drift in range(-window, window + 1)
+    )
+
+
+def otpauth_uri(email: str, secret: str) -> str:
+    """The enrollment URI an authenticator app scans as a QR code."""
+    from urllib.parse import quote
+    return f"otpauth://totp/Py8n:{quote(email or 'user')}?secret={secret}&issuer=Py8n"
 
 
 # ----------------------------------------------------------------------

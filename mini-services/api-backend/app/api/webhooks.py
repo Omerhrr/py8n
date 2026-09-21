@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import hmac
 import json
 from dataclasses import dataclass, field
@@ -125,10 +126,14 @@ def _request_envelope(request: Request, body: object) -> dict:
     }
 
 
-def _enforce_webhook_auth(request: Request, params: dict) -> None:
+def _enforce_webhook_auth(request: Request, params: dict,
+                          raw_body: bytes = b"") -> None:
     """v23: reject unauthenticated webhook calls BEFORE the flow runs.
 
-    Timing-safe comparisons (hmac.compare_digest) for both modes.
+    Timing-safe comparisons (hmac.compare_digest) for every mode. v120
+    adds ``hmac``: the sender signs the RAW body with HMAC-SHA256 and
+    sends the hex digest in a header (a ``sha256=`` prefix, GitHub
+    style, is accepted) - Stripe-style payload verification.
     """
     mode = (params.get("auth_mode") or "none").lower()
     if mode == "none":
@@ -158,6 +163,22 @@ def _enforce_webhook_auth(request: Request, params: dict) -> None:
             raise HTTPException(status_code=401, detail="Invalid credentials")
         return
 
+    if mode == "hmac":
+        header_name = (params.get("signature_header") or "X-Signature").strip()
+        secret = str(params.get("signature_secret") or "")
+        provided = request.headers.get(header_name, "").strip()
+        if not secret:
+            raise HTTPException(
+                status_code=401,
+                detail="Signature verification is not configured (no secret set)")
+        if not provided:
+            raise HTTPException(status_code=401, detail="Missing signature header")
+        digest = hmac.new(secret.encode(), raw_body or b"", hashlib.sha256).hexdigest()
+        provided_hex = provided[7:] if provided.lower().startswith("sha256=") else provided
+        if not hmac.compare_digest(provided_hex.strip().lower(), digest):
+            raise HTTPException(status_code=401, detail="Invalid signature")
+        return
+
     raise HTTPException(status_code=401, detail=f"Unknown auth mode {mode!r}")
 
 
@@ -179,7 +200,7 @@ async def catch_webhook(workflow_id: str, request: Request, db: AsyncSession = D
 
     node = wf.webhook_nodes()[0]
     params = node.get("parameters") or {}
-    _enforce_webhook_auth(request, params)  # v23: 401 before the flow runs
+    _enforce_webhook_auth(request, params, raw_body=raw)  # v23: 401 before the flow runs
     # v81: the system lifecycle gate - a webhook hit is the system reacting,
     # so a workflow whose system is paused/stopped is refused loudly (409):
     # the caller learns the system is not operating instead of the hit

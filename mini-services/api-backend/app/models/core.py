@@ -28,6 +28,10 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(120), default="")
     password_hash: Mapped[str] = mapped_column(String(300), nullable=False)
     role: Mapped[str] = mapped_column(String(20), default="member", index=True)  # admin|member
+    # v120: TOTP two-factor - the secret sits PENDING until the first code
+    # verifies (setup -> enable); "" = never enrolled
+    totp_secret: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    totp_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 

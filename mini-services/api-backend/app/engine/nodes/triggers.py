@@ -73,8 +73,10 @@ class WebhookTriggerNode(BaseNode):
         # v23: webhook authentication - checked BEFORE the flow runs (401 on failure)
         auth_mode: str = Field(
             default="none",
-            description="none = public; header = a required header must carry the expected value; basic = HTTP Basic auth",
-            json_schema_extra={"widget": "select", "options": ["none", "header", "basic"]},
+            description="none = public; header = a required header must carry the expected value; "
+                        "basic = HTTP Basic auth; hmac = the sender signs the RAW body with "
+                        "HMAC-SHA256 and py8n verifies the hex digest (Stripe/GitHub style)",
+            json_schema_extra={"widget": "select", "options": ["none", "header", "basic", "hmac"]},
         )
         auth_header_name: str = Field(
             default="X-Webhook-Token",
@@ -91,6 +93,16 @@ class WebhookTriggerNode(BaseNode):
         auth_pass: str = Field(
             default="",
             description="Basic mode: expected password",
+        )
+        # v120: HMAC payload signatures - verified against the RAW body,
+        # timing-safe, before the flow runs (401 on miss)
+        signature_header: str = Field(
+            default="X-Signature",
+            description="HMAC mode: the header carrying the hex digest",
+        )
+        signature_secret: str = Field(
+            default="",
+            description="HMAC mode: the shared secret the sender signs with (required for hmac mode)",
         )
 
     async def execute(self, context) -> NodeResult:

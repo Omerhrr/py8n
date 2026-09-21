@@ -745,3 +745,118 @@ async def kick_member(system_id: str, request: Request, user_id: str, user=Depen
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
+
+
+# ---------------------------------------------------------------------- v120
+# the system bundle - a whole system as ONE portable document
+# ----------------------------------------------------------------------
+
+class SystemImportIn(BaseModel):
+    name: str = Field(default="", max_length=140)
+    note: str = Field(default="", max_length=400)
+    pack: dict = Field(default_factory=dict)
+
+
+@router.get("/{system_id}/export")
+async def export_system(system_id: str, request: Request,
+                        user=Depends(get_optional_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Export the whole system as ONE portable document (v120): its meta
+    plus a py8n-pack of every bound workflow (graph) and dataset (schema +
+    rows). POST it at ``POST /systems/import`` to land a copy on any
+    instance - fresh ids, inactive workflows, the books (er, rows) intact."""
+    s, my_role = await _get_system(db, system_id, user, request=request)
+    from ..api.packs import MAX_PACK_ROWS, PACK_FORMAT, PACK_VERSION
+    from ..config import settings
+    from ..models import Dataset
+    from ..services import datasets as ds_svc
+
+    workflows: list[dict] = []
+    datasets: list[dict] = []
+    warnings: list[str] = []
+    for c in s.components or []:
+        if c.kind == "workflow":
+            wf = await db.get(Workflow, c.ref_id)
+            if wf is not None:
+                workflows.append({"name": wf.name,
+                                  "description": wf.description or "",
+                                  "graph": wf.graph or {"nodes": [], "edges": []}})
+        elif c.kind == "dataset":
+            ds = await db.get(Dataset, c.ref_id)
+            if ds is None:
+                continue
+            rows: list = []
+            if ds.row_count:
+                df = ds_svc.read_parquet_df(ds_svc.parquet_path(ds.id))
+                rows = ds_svc.jsonable_rows(df)
+                if len(rows) > MAX_PACK_ROWS:
+                    rows = rows[:MAX_PACK_ROWS]
+                    warnings.append(f"dataset '{ds.name}' truncated to {MAX_PACK_ROWS} rows")
+            datasets.append({"name": ds.name, "description": ds.description or "",
+                             "schema": ds.schema_json or [], "rows": rows})
+    if not workflows and not datasets:
+        raise HTTPException(status_code=400,
+                            detail="this system binds no workflows or datasets to export")
+    return {
+        "format": "py8n-system",
+        "system_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "py8n_version": settings.version,
+        "system": {"name": s.name, "description": s.description or "",
+                   "icon": s.icon, "color": s.color,
+                   "source_solution_slug": s.source_solution_slug},
+        "pack": {"format": PACK_FORMAT, "pack_version": PACK_VERSION,
+                 "workflows": workflows, "datasets": datasets},
+        "manifest": {"workflow_count": len(workflows),
+                     "dataset_count": len(datasets),
+                     "warnings": warnings},
+    }
+
+
+@router.post("/import", status_code=201)
+async def import_system(body: SystemImportIn, user=Depends(get_optional_user),
+                        db: AsyncSession = Depends(get_db)):
+    """Land a system bundle (v120): the pack's workflows install
+    INACTIVE-honest (the lifecycle gate turns them on deliberately), the
+    datasets land with their rows, and a NEW system binds everything -
+    the copy is the copy's own: fresh ids, no history, no secrets."""
+    from pydantic import ValidationError
+
+    doc = dict(body.pack or {})
+    if doc.get("format") == "py8n-system":
+        doc = dict(doc.get("pack") or {})
+    if not doc:
+        raise HTTPException(status_code=400,
+                            detail="pass a py8n-system document (or its pack)")
+    try:
+        pack = PackDocument.model_validate(doc)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400,
+                            detail=f"invalid pack document: {exc}") from exc
+
+    owner = user.id if user else None
+    result = await _import_pack_doc(pack, owner, db)
+
+    sys_row = Py8nSystem(
+        name=(body.name or "Imported system").strip()[:140],
+        description=(body.note or "Imported via POST /systems/import")[:400],
+    )
+    sys_row.owner_id = owner
+    db.add(sys_row)
+    await db.flush()
+    installed = []
+    for wf in result.get("workflows", []):
+        db.add(SystemComponent(system_id=sys_row.id, kind="workflow",
+                               ref_id=wf["id"]))
+        installed.append({"kind": "workflow", "ref_id": wf["id"],
+                          "name": wf.get("name")})
+    for ds in result.get("datasets", []):
+        db.add(SystemComponent(system_id=sys_row.id, kind="dataset",
+                               ref_id=ds["id"]))
+        installed.append({"kind": "dataset", "ref_id": ds["id"],
+                          "name": ds.get("name")})
+    await db.commit()
+    await db.refresh(sys_row)
+    return {"system": {"id": sys_row.id, "name": sys_row.name,
+                       "components": len(installed)},
+            "installed": installed, "skipped": result.get("skipped", [])}

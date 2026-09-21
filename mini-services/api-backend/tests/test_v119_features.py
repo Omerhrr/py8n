@@ -322,4 +322,4 @@ def test_v119_the_close_gate_holds_the_books():
 
 
 def test_v119_version_pin():
-    assert settings.version == "1.119.0"
+    assert settings.version == "1.120.0"

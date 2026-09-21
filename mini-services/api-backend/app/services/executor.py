@@ -525,3 +525,45 @@ async def cancel_execution(execution_id: str) -> dict:
     if event is not None:
         event.set()
     return {"execution_id": execution_id, "status": "cancelling"}
+
+
+async def run_due_queue(limit: int | None = None) -> list[str]:
+    """The queue tick (v120): claim queued executions and run them one at
+    a time - the deferred lane's worker for single-process deployments.
+
+    The claim flips queued -> running BEFORE the run (the rhythm stays
+    honest across a crash: a claimed row that dies mid-run finalizes as
+    failed like any other), then each claimed row runs through the SAME
+    execute_workflow every other path uses - zero parallel execution
+    machinery. Returns the ids it ran.
+    """
+    take = 5 if limit is None else max(int(limit), 1)
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(ExecutionLog)
+                .where(ExecutionLog.status == "queued")
+                .order_by(ExecutionLog.started_at.asc())
+                .limit(take)
+            )
+        ).scalars().all()
+        claimed = []
+        for row in rows:
+            row.status = "running"
+            claimed.append(row)
+        await session.commit()
+
+    ran: list[str] = []
+    for row in claimed:
+        payload = dict(row.trigger_payload or {})
+        node_id = payload.pop("_trigger_node_id", None)
+        await execute_workflow(
+            row.workflow_id,
+            row.trigger_type,
+            payload or {},
+            node_id,
+            row.id,
+            log_created=True,
+        )
+        ran.append(row.id)
+    return ran

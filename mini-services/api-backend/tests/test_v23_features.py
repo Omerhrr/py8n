@@ -368,6 +368,6 @@ def test_v23_definitions():
             assert set(agent_props["memory"]["options"]) == {"none", "buffer"}
             for k in ("auth_mode", "auth_header_name", "auth_header_value", "auth_user", "auth_pass"):
                 assert k in hook_props, k
-            assert set(hook_props["auth_mode"]["options"]) == {"none", "header", "basic"}
+            assert set(hook_props["auth_mode"]["options"]) == {"none", "header", "basic", "hmac"}  # v120: hmac joins
 
     asyncio.run(_go())

@@ -2305,3 +2305,61 @@ as truncated text - the tests parse them.
 **GATES**: pytest 642 passed + 7 deliberate skips (638 -> 642); `bun run
 build` green (1.96 MB); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py
 2/2 on the real server. 1.119.0.
+
+## v120: the platform grows up - signed webhooks, two-factor, portability, the queue
+
+**THE ROUND**: the product's edge (ERP + harness) got the spotlight; v120
+hardens the chassis underneath it - four moves a company needs before it
+can trust the platform with its real operations.
+
+**SIGNED WEBHOOKS** (`app/api/webhooks.py` + `engine/nodes/triggers.py`):
+the webhook trigger's auth gains the ``hmac`` mode - the sender signs the
+RAW body with HMAC-SHA256 and py8n verifies the hex digest in
+``signature_header`` (default X-Signature; a ``sha256=`` prefix, GitHub
+style, is accepted), timing-safe, BEFORE the flow runs (401). The node's
+ParamsModel carries the new fields so the canvas form can set them. This
+is the Stripe/GitHub door - the connector story's foundation.
+
+**TOTP TWO-FACTOR** (`app/auth.py` + `app/api/auth.py` + users columns +
+migration ``6c4f2a9d1e75``): RFC 6238 over the stdlib (base32 + hmac-sha1,
+30s steps, +-1 step drift). ``/auth/2fa/setup`` mints the pending secret +
+otpauth URI; ``/auth/2fa/enable`` takes a live code; the login for a
+protected account answers ``mfa_required`` + a SHORT-LIVED (5 min)
+challenge token that ``decode_token`` REFUSES as a bearer (a challenge is
+never a session); ``/auth/2fa/verify`` mints the real session;
+``/auth/2fa/disable`` demands the code (a stolen session cannot quietly
+unprotect the account). The login console grows its code step. Columns
+ride a real Alembic migration (fresh installs get them from create_all).
+
+**SYSTEM BUNDLES** (`app/api/systems.py`): ``GET /systems/{id}/export``
+wraps a whole system - meta + a py8n-pack of every bound workflow's graph
+and every dataset's schema AND rows - as one portable document;
+``POST /systems/import`` lands it as a COPY: fresh ids, workflows
+inactive-honest (the lifecycle gate turns them on deliberately), rows
+intact, malformed bundles a loud 400. Portability without secrets.
+
+**THE QUEUE** (`app/services/dispatcher.py` + `executor.py` +
+`scheduler.py`): ``PY8N_EXECUTION_MODE=queue`` lands runs as ``queued``
+rows (the id still resolves, no 404 window) and the house scheduler's
+queue tick (``PY8N_QUEUE_TICK_SECONDS``, default 5, 0 disables) claims
+them queued->running and runs each through the SAME execute_workflow -
+back-pressure relief for single-process deployments without a broker;
+celery remains the distributed story. install.sh + INSTALL.md join (the
+one-command install story).
+
+**TESTS**: test_v120_features.py (5) - the hmac door (unsigned/tampered
+401, exact-bytes + sha256= prefix 202, the node def carries the fields);
+two-factor end to end (wrong code refuses, double-enable 409, the
+challenge token NOT a bearer, wrong code 401, right code mints a real
+session, disable demands the code); the bundle (export 1wf+1ds with rows,
+import as a copy with fresh ids and the flow inactive, malformed 400);
+the queue (dispatch lands queued, the tick runs it to success through the
+real executor); the pin. v23's auth-mode enum pin rides {"+hmac"}.
+FOUND LIVE by the smoke gate: the queue sweep crashed server startup
+(NameError: os) that pytest's ASGI transport cannot see (lifespan never
+runs in tests) - fixed with the house's local-import pattern.
+
+**GATES**: pytest 647 passed + 7 deliberate skips (642 -> 647); `bun run
+build` green; smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the
+real server (after the startup fix); migration chain verified (alembic
+history: 6c4f2a9d1e75 head). 1.120.0.
