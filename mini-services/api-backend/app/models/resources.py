@@ -307,3 +307,29 @@ class HarnessPatrol(Base):
     last_dispatch_detail: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+
+class ErpClose(Base):
+    """A posted period close (v118) - the accounting close's receipt.
+
+    The ERP doors always spoke read-only; v118 adds THE WRITE: closing
+    entries land on the GL book (revenue and expense sweep through
+    Income summary into Retained earnings) and this row is the receipt
+    that locks the book - one close per dataset, a second close is a
+    loud 409. The receipt carries the period's net, the retained
+    earnings it produced, how many closing lines landed, and the lines
+    themselves (detail_json) so the audit can replay the close without
+    re-deriving it.
+    """
+
+    __tablename__ = "erp_closes"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    owner_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    dataset_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    period: Mapped[str] = mapped_column(String(60), default="", nullable=False)
+    net: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    retained_after: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    entries: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    closed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    detail_json: Mapped[dict] = mapped_column(JSONVariant, default=dict)

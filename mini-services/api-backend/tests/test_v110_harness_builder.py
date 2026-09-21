@@ -407,4 +407,4 @@ def test_v110_the_operator_gate_reject_installs_nothing():
 # ---------------------------------------------------------------------------
 
 def test_v110_version_pin():
-    assert settings.version == "1.117.0"
+    assert settings.version == "1.118.0"

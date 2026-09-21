@@ -75,6 +75,23 @@ type TrialBalance = {
 const trialBalance = ref<TrialBalance | null>(null)
 const bookStatements = ref<Statements | null>(null)
 
+// v118: the aging, the cash flow and THE CLOSE - the books grow handles
+type AgingLine = { ref: string; open: number; at: string; age_days: number | null; bucket: string }
+type AgingBucket = { bucket: string; refs: number; total: number }
+type AgingSide = { open_refs: number; total: number; buckets: AgingBucket[]; lines: AgingLine[] }
+type Aging = { receivables: AgingSide; payables: AgingSide; as_of: string }
+type CashSection = { name: string; inflows: number; outflows: number; net: number }
+type CashFlow = { sections: CashSection[]; inflow_total: number; outflow_total: number
+                  net_cash_movement: number; cash_accounts: string[] }
+type CloseReceipt = { id: string; period: string; net: number; retained_after: number
+                      entries: number; closed_at: string }
+type CloseHistory = { closed: boolean; closes: CloseReceipt[] }
+const bookAging = ref<Aging | null>(null)
+const bookCashFlow = ref<CashFlow | null>(null)
+const bookCloses = ref<CloseHistory | null>(null)
+const closingBooks = ref(false)
+const closeError = ref('')
+
 const ORDER_MACHINE = 'Sales order lifecycle'
 const STOCK_MACHINE = 'Inventory replenishment'
 const CLOSE_MACHINE = 'Month-end close'
@@ -197,6 +214,75 @@ const tbChartOption = computed(() => {
 })
 const tbChartHeight = computed(() =>
   Math.min(80 + (trialBalance.value?.rows.length || 0) * 26, 340))
+
+// v118: the cash flow waterfall - the sections step down (or up) from the
+// running total, and the final bar is the net movement from zero
+const CF_COLORS: Record<string, string> = {
+  operating: '#38bdf8', investing: '#a78bfa', financing: '#fbbf24',
+  other: '#a1a1aa',
+}
+const agingSides = [
+  { key: 'receivables' as const, title: 'Receivables aging', note: 'who owes the company' },
+  { key: 'payables' as const, title: 'Payables aging', note: 'who the company owes' },
+]
+function ageClass(bucket: string): string {
+  if (bucket === 'current') return 'bg-emerald-500/15 text-emerald-400'
+  if (bucket === 'd90_plus') return 'bg-rose-500/15 text-rose-400'
+  if (bucket === 'undated') return 'bg-zinc-700/60 text-zinc-300'
+  return 'bg-amber-500/15 text-amber-400'
+}
+const cfChartOption = computed(() => {
+  const cf = bookCashFlow.value
+  if (!cf) return null
+  const steps = cf.sections.map(s => ({ name: s.name, value: s.net }))
+  steps.push({ name: 'net', value: cf.net_cash_movement })
+  let run = 0
+  const base: number[] = []
+  const bars: { value: number; itemStyle: { color: string } }[] = []
+  for (const s of steps) {
+    if (s.name === 'net') {
+      base.push(0)
+      bars.push({ value: s.value,
+                  itemStyle: { color: s.value >= 0 ? '#34d399' : '#fb7185' } })
+      continue
+    }
+    const start = run
+    run = Math.round((run + s.value) * 100) / 100
+    base.push(Math.min(start, run))
+    bars.push({ value: Math.abs(Math.round((run - start) * 100) / 100),
+                itemStyle: { color: CF_COLORS[s.name] || CF_COLORS.other } })
+  }
+  return {
+    backgroundColor: 'transparent',
+    grid: { left: 8, right: 16, top: 20, bottom: 10, containLabel: true },
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'shadow' },
+      backgroundColor: '#18181b', borderColor: '#3f3f46',
+      textStyle: { color: '#e4e4e7', fontSize: 11 },
+      valueFormatter: (v: any) => Number(v).toFixed(2),
+    },
+    xAxis: {
+      type: 'category', data: steps.map(s => s.name),
+      axisLabel: { color: '#a1a1aa', fontSize: 10 },
+      axisLine: { lineStyle: { color: '#3f3f46' } }, axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value', axisLabel: { color: '#71717a', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(63,63,70,0.35)' } },
+    },
+    series: [
+      { type: 'bar', stack: 'flow', silent: true,
+        itemStyle: { color: 'transparent' },
+        emphasis: { itemStyle: { color: 'transparent' } }, data: base },
+      { type: 'bar', stack: 'flow', barMaxWidth: 26, data: bars,
+        label: { show: true, position: 'top', color: '#d4d4d8', fontSize: 10,
+                 formatter: (p: any) => {
+                   const s = steps[p.dataIndex]
+                   return (s.value >= 0 ? '+' : '') + s.value.toFixed(2)
+                 } } },
+    ],
+  }
+})
 
 function allowedFrom(machine: ProcessDef, state: string) {
   return (machine.definition?.transitions || [])
@@ -443,14 +529,50 @@ async function refresh() {
         bookStatements.value = await api.get<Statements>(
           `/erp/statements?dataset_id=${encodeURIComponent(glId)}`)
       } catch { bookStatements.value = null }
+      try {
+        // v118: the aging - who owes the company, who the company owes
+        bookAging.value = await api.get<Aging>(
+          `/erp/aging?dataset_id=${encodeURIComponent(glId)}`)
+      } catch { bookAging.value = null }
+      try {
+        // v118: the cash flow - where the money moved
+        bookCashFlow.value = await api.get<CashFlow>(
+          `/erp/cash-flow?dataset_id=${encodeURIComponent(glId)}`)
+      } catch { bookCashFlow.value = null }
+      try {
+        // v118: the close history - is the book locked?
+        bookCloses.value = await api.get<CloseHistory>(
+          `/erp/close?dataset_id=${encodeURIComponent(glId)}`)
+      } catch { bookCloses.value = null }
     } else {
       trialBalance.value = null
       bookStatements.value = null
+      bookAging.value = null
+      bookCashFlow.value = null
+      bookCloses.value = null
     }
   } catch (e: any) {
     error.value = e?.data?.detail || e?.message || 'the console could not reach the books'
   } finally {
     loading.value = false
+  }
+}
+
+// v118: THE CLOSE - the accounting close posts the closing entries and
+// locks the book; the console shows the receipt, the lock chip and the
+// door's refusal (unbalanced / already closed / nothing to close)
+async function closeBooks() {
+  const glId = dsIds.value['GL entries']
+  if (!glId || closingBooks.value) return
+  closingBooks.value = true
+  closeError.value = ''
+  try {
+    await api.post(`/erp/close?dataset_id=${encodeURIComponent(glId)}`, {})
+    await refresh()
+  } catch (e: any) {
+    closeError.value = e?.data?.detail || e?.message || 'the close refused'
+  } finally {
+    closingBooks.value = false
   }
 }
 
@@ -992,6 +1114,91 @@ useHead({ title: 'ERP - Py8n' })
               </tfoot>
             </table>
           </div>
+        </section>
+        <!-- v118: the cash flow - where the money moved, by the stated heuristic -->
+        <section v-if="bookCashFlow" class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold">Cash flow</h2>
+            <span class="text-[10px] uppercase tracking-wide text-zinc-600">direct method · {{ (bookCashFlow.cash_accounts || []).join(', ') || 'no cash account' }}</span>
+          </div>
+          <p class="mt-0.5 text-xs text-zinc-500">
+            in {{ bookCashFlow.inflow_total.toFixed(2) }} · out {{ bookCashFlow.outflow_total.toFixed(2) }} ·
+            <span :class="bookCashFlow.net_cash_movement >= 0 ? 'text-emerald-400' : 'text-rose-400'">net {{ bookCashFlow.net_cash_movement.toFixed(2) }}</span>
+          </p>
+          <ClientOnly v-if="cfChartOption">
+            <EChart :option="cfChartOption" :height="210" class="mt-2" />
+          </ClientOnly>
+        </section>
+        <!-- v118: the aging - the collection desk's first grip -->
+        <section v-if="bookAging" class="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          <div v-for="side in agingSides" :key="side.key"
+               class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+            <div class="flex items-baseline justify-between">
+              <h2 class="text-sm font-semibold">{{ side.title }}</h2>
+              <span class="text-[10px] uppercase tracking-wide text-zinc-600">{{ side.note }}</span>
+            </div>
+            <p class="mt-0.5 text-xs text-zinc-500">
+              {{ bookAging[side.key].open_refs }} open ref{{ bookAging[side.key].open_refs === 1 ? '' : 's' }} ·
+              <span class="tabular-nums">{{ bookAging[side.key].total.toFixed(2) }}</span> open
+            </p>
+            <div class="mt-2 flex flex-wrap gap-1.5">
+              <span
+                v-for="b in bookAging[side.key].buckets" :key="b.bucket"
+                class="rounded-md px-2 py-0.5 text-[10px] font-semibold"
+                :class="b.refs > 0 ? 'bg-zinc-800 text-zinc-200' : 'bg-zinc-900 text-zinc-600'"
+              >{{ b.bucket }} {{ b.total.toFixed(2) }} <span class="font-normal opacity-70">({{ b.refs }})</span></span>
+            </div>
+            <table v-if="bookAging[side.key].lines.length" class="mt-3 w-full text-left text-xs">
+              <thead class="text-zinc-500">
+                <tr>
+                  <th class="pb-2 font-medium">ref</th><th class="pb-2 font-medium">bucket</th>
+                  <th class="pb-2 font-medium text-right">age days</th>
+                  <th class="pb-2 font-medium text-right">open</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-zinc-800/60">
+                <tr v-for="l in bookAging[side.key].lines" :key="l.ref">
+                  <td class="py-1.5 font-mono text-zinc-300">{{ l.ref }}</td>
+                  <td class="py-1.5"><span class="rounded-md px-1.5 py-0.5 text-[10px] font-semibold" :class="ageClass(l.bucket)">{{ l.bucket }}</span></td>
+                  <td class="py-1.5 text-right tabular-nums text-zinc-400">{{ l.age_days ?? 'n/a' }}</td>
+                  <td class="py-1.5 text-right tabular-nums text-zinc-200">{{ l.open.toFixed(2) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-else class="mt-3 rounded-xl border border-dashed border-zinc-700 px-4 py-5 text-center text-xs text-zinc-600">Nothing open - every ref is settled.</p>
+          </div>
+        </section>
+        <!-- v118: THE CLOSE - post the period, lock the book -->
+        <section v-if="bookCloses" class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <h2 class="text-sm font-semibold">Period close</h2>
+            <span
+              v-if="bookCloses.closed"
+              class="rounded-md bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-400"
+            >book locked</span>
+            <span v-else class="rounded-md bg-zinc-800 px-2 py-0.5 text-[10px] font-semibold uppercase text-zinc-400">open</span>
+          </div>
+          <p class="mt-0.5 text-xs text-zinc-500">The accounting close sweeps revenue and expense through Income summary into Retained earnings with real journal entries - then locks the book. A fresh period rides a fresh book.</p>
+          <p v-if="closeError" class="mt-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">{{ closeError }}</p>
+          <div v-if="bookCloses.closes.length" class="mt-3 space-y-2">
+            <div v-for="c in bookCloses.closes" :key="c.id"
+                 class="rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2.5">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <p class="text-xs font-medium text-zinc-200">{{ c.period }}</p>
+                <span class="text-[10px] text-zinc-500">{{ new Date(c.closed_at).toLocaleString() }}</span>
+              </div>
+              <p class="mt-1 text-[11px] text-zinc-400">
+                net <span class="tabular-nums" :class="c.net >= 0 ? 'text-emerald-400' : 'text-rose-400'">{{ c.net.toFixed(2) }}</span>
+                · retained after <span class="tabular-nums">{{ c.retained_after.toFixed(2) }}</span>
+                · {{ c.entries }} closing lines
+              </p>
+            </div>
+          </div>
+          <button v-else
+            class="mt-3 rounded-xl bg-amber-500 px-4 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-amber-400 disabled:opacity-50"
+            :disabled="closingBooks"
+            @click="closeBooks()"
+          >{{ closingBooks ? 'Closing the books...' : 'Close the books' }}</button>
         </section>
         <section class="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-5">
           <div class="flex flex-wrap items-center justify-between gap-2">

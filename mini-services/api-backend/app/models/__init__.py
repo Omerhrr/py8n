@@ -16,7 +16,7 @@ from .core import User, ApiKey
 from .workflows import Workflow, ExecutionLog, WorkflowVersion, NotificationRule, PackRegistry
 from .resources import (Credential, CredentialEvent, EnvVariable, AppSetting,
                         Folder, AgentMemory, AgentModule, HarnessSession,
-                        HarnessTurn, HarnessApproval, HarnessPatrol)
+                        HarnessTurn, HarnessApproval, HarnessPatrol, ErpClose)
 from .datasets import Dataset, DatasetVersion, DatasetContract, IngestionState, DatasetContractRevision
 from .apps import Artifact, TrainedModel, App, Dashboard, AppShareGrant, GrantAuditEvent, DashboardAuditEvent
 from .reports import ScheduledReport, ReportDeliveryEvent, ChainReportSchedule
@@ -42,6 +42,7 @@ __all__ = [
     "Folder",
     "AgentMemory", "AgentModule",
     "HarnessSession", "HarnessTurn", "HarnessApproval", "HarnessPatrol",
+    "ErpClose",
     "Dataset",
     "DatasetVersion",
     "DatasetContract",

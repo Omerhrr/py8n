@@ -461,4 +461,4 @@ def test_v91_catalog_journeys():
 
 
 def test_v91_version():
-    assert settings.version == "1.117.0"
+    assert settings.version == "1.118.0"

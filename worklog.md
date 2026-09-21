@@ -2199,3 +2199,67 @@ Stage Summary:
 **TESTS**: tests/test_v117_features.py (2) - the operating book (a sale, a payroll run, a vendor bill; 1353.0 both sides): income 1000/200/net 800, assets 953 = liabilities 153 + retained 800, BALANCED; the capital book (cash 5000 against owner's equity): the equity line takes it, net 0, the equation ties through equity; the odd book (Goodwill, unclassified): the memos bucket holds it at -10.0 credit-normal and the tie-out reads FALSE - the door will not pretend; the 404 parity; the pin. 38 pins -> 1.117.0; sidebar v1.117; both smoke asserts ride.
 
 **GATES**: pytest 634 passed + 7 deliberate skips (632 -> 634); `bun run build` green (1.96 MB, echarts restored via bun install - the sandbox reset had rolled node_modules back); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the real server (one cold-boot flake on the v114 walk's first run - the 3s drain lost to fresh caches on the reset box; the warm re-run and the v115 walk both green, no product change). 1.117.0.
+
+## v118: the month closes - the aging, the cash flow and THE CLOSE
+
+**THE ROUND**: the ERP doors always spoke read-only; the books could be
+READ but never CLOSED. v118 gives them their first WRITE and the
+collection desk its first grip - and moves every book read into ONE
+service so nothing can ever disagree.
+
+**THE SERVICE** (`app/services/erp_books.py`, new): the reader, the kinds
+map and the bucket orders move here verbatim from the door; the trial
+balance, the statements, the AGING, the CASH FLOW and THE CLOSE are all
+functions over one book. The kinds map gains income summary (equity - the
+sweep account, always zero at the end), equipment (asset - the investing
+classic) and loan payable (liability - the financing one).
+
+**THE DOORS** (`app/api/erp.py`): the old two doors (trial-balance,
+statements) are now thin wrappers over the service with their wire shape
+unchanged; three GET doors join - `/erp/aging` (open receivable/payable
+refs bucketed current / 31-60 / 61-90 / 90+ / undated from the journal
+lines' `at` stamps; settled refs say nothing), `/erp/cash-flow`
+(direct-method: every ref that touches a cash account is sectioned
+operating / investing / financing / other by its counterpart rows under a
+STATED heuristic - receivables/payables and revenue/expense are operating,
+non-cash assets are investing, equity and other liabilities are financing;
+movements between the company's own cash pockets are excluded; the
+sections' net IS the cash movement) and `/erp/close` (GET history), plus
+POST `/erp/close` - THE WRITE.
+
+**THE CLOSE**: real closing entries appended to the SAME book through
+`ds_svc.append_rows` - every revenue account debited to zero and every
+expense credited to zero, the sweep landing on Income summary, then the
+period's net moving to Retained earnings (a loss moves against it
+honestly). The close is recorded on `erp_closes` (the receipt: period,
+net, retained_after, entries, the lines themselves) and the book LOCKS -
+an unbalanced book, an empty book and a second close are all loud 409s.
+The balance sheet still ties out afterward: once a real retained earnings
+account exists it lives INSIDE equity, so the equation reads assets ==
+liabilities + equity (the pre-close world keeps v117's assets ==
+liabilities + equity + net).
+
+**THE CONSOLE** (`pages/erp/index.vue`): the Ledger tab wears three new
+cards - the CASH FLOW WATERFALL (the sections step from the running
+total, the net bar from zero, emerald/rose by sign), the AGING (both
+sides with bucket chips + open-ref tables, age-days columns, n/a for the
+undated) and the PERIOD CLOSE (lock chip, close receipts with net /
+retained / entries, the Close-the-books button that surfaces the door's
+refusals verbatim).
+
+**TESTS**: tests/test_v118_features.py (5) - the close posts, locks and
+ties (net 800 into retained; the second close 409; income accounts read
+zero; the equation 953 = 153 + 800); the close refuses the honest way
+(unbalanced 409, nothing-to-close 409, a LOSS book closes against
+retained at -300); the aging buckets (300 current / 700 90+ /
+153 d31-60 / 50 undated; paying INV-A in full removes it); the cash flow
+sections (operating 647 = 1000 - 200 - 153, investing -400, financing
++2000, net 2247 = the cash balance); the pin. A single-pass cash-flow
+reader bug was FOUND by the tests (counterpart rows ahead of the cash
+line were invisible) and fixed with the honest two-pass reader.
+
+**GATES**: pytest 638 passed + 7 deliberate skips (634 -> 638; torch
+2.14.0+cpu restored after the sandbox reset, core deps reinstalled from
+requirements.txt); `bun run build` green (1.96 MB, echarts restored via
+bun install); smoke_v114_erp.py 3/3 + smoke_v115_purchase.py 2/2 on the
+real server. 1.118.0.
